@@ -91,26 +91,25 @@ The Redis URL is read from a mounted secret at runtime (not stored in the config
 
 ### Dispatcher Configuration
 
-The dispatcher (llm-d-async) already supports the Redis sorted-set flow with dispatch budget gating. The request queue is configured via the [JSON queues config file](https://github.com/llm-d/llm-d-async/blob/main/README.md#redis-sorted-set-persisted) (`--redis.ss.queues-config-file`); the result queue is configured via `--redis.ss.result-queue-name`:
+The dispatcher (llm-d-async) already supports the Redis sorted-set flow with dispatch budget gating. It is configured with a single [transport configuration document](https://github.com/llm-d/llm-d-async/blob/main/README.md#transport-configuration), passed via `--transport redis-sortedset` and `--transport-config` (or `--transport-config-file`). The request queue is defined by the `queues` array; the result queue is set via the top-level `result_queue_name`:
 
 ```json
-[
-  {
-    "queue_name": "llm-d-async:requests:optimized-baseline",
-    "igw_base_url": "http://llm-d-inference-gateway-istio:80",
-    "request_path_url": "/v1/completions",
-    "gate_type": "prometheus-budget",
-    "gate_params": {
-      "pool": "optimized-baseline",
-      "max_concurrency": "100",
-      "baseline": "0.05"
+{
+  "result_queue_name": "llm-d-async:results:optimized-baseline",
+  "queues": [
+    {
+      "queue_name": "llm-d-async:requests:optimized-baseline",
+      "igw_base_url": "http://llm-d-inference-gateway-istio:80",
+      "request_path_url": "/v1/completions",
+      "gate_type": "prometheus-budget",
+      "gate_params": {
+        "pool": "optimized-baseline",
+        "max_concurrency": "100",
+        "baseline": "0.05"
+      }
     }
-  }
-]
-```
-
-```
---redis.ss.result-queue-name llm-d-async:results:optimized-baseline
+  ]
+}
 ```
 
 The request queue must match the name derived by the batch-processor's async resolver. The result queue shown here is a fallback; each Batch Processor request carries its replica-specific result destination.
