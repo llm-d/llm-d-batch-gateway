@@ -23,12 +23,15 @@ package postgresql
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
 )
@@ -469,8 +472,23 @@ func (c *pgCore) delete(ctx context.Context, ids []string) (deletedIDs []string,
 	return deletedIDs, nil
 }
 
+// ensureSchema applies the table DDL.
 func (c *pgCore) ensureSchema(ctx context.Context) error {
-	_, err := c.pool.Exec(ctx, c.desc.Schema())
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err = c.pool.Exec(ctx, c.desc.Schema()); err == nil {
+			return nil
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 100 * time.Millisecond):
+		}
+	}
 	return err
 }
 
