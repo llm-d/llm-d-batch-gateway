@@ -1,0 +1,16 @@
+# Ratchet manifest for the consistency simulation harness.
+# See docs/design/consistency-harness.md.
+#
+# broken  the bug exists; the scenario must reproduce its invariant violation
+# fixed   the bug is fixed; any violation is a regression and fails CI
+#
+# Promote broken -> fixed as rearchitecture phases land. Demoting fixed ->
+# broken is a reviewable change that requires justification in the PR.
+scenarios:
+  F1a_create_crash_before_enqueue: broken
+  F3_terminal_overwrite: broken
+  F4a_worker_crash_strands_job: broken
+  F2a_cancel_reverted: broken
+  F2b_cancel_event_lost: broken
+  F5_orphaned_blob: broken
+  F6_finalization_strand: broken

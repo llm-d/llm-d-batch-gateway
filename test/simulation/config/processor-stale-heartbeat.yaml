@@ -1,0 +1,45 @@
+# Simulation harness processor config with compressed intervals.
+# See docs/design/consistency-harness.md.
+task_wait_time: "500ms"
+poll_interval: "1s"
+num_workers: 4
+
+concurrency:
+  global: 20
+  per_endpoint: 5
+  recovery: 2
+  aimd:
+    enabled: false
+
+addr: ":9090"
+terminate_on_observability_failure: false
+shutdown_timeout: "10s"
+
+# Heartbeat effectively disabled: the in-flight entry set at dequeue goes
+# stale after the reconciler threshold, simulating sustained Redis heartbeat failure (F3/F4).
+heartbeat_interval: "10m"
+
+work_dir: "/tmp/processor"
+
+global_inference_gateway:
+  url: "http://vcr:8000"
+  request_timeout: "2m"
+  max_retries: 1
+  initial_backoff: "1s"
+  max_backoff: "5s"
+
+default_output_expiration_seconds: 3600
+progress_ttl_seconds: 600
+
+db_client:
+  type: "postgresql"
+
+file_client:
+  type: "s3"
+  s3:
+    region: "us-east-1"
+    bucket: "batch-gateway"
+    endpoint: "http://minio:9000"
+    access_key_id: "sim-access-key"
+    use_path_style: true
+    auto_create_bucket: true

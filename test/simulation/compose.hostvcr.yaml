@@ -1,0 +1,15 @@
+# Host-vcr override: replaces the vcr container with a socat forwarder to a
+# vllm-rs frontend + vllm-vcr engine pair running on the host (started by the
+# harness). Used when the vllm-vcr container image is not available locally;
+# the containerized topology stays the default.
+services:
+  vcr:
+    image: alpine/socat
+    command: ["TCP-LISTEN:8000,fork,reuseaddr", "TCP:host.docker.internal:18000"]
+    volumes: []
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z host.docker.internal 18000"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 5s

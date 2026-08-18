@@ -1,0 +1,26 @@
+# Simulation harness gc config: reconciler compressed to 5s so orphan
+# detection happens within test timeouts. The 5s interval is also the
+# in-flight staleness threshold. See docs/design/consistency-harness.md.
+dry_run: false
+metrics_addr: ":9091"
+
+collector:
+  interval: 1h
+  max_concurrency: 4
+
+reconciler:
+  enabled: true
+  interval: 5s
+
+db_client:
+  type: "postgresql"
+
+file_client:
+  type: "s3"
+  s3:
+    region: "us-east-1"
+    bucket: "batch-gateway"
+    endpoint: "http://minio:9000"
+    access_key_id: "sim-access-key"
+    use_path_style: true
+    auto_create_bucket: true

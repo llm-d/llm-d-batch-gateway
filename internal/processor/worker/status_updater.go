@@ -28,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/batch_utils"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 
+	"github.com/llm-d/llm-d-batch-gateway/internal/util/failpoint"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
 )
 
@@ -113,6 +114,10 @@ func (s *StatusUpdater) UpdatePersistentStatus(
 	statusBytes, err := json.Marshal(updated)
 	if err != nil {
 		return err
+	}
+
+	if newStatus.IsTerminal() {
+		failpoint.Inject("processor/before-terminal-write")
 	}
 
 	if err := s.db.DBUpdate(ctx, &db.BatchItem{
