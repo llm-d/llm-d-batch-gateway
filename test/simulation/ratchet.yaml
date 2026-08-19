@@ -17,3 +17,4 @@ scenarios:
   F2b_cancel_event_lost: broken
   F5_orphaned_blob: broken
   F6_finalization_strand: broken
+  A1_async_result_destruction: broken

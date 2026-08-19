@@ -117,7 +117,7 @@ Scenarios apply and remove toxics through the control API on host port 18474
 poison the next. The false-failure scenarios (F1b, F1c) and any scenario
 needing the vcr request-log witness skip on the kind backend.
 
-The witness: the vcr engine logs every request it serves (`--log-requests`),
+The fake vllm engine logs every request it serves (`--log-requests`),
 so duplicate or phantom execution is counted at the one place it cannot be
 hidden. `F4b` asserts requests served ≤ batch line count; `F1b` asserts a
 5xx'd create serves zero.
@@ -146,4 +146,5 @@ Promote entries as rearchitecture phases land. Demoting `fixed` back to
 | `timeline.go` | status observer + transition-graph invariants |
 | `toxics.go` | toxiproxy control + the vcr request-log witness |
 | `ratchet.go`, `ratchet.yaml` | expected-outcome manifest and judge |
-| `scenarios_test.go`, `scenarios_network_test.go` | one test per finding |
+| `asyncbridge.go` | harness-run llm-d-async queue consumer (async scenarios) |
+| `scenarios_test.go`, `scenarios_network_test.go`, `scenarios_async_test.go` | one test per finding |

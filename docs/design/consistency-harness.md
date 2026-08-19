@@ -196,18 +196,21 @@ gateway images; inference needs the slim vcr image or the release binaries).
 Gate merges on the ratchet: `fixed` scenarios must pass, `broken` scenarios
 must still reproduce.
 
-**Async dispatch mode (llm-d-async).** The review and every scenario so far
-cover sync dispatch only. Async mode adds a distributed state surface of its
-own: requests submitted fire-and-forget to the llm-d-async request queue with
-an in-memory `PendingRequests` map as the only record, results fanned out by
-long-lived per-pool `ResultBroadcaster`s shared across jobs. Crash windows to
-scenario-ize: processor dies after submitting requests (pending map gone,
-results arrive with no subscriber — where do they go, and does a re-run
-double-submit?), broadcaster restart losing queued results, and duplicate
-submission on retry. The harness needs an async topology variant (llm-d-async
-queues in compose, `dispatch_mode: async` processor config) before the
-rearchitecture can claim to cover both modes; the single-store design must
-also answer how the pending set becomes durable in async mode.
+**Async dispatch mode (llm-d-async).** Async mode adds a distributed state
+surface of its own: requests submitted fire-and-forget to the llm-d-async
+request queue with an in-memory `PendingRequests` map as the only record,
+results popped destructively from a shared per-pool result queue by
+long-lived `ResultBroadcaster`s. The async queues are plain Redis structures
+on the stack's existing Redis, so the topology is a processor config
+(`processor-async.yaml`) plus a harness-run queue consumer
+(`asyncbridge.go`) that plays the worker fleet: pop request, forward to vcr,
+push result. Implemented and reproducing: A1_async_result_destruction —
+processor killed after submission, pending map gone, replacement's
+broadcasters pop and discard every returning result, reconciler terminalizes
+the orphan as failed. Remaining async scenarios: broadcaster restart losing
+queued results, duplicate submission on re-run, multi-replica destruction
+(`kubectl scale` on the kind backend). The single-store design must answer
+how the pending set becomes durable in async mode.
 
 **Then the rearchitecture** (see the consistency review): CAS everywhere,
 Postgres queue with leases, cancel via status + LISTEN/NOTIFY, blob

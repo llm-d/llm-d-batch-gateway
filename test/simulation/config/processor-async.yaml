@@ -1,0 +1,50 @@
+# Simulation harness processor config for async dispatch (llm-d-async over
+# the stack redis). The harness runs the queue consumer; see asyncbridge.go.
+# See docs/design/consistency-harness.md.
+task_wait_time: "500ms"
+poll_interval: "1s"
+num_workers: 4
+
+concurrency:
+  global: 20
+  per_endpoint: 5
+  recovery: 2
+  aimd:
+    enabled: false
+
+addr: ":9090"
+terminate_on_observability_failure: false
+shutdown_timeout: "10s"
+
+# Refreshed every second so the reconciler (5s staleness threshold) never
+# mistakes a live job for an orphan under normal operation.
+heartbeat_interval: "1s"
+
+work_dir: "/tmp/processor"
+
+dispatch_mode: "async"
+async_dispatch:
+  result_poll_timeout: "2s"
+  models:
+    "Qwen/Qwen2.5-0.5B-Instruct":
+      inference_pool_name: "sim-pool"
+
+default_output_expiration_seconds: 3600
+progress_ttl_seconds: 600
+
+db_client:
+  type: "postgresql"
+
+file_client:
+  type: "s3"
+  s3:
+    region: "us-east-1"
+    bucket: "batch-gateway"
+    endpoint: "http://toxiproxy:39000"
+    access_key_id: "sim-access-key"
+    use_path_style: true
+    auto_create_bucket: true
+
+otel:
+  redis_tracing: true
+  postgresql_tracing: true
