@@ -1,13 +1,8 @@
 # Consistency Simulation Harness
 
-- **Revision**: 1
-- **Status**: Proposal
-
----
-
 ## Problem
 
-The consistency review (2026-08-18) identified seven classes of cross-store crash windows (F1 through F7) arising from non-atomic write sequences across Redis, Postgres, S3, and local disk. Before rearchitecting, we need an executable proof that these bugs exist today, and a regression gate that prevents them from returning once fixed.
+Previous human and AI-assisted consistency review (2026-08-18) identified seven classes of cross-store crash windows (F1 through F7) arising from non-atomic write sequences across Redis, Postgres, S3, and local disk. Before rearchitecting, we need an executable proof that these bugs exist today, and a regression gate that prevents them from returning once fixed.
 
 These windows come from the topology itself: three stores, no cross-store
 transactions. That was a reasonable choice for the first version, and any
@@ -16,13 +11,13 @@ reproducible so the rearchitecture can fix them one at a time; the ratchet
 tracks which are fixed. A finding that is already a known, accepted
 limitation should be marked as such during review.
 
-The existing test tiers cannot do this. Unit and integration tests run against in-memory mocks, so there are no cross-store windows to hit. E2E tests run the happy path against a Kind cluster with no fault injection and no way to stop a process at a specific instruction.
+Existing test tiers run against in-memory mocks, so there are no cross-store interaction test. The current E2E tests run the happy path against a Kind cluster with no fault injection.
 
 ## Goals
 
-1. Deterministically reproduce each finding from the review as a named, runnable scenario.
-2. Check global invariants against the real stores, not against what any one component believes.
-3. Act as a ratchet: each scenario is tracked as `broken` or `fixed`; the fixed set only grows.
+1. Deterministically reproduce each finding from the initial reviews as a named, runnable scenario.
+2. Check global invariants against the real stores
+3. Act as a ratchet: each scenario is tracked as `broken` or `fixed`
 4. Exercise realistic inference timing without GPUs, via vllm-vcr.
 
 Non-goals: performance benchmarking, Kubernetes-level chaos (node eviction is modeled as SIGKILL of a container).
@@ -44,9 +39,9 @@ One compose file (`test/simulation/compose.yaml`) running real components agains
   vllm frontend ──► vllm-vcr play            (simulated engine-core)
 ```
 
-- **Stores**: postgres, redis, minio. Real images, fresh volumes per run.
+- **Stores**: postgres, redis, minio.
 - **Gateway binaries**: built with `-tags failpoints` (see below). All store connections routed through toxiproxy so the runner can inject network faults per component per store.
-- **Inference**: a vLLM frontend container with `vllm-vcr play` as its engine-core. The latency model is configured so each request takes 2 to 5 seconds, holding jobs in `in_progress` long enough to kill processes mid-execution deterministically. No model weights, no GPU.
+- **Inference**: a vLLM frontend container with `vllm-vcr play` as its engine-core. The latency model is configured so each request takes 2 to 5 seconds, holding jobs in `in_progress` long enough to kill processes mid-execution deterministically. This requires no GPUs to run.
 - **Time compression**: config overrides only, no code changes. Reconciler interval 5s, collector interval 5s, heartbeat 1s, poll interval 500ms, completion windows of tens of seconds.
 
 ## Fault injection
@@ -101,7 +96,7 @@ A `simcheck` package asserted by every scenario, with two modes.
 | API honesty | a create that returned 5xx never produces a batch that runs | F1b, F1c |
 | Single execution | total inference requests observed by vllm-vcr for a batch ≤ line count | F4 |
 
-The last invariant uses vllm-vcr's request log as a witness: the simulated backend counts every request it serves, so duplicate execution is measured at the only place it cannot be hidden.
+The last invariant uses vllm-vcr's request log as a witness: the simulated backend counts every request it serves.
 
 ## Scenarios
 
@@ -133,7 +128,6 @@ Semantics enforced in CI:
 - A `broken` scenario that passes cleanly fails CI with "promote to fixed", so the manifest tracks reality.
 - Flipping `fixed` back to `broken` is a reviewable diff, never a silent change.
 
-The rearchitecture is done when the manifest is all `fixed` and chaos mode runs clean for a configured budget.
 
 ## Status (2026-08-18)
 
@@ -176,14 +170,6 @@ Harness-side hardening: short-timeout observer polls (a killed apiserver's
 dead port proxy would otherwise hang a poll through the interesting window).
 
 ## Follow-up plan
-
-**PR 3 — chaos mode.** Seeded random SIGKILL and partition schedules over a
-stream of batches, then the full invariant sweep; failures replay from the
-seed. New windows it finds get promoted to named scenarios. Also worth a
-named scenario from this session's accidents: a version-mismatched inference
-backend makes every request fail instantly with 500s and batches "complete"
-full of error bodies — completion should be distinguishable from
-all-requests-failed.
 
 **Fidelity: the kind backend.** The harness supports two stack backends
 (`SIM_BACKEND`): the default compose topology, and a dev-deploy'd Kind
