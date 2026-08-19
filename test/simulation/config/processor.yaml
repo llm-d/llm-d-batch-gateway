@@ -43,3 +43,7 @@ file_client:
     access_key_id: "sim-access-key"
     use_path_style: true
     auto_create_bucket: true
+
+otel:
+  redis_tracing: true
+  postgresql_tracing: true

@@ -33,3 +33,7 @@ file_api:
   default_expiration_seconds: 86400
   max_size_bytes: 209715200
   max_line_count: 50000
+
+otel:
+  redis_tracing: true
+  postgresql_tracing: true
