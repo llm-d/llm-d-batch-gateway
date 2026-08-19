@@ -7,6 +7,9 @@ Real Postgres, Redis, and MinIO; real gateway binaries built with the
 [vllm-vcr](https://github.com/neuralmagic/vllm-vcr) (real vLLM Rust frontend,
 simulated engine-core, no GPU).
 
+The findings are properties of the current three-store topology, not
+regressions. Each is pinned `broken` until a fix flips it to `fixed`.
+
 ## Topology
 
 ```mermaid

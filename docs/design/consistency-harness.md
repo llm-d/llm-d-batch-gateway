@@ -9,6 +9,13 @@
 
 The consistency review (2026-08-18) identified seven classes of cross-store crash windows (F1 through F7) arising from non-atomic write sequences across Redis, Postgres, S3, and local disk. Before rearchitecting, we need an executable proof that these bugs exist today, and a regression gate that prevents them from returning once fixed.
 
+These windows come from the topology itself: three stores, no cross-store
+transactions. That was a reasonable choice for the first version, and any
+system built this way has the same windows. The harness makes each one
+reproducible so the rearchitecture can fix them one at a time; the ratchet
+tracks which are fixed. A finding that is already a known, accepted
+limitation should be marked as such during review.
+
 The existing test tiers cannot do this. Unit and integration tests run against in-memory mocks, so there are no cross-store windows to hit. E2E tests run the happy path against a Kind cluster with no fault injection and no way to stop a process at a specific instruction.
 
 ## Goals
@@ -62,7 +69,7 @@ A small in-repo package (`internal/util/failpoint`) instruments the identified w
 
 The armed action is `panic` or `os.Exit(137)`, simulating OOM kill at that instruction. Sleep actions are also available to hold a window open while another actor races.
 
-### Toxiproxy (the network lies)
+### Toxiproxy (false failures)
 
 Failpoints cannot produce false failures, where an operation lands server-side but the client sees an error. Toxiproxy can, by cutting the response path after the request is delivered:
 
