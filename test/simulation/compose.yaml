@@ -108,7 +108,7 @@ services:
       FAILPOINTS: ${APISERVER_FAILPOINTS:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
       OTEL_EXPORTER_OTLP_INSECURE: "true"
-      OTEL_BSP_SCHEDULE_DELAY: "200"
+      OTEL_SYNC_SPAN_EXPORT: "true"
       OTEL_SERVICE_NAME: batch-apiserver
     volumes:
       - ./config/apiserver.yaml:/etc/batch-gateway/config.yaml:ro
@@ -130,7 +130,7 @@ services:
       FAILPOINTS: ${PROCESSOR_FAILPOINTS:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
       OTEL_EXPORTER_OTLP_INSECURE: "true"
-      OTEL_BSP_SCHEDULE_DELAY: "200"
+      OTEL_SYNC_SPAN_EXPORT: "true"
       OTEL_SERVICE_NAME: batch-processor
     volumes:
       - ./config/${PROCESSOR_CONFIG:-processor.yaml}:/etc/batch-gateway/config.yaml:ro
@@ -154,7 +154,7 @@ services:
       FAILPOINTS: ${GC_FAILPOINTS:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
       OTEL_EXPORTER_OTLP_INSECURE: "true"
-      OTEL_BSP_SCHEDULE_DELAY: "200"
+      OTEL_SYNC_SPAN_EXPORT: "true"
       OTEL_SERVICE_NAME: batch-gc
     volumes:
       - ./config/gc.yaml:/etc/batch-gateway/config.yaml:ro

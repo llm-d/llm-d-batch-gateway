@@ -198,6 +198,7 @@ func TestF4bDuplicateExecution(t *testing.T) {
 		}
 		time.Sleep(2 * time.Second)
 	}
+	h.rec.event("witness", map[string]any{"served": served, "lines": lines})
 	time.Sleep(1 * time.Second)
 	cancelObs()
 

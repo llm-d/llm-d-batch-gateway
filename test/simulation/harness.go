@@ -84,6 +84,7 @@ func (h *harness) restart(service string) {
 	if service == "apiserver" {
 		h.waitAPIReady()
 	}
+	h.rec.event("service-ready", map[string]any{"service": service})
 }
 
 func (h *harness) stop(service string) {
