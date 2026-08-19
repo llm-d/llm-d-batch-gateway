@@ -260,6 +260,11 @@ func (b *kindBackend) kubectl(args ...string) (string, error) {
 	return string(out), nil
 }
 
+// The kind backend has no toxiproxy on the store paths and its inference
+// layer (vllm-sim) keeps no request log; scenarios needing either skip.
+func (b *kindBackend) toxiproxyAddr() (string, bool)  { return "", false }
+func (b *kindBackend) inferenceRequests() (int, bool) { return 0, false }
+
 func (b *kindBackend) dumpLogs() string {
 	var sb strings.Builder
 	for _, dep := range kindDeployments {

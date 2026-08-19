@@ -42,6 +42,7 @@ type composeBackend struct {
 	files      []string
 	env        map[string]string
 	hostVCR    []*exec.Cmd
+	engineLog  string
 }
 
 var _ stackBackend = (*composeBackend)(nil)
@@ -93,6 +94,30 @@ func (b *composeBackend) stop(service string) {
 func (b *composeBackend) kill(service string) {
 	b.t.Helper()
 	b.compose("kill", "-s", "SIGKILL", service)
+}
+
+func (b *composeBackend) toxiproxyAddr() (string, bool) { return "http://127.0.0.1:18474", true }
+
+// vcrRequestLogLine marks one request reaching the simulated engine
+// (vllm-vcr --log-requests, on in both the container entrypoint and the
+// host-vcr fallback).
+const vcrRequestLogLine = "mock request started"
+
+func (b *composeBackend) inferenceRequests() (int, bool) {
+	if len(b.hostVCR) > 0 {
+		data, err := os.ReadFile(b.engineLog)
+		if err != nil {
+			b.t.Logf("read host-vcr engine log: %v", err)
+			return 0, false
+		}
+		return strings.Count(string(data), vcrRequestLogLine), true
+	}
+	out, err := b.composeArgs("logs", "--no-color", "vcr").CombinedOutput()
+	if err != nil {
+		b.t.Logf("read vcr container logs: %v", err)
+		return 0, false
+	}
+	return strings.Count(string(out), vcrRequestLogLine), true
 }
 
 func (b *composeBackend) dumpLogs() string {
@@ -194,6 +219,7 @@ func (b *composeBackend) startHostVCR() {
 		"--time-to-first-token", envOr("SIM_TTFT_MS", "200"),
 		"--inter-token-latency", envOr("SIM_ITL_MS", "30"),
 	)
+	b.engineLog = filepath.Join(logDir, "engine.log")
 	for name, cmd := range map[string]*exec.Cmd{"frontend": frontend, "engine": engine} {
 		logFile, err := os.Create(filepath.Join(logDir, name+".log"))
 		if err != nil {

@@ -39,7 +39,7 @@ file_client:
   s3:
     region: "us-east-1"
     bucket: "batch-gateway"
-    endpoint: "http://minio:9000"
+    endpoint: "http://toxiproxy:39000"
     access_key_id: "sim-access-key"
     use_path_style: true
     auto_create_bucket: true

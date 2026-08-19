@@ -68,9 +68,9 @@ Failpoints cannot produce false failures, where an operation lands server-side b
 
 - F1b: PQEnqueue succeeds in Redis, client sees timeout, compensating DBDelete runs.
 - F1c: enqueue fails and the compensating DBDelete also fails (full partition).
-- F4: InFlightSet and heartbeats fail while the processor keeps running, making a live worker invisible to the reconciler.
+- F4: the window between PQDequeue and InFlightSet leaves a dequeued job invisible; the reconciler re-enqueues it and the job runs twice.
 
-Toxics are applied and removed by the runner per scenario, keyed by component-store pair.
+Every component-store connection is routed through toxiproxy on its own proxy (`config/toxiproxy.json`, nine proxies), so a toxic partitions exactly one edge: apiserver↔redis can lie while processor↔redis stays healthy. Toxics are applied and removed by the runner per scenario through the control API; harness cleanup heals all proxies. Compose only; network-fault scenarios skip on the kind backend.
 
 ## Invariant checker
 
@@ -144,6 +144,17 @@ ratchet manifest, and seven scenarios that each reproduce their finding:
 | F4a_worker_crash_strands_job | work conservation | SIGKILL + pod replacement |
 | F5_orphaned_blob | blob referential | crash between S3 Store and file record |
 | F6_finalization_strand | results reachability | crash between file records and completed write |
+| F1b_enqueue_false_failure | API honesty | enqueue lands, response blackholed; compensation deletes the row under a running job |
+| F1c_create_compensation_partition | API honesty | partition after DBStore; enqueue and compensating delete both fail |
+| F4b_duplicate_execution | single execution | dequeue held past staleness; reconciler re-enqueues; both copies run |
+
+The last three (PR 2) need the network to lie: store connections run through
+per-component toxiproxy proxies, and vllm-vcr's request log is the witness
+(the engine counts every request it serves, so phantom and duplicate
+execution are measured where they cannot be hidden). F4b found that the
+dequeue-time runnable gate accepts `in_progress`, so a re-enqueued duplicate
+launches as long as the first execution is still running; and that requests
+already sent keep executing after the losing worker's heartbeat abort.
 
 Incidental fixes landed while building, each upstreamable as its own PR
 independent of the harness:
@@ -158,14 +169,6 @@ Harness-side hardening: short-timeout observer polls (a killed apiserver's
 dead port proxy would otherwise hang a poll through the interesting window).
 
 ## Follow-up plan
-
-**PR 2 — false failures (toxiproxy).** The remaining review findings need the
-network to lie, not the process to die: F1b (PQEnqueue lands, client sees
-timeout, compensation deletes the row), F1c (compensation itself fails), and
-the F4 double-execution race (InFlightSet and heartbeats fail while the
-worker lives; two processors on one job). Route store connections through
-toxiproxy in the compose file; add the single-execution invariant using
-vllm-vcr's request log as the witness (`--log-requests`).
 
 **PR 3 — chaos mode.** Seeded random SIGKILL and partition schedules over a
 stream of batches, then the full invariant sweep; failures replay from the

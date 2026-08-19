@@ -46,6 +46,13 @@ type stackBackend interface {
 	// harvest saves the scenario window's traces under dir.
 	harvest(dir string, start time.Time)
 	dumpLogs() string
+	// toxiproxyAddr returns the toxiproxy control API address, or ok=false
+	// when the backend has no network fault injection (kind).
+	toxiproxyAddr() (addr string, ok bool)
+	// inferenceRequests counts requests the simulated engine has served this
+	// scenario, from vcr's request log. The witness for the single-execution
+	// and API-honesty invariants. ok=false when the backend has no witness.
+	inferenceRequests() (n int, ok bool)
 }
 
 // simParams are backend timing characteristics scenarios must scale to.

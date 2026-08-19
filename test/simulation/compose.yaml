@@ -66,6 +66,29 @@ services:
       retries: 90
       start_period: 30s
 
+  # Every gateway-component store connection is routed through toxiproxy on a
+  # per-component-per-store proxy (config/toxiproxy.json), so the runner can
+  # partition e.g. only apiserver<->redis. The control API is on host :18474.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    command: ["-host=0.0.0.0", "-config=/etc/toxiproxy.json"]
+    volumes:
+      - ./config/toxiproxy.json:/etc/toxiproxy.json:ro
+    ports:
+      - "18474:8474"
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
   tempo:
     image: grafana/tempo:2.7.2
     command: ["-config.file=/etc/tempo.yaml"]
@@ -89,15 +112,11 @@ services:
       OTEL_SERVICE_NAME: batch-apiserver
     volumes:
       - ./config/apiserver.yaml:/etc/batch-gateway/config.yaml:ro
-      - ./secrets:/etc/.secrets:ro
+      - ./secrets/apiserver:/etc/.secrets:ro
     ports:
       - "18080:8000"
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
+      toxiproxy:
         condition: service_healthy
 
   processor:
@@ -115,15 +134,11 @@ services:
       OTEL_SERVICE_NAME: batch-processor
     volumes:
       - ./config/${PROCESSOR_CONFIG:-processor.yaml}:/etc/batch-gateway/config.yaml:ro
-      - ./secrets:/etc/.secrets:ro
+      - ./secrets/processor:/etc/.secrets:ro
     tmpfs:
       - /tmp
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
+      toxiproxy:
         condition: service_healthy
       vcr:
         condition: service_healthy
@@ -143,13 +158,9 @@ services:
       OTEL_SERVICE_NAME: batch-gc
     volumes:
       - ./config/gc.yaml:/etc/batch-gateway/config.yaml:ro
-      - ./secrets:/etc/.secrets:ro
+      - ./secrets/gc:/etc/.secrets:ro
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
+      toxiproxy:
         condition: service_healthy
 
 volumes:

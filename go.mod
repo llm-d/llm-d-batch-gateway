@@ -3,6 +3,7 @@ module github.com/llm-d/llm-d-batch-gateway
 go 1.26.0
 
 require (
+	github.com/Shopify/toxiproxy/v2 v2.12.0
 	github.com/alicebob/miniredis/v2 v2.39.0
 	github.com/aws/aws-sdk-go-v2 v1.47.0
 	github.com/aws/aws-sdk-go-v2/config v1.33.4

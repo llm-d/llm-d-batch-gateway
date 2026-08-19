@@ -8,6 +8,9 @@
 # broken is a reviewable change that requires justification in the PR.
 scenarios:
   F1a_create_crash_before_enqueue: broken
+  F1b_enqueue_false_failure: broken
+  F1c_create_compensation_partition: broken
+  F4b_duplicate_execution: broken
   F3_terminal_overwrite: broken
   F4a_worker_crash_strands_job: broken
   F2a_cancel_reverted: broken

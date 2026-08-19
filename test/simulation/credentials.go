@@ -54,21 +54,29 @@ func randomToken(t *testing.T) string {
 	return hex.EncodeToString(b[:])
 }
 
-// writeSecretFiles renders the /etc/.secrets mount shared by the gateway
-// components under dir.
+// writeSecretFiles renders each component's /etc/.secrets mount under dir,
+// with connection URLs routed through that component's toxiproxy listeners.
 func (c *simCredentials) writeSecretFiles(t *testing.T, dir string) {
 	t.Helper()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("create secrets dir: %v", err)
+	ports := map[string]struct{ pg, redis int }{
+		"apiserver": {25432, 26379},
+		"processor": {35432, 36379},
+		"gc":        {45432, 46379},
 	}
-	files := map[string]string{
-		"postgresql-url":       fmt.Sprintf("postgres://sim:%s@postgres:5432/batchgw?sslmode=disable", c.pgPassword),
-		"redis-url":            "redis://redis:6379/0",
-		"s3-secret-access-key": c.s3SecretKey,
-	}
-	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content+"\n"), 0o600); err != nil {
-			t.Fatalf("write secret %s: %v", name, err)
+	for component, p := range ports {
+		root := filepath.Join(dir, component)
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatalf("create secrets dir: %v", err)
+		}
+		files := map[string]string{
+			"postgresql-url":       fmt.Sprintf("postgres://sim:%s@toxiproxy:%d/batchgw?sslmode=disable", c.pgPassword, p.pg),
+			"redis-url":            fmt.Sprintf("redis://toxiproxy:%d/0", p.redis),
+			"s3-secret-access-key": c.s3SecretKey,
+		}
+		for name, content := range files {
+			if err := os.WriteFile(filepath.Join(root, name), []byte(content+"\n"), 0o600); err != nil {
+				t.Fatalf("write secret %s/%s: %v", component, name, err)
+			}
 		}
 	}
 }
