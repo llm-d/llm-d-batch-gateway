@@ -3,12 +3,12 @@ module github.com/llm-d/llm-d-batch-gateway
 go 1.26.0
 
 require (
-	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/alicebob/miniredis/v2 v2.39.0
 	github.com/aws/aws-sdk-go-v2 v1.45.1
-	github.com/aws/aws-sdk-go-v2/config v1.33.1
-	github.com/aws/aws-sdk-go-v2/credentials v1.20.1
-	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.23.1
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.109.1
+	github.com/aws/aws-sdk-go-v2/config v1.33.2
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.2
+	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.23.2
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.110.0
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/exaring/otelpgx v0.11.1
 	github.com/go-resty/resty/v2 v2.17.2
@@ -24,7 +24,7 @@ require (
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.46.0
-	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.45.0
+	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0
 	golang.org/x/sync v0.22.0
@@ -60,16 +60,16 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.11.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.1 // indirect
-	github.com/aws/aws-sdk-go-v2/service/signin v1.7.1 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sso v1.35.1 // indirect
-	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.40.1 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.47.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/signin v1.8.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.36.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.41.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.48.0 // indirect
 	github.com/aws/smithy-go v1.28.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-logr/logr v1.4.4
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/prometheus/client_model v0.6.2
+	github.com/prometheus/client_model v0.6.3
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
