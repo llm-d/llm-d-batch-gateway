@@ -243,3 +243,32 @@ GC image string
 {{- printf "%s:%s" .Values.gc.image.repository $tag }}
 {{- end -}}
 {{- end }}
+
+{{/* ========== Schema Migration Helper ========== */}}
+
+{{/*
+initContainer that runs the binary's `migrate` subcommand before the main
+container starts. Only rendered for the postgresql backend. Concurrent runs
+across pods serialize inside PostgreSQL, so every replica can carry it.
+Usage: {{ include "batch-gateway.migrateInitContainer" (dict "root" . "component" .Values.apiserver "image" (include "batch-gateway.apiserver.image" .)) }}
+*/}}
+{{- define "batch-gateway.migrateInitContainer" -}}
+{{- if eq .root.Values.global.dbClient.type "postgresql" }}
+initContainers:
+- name: migrate
+  securityContext:
+    {{- toYaml .component.securityContext | nindent 4 }}
+  image: {{ .image }}
+  imagePullPolicy: {{ .component.image.pullPolicy }}
+  args:
+  - migrate
+  resources:
+    {{- toYaml .component.resources | nindent 4 }}
+  {{- if .root.Values.global.secretName }}
+  volumeMounts:
+  - name: secrets
+    mountPath: /etc/.secrets
+    readOnly: true
+  {{- end }}
+{{- end }}
+{{- end }}

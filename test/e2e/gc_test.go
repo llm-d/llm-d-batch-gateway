@@ -47,6 +47,16 @@ func expireInDB(t *testing.T, table, id string) {
 func expireInPostgresql(t *testing.T, table, id string) {
 	t.Helper()
 
+	sql := fmt.Sprintf("UPDATE %s SET expiry = 1 WHERE id = '%s'", table, id)
+	out := psqlExec(t, testDBName, sql)
+	t.Logf("expired %s/%s in PostgreSQL: %s", table, id, out)
+}
+
+// psqlExec runs sql against database db through psql in the PostgreSQL pod
+// and returns the trimmed output.
+func psqlExec(t *testing.T, db, sql string) string {
+	t.Helper()
+
 	podName := testDBPod
 	if podName == "" {
 		podName = fmt.Sprintf("%s-0", testPostgresqlRelease)
@@ -57,10 +67,9 @@ func expireInPostgresql(t *testing.T, table, id string) {
 		ns = testNamespace
 	}
 
-	sql := fmt.Sprintf("UPDATE %s SET expiry = 1 WHERE id = '%s'", table, id)
 	cmd := fmt.Sprintf(
-		`PGPASSWORD="${POSTGRESQL_PASSWORD:-$(cat "$POSTGRES_PASSWORD_FILE" 2>/dev/null)}" psql -U '%s' -d '%s' -c %q`,
-		testDBUser, testDBName, sql,
+		`PGPASSWORD="${POSTGRESQL_PASSWORD:-$(cat "$POSTGRES_PASSWORD_FILE" 2>/dev/null)}" psql -U '%s' -d '%s' -tA -c %q`,
+		testDBUser, db, sql,
 	)
 	out, err := exec.Command("kubectl", "exec",
 		podName,
@@ -70,7 +79,7 @@ func expireInPostgresql(t *testing.T, table, id string) {
 	if err != nil {
 		t.Fatalf("kubectl exec psql failed: %v\n%s", err, out)
 	}
-	t.Logf("expired %s/%s in PostgreSQL: %s", table, id, strings.TrimSpace(string(out)))
+	return strings.TrimSpace(string(out))
 }
 
 func expireInRedis(t *testing.T, table, id string) {

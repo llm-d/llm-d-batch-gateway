@@ -36,6 +36,9 @@ spec:
         {{- else }}
         {{- toYaml .Values.global.podSecurityContext | nindent 8 }}
         {{- end }}
+      {{- with include "batch-gateway.migrateInitContainer" (dict "root" . "component" .Values.apiserver "image" (include "batch-gateway.apiserver.image" .)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       containers:
       - name: apiserver
         securityContext:

@@ -28,6 +28,9 @@ spec:
         {{- else }}
         {{- toYaml .Values.global.podSecurityContext | nindent 8 }}
         {{- end }}
+      {{- with include "batch-gateway.migrateInitContainer" (dict "root" . "component" .Values.gc "image" (include "batch-gateway.gc.image" .)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       containers:
       - name: gc
         securityContext:

@@ -18,7 +18,6 @@ package postgresql
 
 import (
 	"context"
-	_ "embed"
 	"fmt"
 	"strings"
 
@@ -27,9 +26,6 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 )
-
-//go:embed batch_schema.sql
-var batchSchemaSql string
 
 // nonTerminalCondition is the SQL WHERE clause fragment that filters for
 // non-terminal batch statuses. Computed once since terminal statuses are fixed.
@@ -51,7 +47,6 @@ var _ TableDescriptor = (*batchDescriptor)(nil)
 type batchDescriptor struct{}
 
 func (batchDescriptor) TableName() string      { return "batch_items" }
-func (batchDescriptor) Schema() string         { return batchSchemaSql }
 func (batchDescriptor) ExtraColumns() []string { return nil }
 
 // PostgresBatchDBClient implements api.BatchDBClient using PostgreSQL.

@@ -36,6 +36,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/llm-d/llm-d-batch-gateway/internal/database/postgresql/migrate"
 	"github.com/llm-d/llm-d-batch-gateway/internal/gc/collector"
 	gcconfig "github.com/llm-d/llm-d-batch-gateway/internal/gc/config"
 	gcmetrics "github.com/llm-d/llm-d-batch-gateway/internal/gc/metrics"
@@ -58,6 +59,10 @@ func run() error {
 	hostname, _ := os.Hostname()
 	logger := klog.NewKlogr().WithValues("hostname", hostname, "service", "batch-gc")
 	ctx := logr.NewContext(context.Background(), logger)
+
+	if len(os.Args) > 1 && os.Args[1] == migrate.Subcommand {
+		return migrate.RunCommand(ctx, os.Args[2:])
+	}
 
 	flagSet := flag.NewFlagSet("batch-gc", flag.ExitOnError)
 	configFile := flagSet.String("config", "./config.yaml", "path to YAML config file")

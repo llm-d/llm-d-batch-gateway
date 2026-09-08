@@ -135,6 +135,7 @@ func TestE2E(t *testing.T) {
 	t.Run("Concurrent", testConcurrent)
 	t.Run("MultiTenant", testMultiTenant)
 	t.Run("GarbageCollection", testGarbageCollection)
+	t.Run("SchemaMigrations", testSchemaMigrations)
 	t.Run("Observability", testObservability)
 	skipIf(t, testDispatcherDeployed, "requires sync processor", "ProcessorGracefulShutdown", testProcessorGracefulShutdown)
 	skipIf(t, testDispatcherDeployed, "requires sync processor", "OrphanRecovery", testOrphanRecovery)

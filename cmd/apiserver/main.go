@@ -20,12 +20,14 @@ package main
 
 import (
 	"context"
+	"os"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-batch-gateway/internal/apiserver/common"
 	"github.com/llm-d/llm-d-batch-gateway/internal/apiserver/metrics"
 	"github.com/llm-d/llm-d-batch-gateway/internal/apiserver/server"
+	"github.com/llm-d/llm-d-batch-gateway/internal/database/postgresql/migrate"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/interrupt"
 	uotel "github.com/llm-d/llm-d-batch-gateway/internal/util/otel"
 	"k8s.io/klog/v2"
@@ -42,6 +44,10 @@ func main() {
 func run() error {
 	logger := klog.NewKlogr()
 	ctx := logr.NewContext(context.Background(), logger)
+
+	if len(os.Args) > 1 && os.Args[1] == migrate.Subcommand {
+		return migrate.RunCommand(ctx, os.Args[2:])
+	}
 
 	config := common.NewConfig()
 	if err := config.Load(); err != nil {

@@ -104,6 +104,11 @@ $ helm install batch-gateway ./charts/batch-gateway \
 
 ## 5. Verify Deployment
 
+The PostgreSQL schema is created by a `migrate` initContainer on each pod; see
+[Database Schema Migrations](database-migrations.md) for how it works and how
+to add a migration.
+
+
 ```bash
 # Pods
 $ kubectl get pods -l app.kubernetes.io/name=batch-gateway-apiserver

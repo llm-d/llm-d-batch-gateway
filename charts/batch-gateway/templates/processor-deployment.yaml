@@ -35,6 +35,9 @@ spec:
         {{- else }}
         {{- toYaml .Values.global.podSecurityContext | nindent 8 }}
         {{- end }}
+      {{- with include "batch-gateway.migrateInitContainer" (dict "root" . "component" .Values.processor "image" (include "batch-gateway.processor.image" .)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       containers:
       - name: processor
         securityContext:

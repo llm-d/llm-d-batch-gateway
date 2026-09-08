@@ -31,6 +31,7 @@ import (
 	"github.com/go-logr/logr"
 	"k8s.io/klog/v2"
 
+	"github.com/llm-d/llm-d-batch-gateway/internal/database/postgresql/migrate"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/metrics"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/worker"
@@ -57,6 +58,10 @@ func run() error {
 	}
 	logger := klog.NewKlogr().WithValues("hostname", hostname, "service", "batch-processor")
 	ctx := logr.NewContext(context.Background(), logger)
+
+	if len(os.Args) > 1 && os.Args[1] == migrate.Subcommand {
+		return migrate.RunCommand(ctx, os.Args[2:])
+	}
 
 	cfg := config.NewConfig()
 	fs := flag.NewFlagSet("batch-gateway-processor", flag.ExitOnError)

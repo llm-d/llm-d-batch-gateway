@@ -11,6 +11,19 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
+CREATE TABLE IF NOT EXISTS batch_items (
+    id         TEXT PRIMARY KEY,
+    tenant_id  TEXT NOT NULL,
+    expiry     BIGINT,
+    tags       JSONB,
+    spec       JSONB,
+    status     JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_batch_items_tenant_id ON batch_items(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_batch_items_expiry ON batch_items(expiry) WHERE expiry IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_batch_items_tags ON batch_items USING GIN (tags) WHERE tags IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS file_items (
     id         TEXT PRIMARY KEY,
     tenant_id  TEXT NOT NULL,

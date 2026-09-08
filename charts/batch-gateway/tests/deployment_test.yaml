@@ -376,3 +376,59 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: "apiserver.tls: enabled but neither secretName nor certManager is configured"
+
+  # --- Schema migration initContainer ---
+
+  - it: should run migrate as an initContainer on every component with postgresql
+    templates:
+      - templates/apiserver-deployment.yaml
+      - templates/processor-deployment.yaml
+      - templates/gc-deployment.yaml
+    set:
+      global.secretName: "app-secret"
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 1
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: migrate
+      - equal:
+          path: spec.template.spec.initContainers[0].args
+          value: ["migrate"]
+      - equal:
+          path: spec.template.spec.initContainers[0].volumeMounts[0].mountPath
+          value: /etc/.secrets
+
+  - it: should give the migrate initContainer the component's own image
+    set:
+      apiserver.image.repository: "example.com/apiserver"
+      apiserver.image.tag: "v1"
+      processor.image.repository: "example.com/processor"
+      processor.image.tag: "v2"
+      gc.image.repository: "example.com/gc"
+      gc.image.tag: "v3"
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: "example.com/apiserver:v1"
+        template: templates/apiserver-deployment.yaml
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: "example.com/processor:v2"
+        template: templates/processor-deployment.yaml
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: "example.com/gc:v3"
+        template: templates/gc-deployment.yaml
+
+  - it: should not render the migrate initContainer for redis
+    templates:
+      - templates/apiserver-deployment.yaml
+      - templates/processor-deployment.yaml
+      - templates/gc-deployment.yaml
+    set:
+      global.dbClient.type: "redis"
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers

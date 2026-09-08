@@ -18,15 +18,11 @@ package postgresql
 
 import (
 	"context"
-	_ "embed"
 	"fmt"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 )
-
-//go:embed file_schema.sql
-var fileSchemaSql string
 
 const (
 	colPurpose = "purpose"
@@ -39,7 +35,6 @@ var _ TableDescriptor = (*fileTableDescriptor)(nil)
 type fileTableDescriptor struct{}
 
 func (fileTableDescriptor) TableName() string      { return "file_items" }
-func (fileTableDescriptor) Schema() string         { return fileSchemaSql }
 func (fileTableDescriptor) ExtraColumns() []string { return []string{colPurpose} }
 
 // PostgresFileDBClient implements api.FileDBClient using PostgreSQL.

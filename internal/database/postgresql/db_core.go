@@ -30,6 +30,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/jackc/pgx/v5"
 	"github.com/llm-d/llm-d-batch-gateway/internal/database/api"
+	"github.com/llm-d/llm-d-batch-gateway/internal/database/postgresql/migrate"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
 )
 
@@ -50,9 +51,6 @@ const (
 type TableDescriptor interface {
 	// TableName returns the PostgreSQL table name.
 	TableName() string
-	// Schema returns the DDL SQL to create the table and indexes.
-	// Must be idempotent (use IF NOT EXISTS).
-	Schema() string
 	// ExtraColumns returns names of additional indexed columns
 	// beyond the common set (id, tenant_id, expiry, tags).
 	ExtraColumns() []string
@@ -76,7 +74,7 @@ func newPgCore(ctx context.Context, config *PostgreSQLConfig, tableDescriptor Ta
 		desc: tableDescriptor,
 	}
 
-	if err := pgCore.ensureSchema(ctx); err != nil {
+	if err := migrate.Check(ctx, pool); err != nil {
 		pool.Close()
 		return nil, err
 	}
@@ -452,11 +450,6 @@ func (c *pgCore) delete(ctx context.Context, ids []string) (deletedIDs []string,
 		"nDeleted", len(deletedIDs), "ids", deletedIDs)
 
 	return deletedIDs, nil
-}
-
-func (c *pgCore) ensureSchema(ctx context.Context) error {
-	_, err := c.pool.Exec(ctx, c.desc.Schema())
-	return err
 }
 
 func (c *pgCore) close() error {

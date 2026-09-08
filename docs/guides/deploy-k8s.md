@@ -778,6 +778,12 @@ helm upgrade --install postgresql oci://registry-1.docker.io/bitnamicharts/postg
     --set auth.postgresPassword=<your-postgres-password> \
     --set auth.database=batch
 kubectl rollout status statefulset/postgresql -n ${BATCH_NAMESPACE} --timeout=120s
+```
+
+The batch-gateway pods create and upgrade the schema themselves through a
+`migrate` initContainer; see [Database Schema Migrations](database-migrations.md).
+
+```bash
 
 # Install MinIO (S3-compatible object storage for batch files)
 MINIO_USER=<your-minio-user>
