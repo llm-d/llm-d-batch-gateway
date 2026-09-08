@@ -64,6 +64,16 @@ var kindDeployments = map[string]string{
 	"gc":        "batch-gateway-gc",
 }
 
+// resourceRef names the workload that owns a component's pods: the
+// processor is a StatefulSet on charts that ship one, everything else is a
+// Deployment.
+func (b *kindBackend) resourceRef(name string) string {
+	if _, err := b.kubectl("get", "statefulset", name); err == nil {
+		return "statefulset/" + name
+	}
+	return "deployment/" + name
+}
+
 func newKindBackend(t *testing.T) *kindBackend {
 	t.Helper()
 	for _, tool := range []string{"kubectl", "helm"} {
@@ -117,12 +127,12 @@ func (b *kindBackend) syncEnv(service string) {
 	dep := kindDeployments[service]
 	val := b.env[strings.ToUpper(service)+"_FAILPOINTS"]
 	if val == "" {
-		if _, err := b.kubectl("set", "env", "deployment/"+dep, "FAILPOINTS-"); err != nil {
+		if _, err := b.kubectl("set", "env", b.resourceRef(dep), "FAILPOINTS-"); err != nil {
 			b.t.Fatalf("clear FAILPOINTS on %s: %v", dep, err)
 		}
 		return
 	}
-	if _, err := b.kubectl("set", "env", "deployment/"+dep, "FAILPOINTS="+val); err != nil {
+	if _, err := b.kubectl("set", "env", b.resourceRef(dep), "FAILPOINTS="+val); err != nil {
 		b.t.Fatalf("set FAILPOINTS on %s: %v", dep, err)
 	}
 }
@@ -146,7 +156,7 @@ func (b *kindBackend) applyProcessorConfig() {
 	if err != nil {
 		b.t.Fatalf("helm upgrade heartbeatInterval=%s: %v\n%s", interval, err, out)
 	}
-	if _, err := b.kubectl("rollout", "restart", "deployment/"+b.release+"-processor"); err != nil {
+	if _, err := b.kubectl("rollout", "restart", b.resourceRef(b.release+"-processor")); err != nil {
 		b.t.Fatalf("rollout restart processor: %v", err)
 	}
 }
@@ -154,7 +164,7 @@ func (b *kindBackend) applyProcessorConfig() {
 func (b *kindBackend) restart(service string) {
 	b.t.Helper()
 	dep := kindDeployments[service]
-	if _, err := b.kubectl("scale", "deployment/"+dep, "--replicas=1"); err != nil {
+	if _, err := b.kubectl("scale", b.resourceRef(dep), "--replicas=1"); err != nil {
 		b.t.Fatalf("scale up %s: %v", dep, err)
 	}
 	b.syncEnv(service)
@@ -164,7 +174,7 @@ func (b *kindBackend) restart(service string) {
 func (b *kindBackend) stop(service string) {
 	b.t.Helper()
 	dep := kindDeployments[service]
-	if _, err := b.kubectl("scale", "deployment/"+dep, "--replicas=0"); err != nil {
+	if _, err := b.kubectl("scale", b.resourceRef(dep), "--replicas=0"); err != nil {
 		b.t.Fatalf("scale down %s: %v", dep, err)
 	}
 	if _, err := b.kubectl("wait", "--for=delete", "pod", "-l", "app.kubernetes.io/name="+dep, "--timeout=60s"); err != nil {
@@ -186,7 +196,7 @@ func (b *kindBackend) kill(service string) {
 
 func (b *kindBackend) rolloutWait(deployment string) {
 	b.t.Helper()
-	if _, err := b.kubectl("rollout", "status", "deployment/"+deployment, "--timeout=180s"); err != nil {
+	if _, err := b.kubectl("rollout", "status", b.resourceRef(deployment), "--timeout=180s"); err != nil {
 		b.t.Fatalf("rollout of %s: %v", deployment, err)
 	}
 	b.settle(deployment, 1)
@@ -268,7 +278,7 @@ func (b *kindBackend) inferenceRequests() (int, bool) { return 0, false }
 func (b *kindBackend) dumpLogs() string {
 	var sb strings.Builder
 	for _, dep := range kindDeployments {
-		out, _ := b.kubectl("logs", "deployment/"+dep, "--tail", "200")
+		out, _ := b.kubectl("logs", b.resourceRef(dep), "--tail", "200")
 		fmt.Fprintf(&sb, "--- %s ---\n%s\n", dep, out)
 	}
 	return sb.String()
