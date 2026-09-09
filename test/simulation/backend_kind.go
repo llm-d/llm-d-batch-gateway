@@ -27,7 +27,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -45,9 +44,6 @@ type kindBackend struct {
 	release string
 	// desired failpoint env per component, from the scenario's abstract keys.
 	env map[string]string
-	// staleHeartbeat mirrors the compose PROCESSOR_CONFIG knob via a helm
-	// value on the processor.
-	staleHeartbeat bool
 }
 
 var _ stackBackend = (*kindBackend)(nil)
@@ -101,7 +97,6 @@ func (b *kindBackend) ensureUp(env map[string]string) {
 	for k, v := range env {
 		b.applyEnv(k, v)
 	}
-	b.applyProcessorConfig()
 	for svc := range kindDeployments {
 		b.syncEnv(svc)
 	}
@@ -114,7 +109,7 @@ func (b *kindBackend) ensureUp(env map[string]string) {
 func (b *kindBackend) applyEnv(key, value string) {
 	switch key {
 	case "PROCESSOR_CONFIG":
-		b.staleHeartbeat = value != "" && value != "processor.yaml"
+		// Config file selection is a compose knob; the chart renders one config.
 	default:
 		b.env[key] = value
 	}
@@ -134,30 +129,6 @@ func (b *kindBackend) syncEnv(service string) {
 	}
 	if _, err := b.kubectl("set", "env", b.resourceRef(dep), "FAILPOINTS="+val); err != nil {
 		b.t.Fatalf("set FAILPOINTS on %s: %v", dep, err)
-	}
-}
-
-// applyProcessorConfig maps the stale-heartbeat knob to a helm value.
-// dev-deploy sets heartbeatInterval=10s; the stale variant pushes it past
-// the reconciler's staleness threshold.
-func (b *kindBackend) applyProcessorConfig() {
-	b.t.Helper()
-	interval := "10s"
-	if b.staleHeartbeat {
-		interval = "10m"
-	}
-	_, thisFile, _, _ := runtime.Caller(0)
-	chart := filepath.Join(filepath.Dir(thisFile), "..", "..", "charts", "batch-gateway")
-	out, err := exec.Command("helm", "upgrade", b.release, chart,
-		"--kube-context", kindContext, "-n", b.ns,
-		"--reuse-values",
-		"--set", "processor.config.heartbeatInterval="+interval,
-	).CombinedOutput()
-	if err != nil {
-		b.t.Fatalf("helm upgrade heartbeatInterval=%s: %v\n%s", interval, err, out)
-	}
-	if _, err := b.kubectl("rollout", "restart", b.resourceRef(b.release+"-processor")); err != nil {
-		b.t.Fatalf("rollout restart processor: %v", err)
 	}
 }
 

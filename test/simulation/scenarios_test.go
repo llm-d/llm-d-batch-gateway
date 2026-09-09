@@ -85,25 +85,19 @@ func TestCreateCrashAfterStore(t *testing.T) {
 	judge(t, scenario, ran, detail)
 }
 
-// TestTerminalOverwrite reproduces this failure: processor terminal status
-// writes pass no expected status (status_updater.go DBUpdate with nil CAS),
-// while the reconciler CASes. With the processor's heartbeat effectively
-// disabled (stale-heartbeat config, simulating sustained Redis
-// unreachability) the reconciler declares the live job orphaned and CASes it
-// to failed; the processor then blindly overwrites the terminal failed with
-// completed. A sleep failpoint before the terminal write holds the window
-// open deterministically.
+// TestTerminalOverwrite holds the processor's terminal status write open past
+// two reconciler cycles. Before ownership was fenced, the reconciler could
+// declare the live job orphaned and CAS it to failed, and the processor's
+// unconditional completed write then moved the batch back out of failed.
 //
-// Violated invariant (terminal immutability): no batch may leave a terminal
-// state.
+// Invariant (terminal immutability): no batch may leave a terminal state.
 func TestTerminalOverwrite(t *testing.T) {
 	const scenario = "terminal_overwrite"
-	// The sleep must outlast the reconciler's staleness threshold plus one
-	// cycle so the reconciler acts while the terminal write is held open.
+	// The sleep outlasts two reconciler cycles so the reconciler runs while
+	// the terminal write is held open.
 	sleep := 2*params().ReconcilerInterval + 10*time.Second
 	h := newHarness(t, map[string]string{
 		"PROCESSOR_FAILPOINTS": fmt.Sprintf("processor/before-terminal-write=sleep(%d)", sleep.Milliseconds()),
-		"PROCESSOR_CONFIG":     "processor-stale-heartbeat.yaml",
 	})
 	client := newAPIClient()
 
@@ -120,9 +114,8 @@ func TestTerminalOverwrite(t *testing.T) {
 	defer cancel()
 	tl := observe(ctx, client, batch.ID, h.rec)
 
-	// Expected sequence today: the job executes, the processor sleeps 20s
-	// before its completed write, the reconciler CASes the stale-heartbeat
-	// job to failed during the sleep, and the processor then overwrites it.
+	// The job executes, the processor sleeps before its completed write, and
+	// the reconciler runs at least twice while the write is held.
 	final, _ := waitForStatus(client, batch.ID, sleep+4*params().ReconcilerInterval+30*time.Second, openai.BatchStatusCompleted)
 
 	// Give the observer a final polling cycle past the last transition.

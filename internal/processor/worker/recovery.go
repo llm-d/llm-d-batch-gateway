@@ -86,8 +86,6 @@ func (p *Processor) recoverOwnedJobs(ctx context.Context) {
 
 	logger.V(logging.INFO).Info("Startup recovery: found owned jobs", "count", len(tasks))
 
-	failpoint.Inject("processor/recovery-found-job")
-
 	var grp errgroup.Group
 	grp.SetLimit(p.cfg.Concurrency.Recovery)
 
@@ -101,6 +99,7 @@ func (p *Processor) recoverOwnedJobs(ctx context.Context) {
 				}
 				return nil
 			}
+			failpoint.Inject("processor/recovery-found-job")
 			if recoverErr := p.recoverJob(jctx, task.ID); recoverErr != nil {
 				jlogger.Error(recoverErr, "Startup recovery: failed to recover owned job")
 			}

@@ -18,7 +18,6 @@ shutdown_timeout: "10s"
 
 # Refreshed every second so the reconciler (5s staleness threshold) never
 # mistakes a live job for an orphan under normal operation.
-heartbeat_interval: "1s"
 
 work_dir: "/tmp/processor"
 

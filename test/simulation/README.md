@@ -117,13 +117,12 @@ proxy (`config/toxiproxy.json`), so a scenario can partition exactly one edge:
 cut apiserver↔redis while the processor's redis connection stays healthy.
 Scenarios apply and remove toxics through the control API on host port 18474
 (`toxics.go`); harness cleanup heals all proxies so a failed scenario cannot
-poison the next. The false-failure scenarios (enqueue_false_failure, create_compensation_partition) and any scenario
-needing the vcr request-log witness skip on the kind backend.
+poison the next. Any scenario needing the vcr request-log witness skips on
+the kind backend.
 
 The fake vllm engine logs every request it serves (`--log-requests`),
 so duplicate or phantom execution is counted at the one place it cannot be
-hidden. `duplicate_execution` asserts requests served ≤ batch line count; `enqueue_false_failure` asserts a
-5xx'd create serves zero.
+hidden. `duplicate_execution` asserts requests served ≤ batch line count.
 
 ## The ratchet
 
@@ -142,7 +141,7 @@ Promote entries as rearchitecture phases land. Demoting `fixed` back to
 | Path | Purpose |
 |---|---|
 | `compose.yaml` | topology: stores, toxiproxy, gateway binaries, vcr model server |
-| `config/` | compressed-interval configs; `processor-stale-heartbeat.yaml` simulates heartbeat loss; `toxiproxy.json` the proxy mesh |
+| `config/` | compressed-interval configs; `toxiproxy.json` the proxy mesh |
 | `secrets/<component>/` | per-component connection URLs mounted at `/etc/.secrets`; generated per run with random credentials, gitignored |
 | `harness.go` | compose control, readiness, log capture |
 | `client.go` | minimal OpenAI-compatible API client |

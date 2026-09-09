@@ -8,15 +8,13 @@
 # broken is a reviewable change that requires justification in the PR.
 scenarios:
   create_crash_after_store: broken
-  enqueue_false_failure: broken
-  create_compensation_partition: broken
-  duplicate_execution: broken
-  terminal_overwrite: broken
-  worker_crash_strands_job: broken
-  cancel_reverted: broken
+  duplicate_execution: fixed
+  terminal_overwrite: fixed
+  worker_crash_strands_job: fixed
+  cancel_reverted: fixed
   cancel_event_lost: broken
   orphaned_blob: broken
   finalization_strand: broken
   async_result_destruction: broken
   recovery_crash_loop: fixed
-  cancel_racing_completion: broken
+  cancel_racing_completion: fixed

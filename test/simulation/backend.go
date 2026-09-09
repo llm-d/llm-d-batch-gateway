@@ -31,7 +31,7 @@ import (
 //
 // Scenario-facing env keys are the abstract knobs; each backend translates
 // them: *_FAILPOINTS become the FAILPOINTS env of that component, and
-// PROCESSOR_CONFIG selects the stale-heartbeat variant (a config file in
+// PROCESSOR_CONFIG selects the processor config file (a config file in
 // compose, a helm value on kind).
 type stackBackend interface {
 	// ensureUp brings the stack to a fresh state with env applied.
