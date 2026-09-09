@@ -28,22 +28,21 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 )
 
-// TestF1aCreateCrashBeforeEnqueue reproduces finding F1a from the consistency
-// review: batch create is DBStore then PQEnqueue with no atomicity. The
+// TestCreateCrashAfterStore reproduces this failure: batch create is DBStore then PQEnqueue with no atomicity. The
 // apiserver is killed between the two writes, so the client receives an
 // error, yet the batch row exists. The orphan reconciler later re-enqueues
 // the "orphaned" validating job and the batch runs to completion.
 //
 // Violated invariant (API honesty): a create that failed with a server error
 // must never produce a batch that executes and bills.
-func TestF1aCreateCrashBeforeEnqueue(t *testing.T) {
-	const scenario = "F1a_create_crash_before_enqueue"
+func TestCreateCrashAfterStore(t *testing.T) {
+	const scenario = "create_crash_after_store"
 	h := newHarness(t, map[string]string{
 		"APISERVER_FAILPOINTS": "apiserver/after-batch-dbstore=exit",
 	})
 	client := newAPIClient()
 
-	fileID, err := client.uploadFile("f1a.jsonl", inputJSONL(2, 10))
+	fileID, err := client.uploadFile("create-crash-after-store.jsonl", inputJSONL(2, 10))
 	if err != nil {
 		t.Fatalf("upload input file: %v", err)
 	}
@@ -86,7 +85,7 @@ func TestF1aCreateCrashBeforeEnqueue(t *testing.T) {
 	judge(t, scenario, ran, detail)
 }
 
-// TestF3TerminalOverwrite reproduces finding F3: processor terminal status
+// TestTerminalOverwrite reproduces this failure: processor terminal status
 // writes pass no expected status (status_updater.go DBUpdate with nil CAS),
 // while the reconciler CASes. With the processor's heartbeat effectively
 // disabled (stale-heartbeat config, simulating sustained Redis
@@ -97,8 +96,8 @@ func TestF1aCreateCrashBeforeEnqueue(t *testing.T) {
 //
 // Violated invariant (terminal immutability): no batch may leave a terminal
 // state.
-func TestF3TerminalOverwrite(t *testing.T) {
-	const scenario = "F3_terminal_overwrite"
+func TestTerminalOverwrite(t *testing.T) {
+	const scenario = "terminal_overwrite"
 	// The sleep must outlast the reconciler's staleness threshold plus one
 	// cycle so the reconciler acts while the terminal write is held open.
 	sleep := 2*params().ReconcilerInterval + 10*time.Second
@@ -108,7 +107,7 @@ func TestF3TerminalOverwrite(t *testing.T) {
 	})
 	client := newAPIClient()
 
-	fileID, err := client.uploadFile("f3.jsonl", inputJSONL(2, 10))
+	fileID, err := client.uploadFile("terminal-overwrite.jsonl", inputJSONL(2, 10))
 	if err != nil {
 		t.Fatalf("upload input file: %v", err)
 	}
@@ -144,7 +143,7 @@ func TestF3TerminalOverwrite(t *testing.T) {
 	judge(t, scenario, len(terminal) > 0, detail)
 }
 
-// TestF4aWorkerCrashStrandsJob reproduces the pod-replacement orphan window:
+// TestWorkerCrashStrandsJob reproduces the pod-replacement orphan window:
 // the processor keeps all execution state on container-local disk, so a
 // SIGKILL mid-execution strands the job with no owner and no recoverable
 // workdir. The replacement processor's startup recovery finds nothing; the
@@ -154,14 +153,14 @@ func TestF3TerminalOverwrite(t *testing.T) {
 // Violated invariant (work conservation): a job interrupted by worker loss
 // must eventually complete or preserve its partial results, not terminalize
 // with all completed work discarded.
-func TestF4aWorkerCrashStrandsJob(t *testing.T) {
-	const scenario = "F4a_worker_crash_strands_job"
+func TestWorkerCrashStrandsJob(t *testing.T) {
+	const scenario = "worker_crash_strands_job"
 	h := newHarness(t, nil)
 	client := newAPIClient()
 
 	// max_tokens 300 at ~30ms/token keeps each request in flight ~9s, so the
 	// kill lands mid-execution deterministically.
-	fileID, err := client.uploadFile("f4a.jsonl", inputJSONL(4, 300))
+	fileID, err := client.uploadFile("worker-crash-strands-job.jsonl", inputJSONL(4, 300))
 	if err != nil {
 		t.Fatalf("upload input file: %v", err)
 	}
@@ -198,7 +197,7 @@ func TestF4aWorkerCrashStrandsJob(t *testing.T) {
 	judge(t, scenario, stranded, detail)
 }
 
-// TestF2aCancelReverted reproduces finding F2a: cancelling a queued batch is
+// TestCancelReverted reproduces this failure: cancelling a queued batch is
 // PQDelete then DBUpdate with no atomicity. The apiserver dies between the
 // two, leaving the batch out of the queue but still validating in the DB.
 // The reconciler sees an unqueued validating job, re-enqueues it, and the
@@ -206,8 +205,8 @@ func TestF4aWorkerCrashStrandsJob(t *testing.T) {
 //
 // Violated invariant (cancel effectiveness): after a cancel attempt removes
 // a batch from the queue, that batch must never execute.
-func TestF2aCancelReverted(t *testing.T) {
-	const scenario = "F2a_cancel_reverted"
+func TestCancelReverted(t *testing.T) {
+	const scenario = "cancel_reverted"
 	h := newHarness(t, map[string]string{
 		"APISERVER_FAILPOINTS": "apiserver/after-cancel-pqdelete=exit",
 	})
@@ -216,7 +215,7 @@ func TestF2aCancelReverted(t *testing.T) {
 	// Park the batch in the queue: with the processor stopped nothing
 	// dequeues it, so the cancel takes the queued-batch path.
 	h.stop("processor")
-	fileID, err := client.uploadFile("f2a.jsonl", inputJSONL(2, 10))
+	fileID, err := client.uploadFile("cancel-reverted.jsonl", inputJSONL(2, 10))
 	if err != nil {
 		t.Fatalf("upload input file: %v", err)
 	}
@@ -247,7 +246,7 @@ func TestF2aCancelReverted(t *testing.T) {
 	judge(t, scenario, ran, detail)
 }
 
-// TestF2bCancelEventLost reproduces finding F2b: for an in-flight batch the
+// TestCancelEventLost reproduces this failure: for an in-flight batch the
 // apiserver writes cancelling to the DB and then sends the cancel event to
 // Redis as a separate step. The apiserver dies between the two; the worker
 // never learns of the cancel, finishes the job, and its blind write moves
@@ -255,15 +254,15 @@ func TestF2aCancelReverted(t *testing.T) {
 //
 // Violated invariant (legal transitions): cancelling may only lead to
 // cancelled or failed.
-func TestF2bCancelEventLost(t *testing.T) {
-	const scenario = "F2b_cancel_event_lost"
+func TestCancelEventLost(t *testing.T) {
+	const scenario = "cancel_event_lost"
 	h := newHarness(t, map[string]string{
 		"APISERVER_FAILPOINTS": "apiserver/after-cancel-dbupdate=exit",
 	})
 	client := newAPIClient()
 
 	// Long generations keep the batch in_progress while the cancel lands.
-	fileID, err := client.uploadFile("f2b.jsonl", inputJSONL(4, 300))
+	fileID, err := client.uploadFile("cancel-event-lost.jsonl", inputJSONL(4, 300))
 	if err != nil {
 		t.Fatalf("upload input file: %v", err)
 	}
@@ -306,21 +305,21 @@ func TestF2bCancelEventLost(t *testing.T) {
 	judge(t, scenario, reproduced, detail)
 }
 
-// TestF5OrphanedBlob reproduces finding F5: finalization uploads the blob to
+// TestOrphanedBlob reproduces this failure: finalization uploads the blob to
 // S3 and then inserts the file record as a separate write, and batch-gc only
 // walks DB records. A crash between the two leaves a blob no sweep will ever
 // reclaim.
 //
 // Violated invariant (referential, blob -> record): every object in the
 // bucket older than the grace period has a file record.
-func TestF5OrphanedBlob(t *testing.T) {
-	const scenario = "F5_orphaned_blob"
+func TestOrphanedBlob(t *testing.T) {
+	const scenario = "orphaned_blob"
 	h := newHarness(t, map[string]string{
 		"PROCESSOR_FAILPOINTS": "processor/after-blob-store=exit",
 	})
 	client := newAPIClient()
 
-	fileID, err := client.uploadFile("f5.jsonl", inputJSONL(2, 10))
+	fileID, err := client.uploadFile("orphaned-blob.jsonl", inputJSONL(2, 10))
 	if err != nil {
 		t.Fatalf("upload input file: %v", err)
 	}
@@ -353,7 +352,7 @@ func TestF5OrphanedBlob(t *testing.T) {
 	judge(t, scenario, len(orphans) > 0, detail)
 }
 
-// TestF6FinalizationStrand reproduces finding F6: the processor crashes after
+// TestFinalizationStrand reproduces this failure: the processor crashes after
 // the output blob and its file record are durably written but before the
 // completed status write. The reconciler CASes the finalizing orphan to
 // failed, so the batch record never gets output_file_id even though the
@@ -361,8 +360,8 @@ func TestF5OrphanedBlob(t *testing.T) {
 //
 // Violated invariant (results reachability): durably stored results must be
 // linked from the batch that produced them.
-func TestF6FinalizationStrand(t *testing.T) {
-	const scenario = "F6_finalization_strand"
+func TestFinalizationStrand(t *testing.T) {
+	const scenario = "finalization_strand"
 	// The second failpoint keeps the replacement container from completing
 	// the job via startup recovery (on Kubernetes an exit only restarts the
 	// container and emptyDir survives), modeling pod replacement / crash
@@ -372,7 +371,7 @@ func TestF6FinalizationStrand(t *testing.T) {
 	})
 	client := newAPIClient()
 
-	fileID, err := client.uploadFile("f6.jsonl", inputJSONL(2, 10))
+	fileID, err := client.uploadFile("finalization-strand.jsonl", inputJSONL(2, 10))
 	if err != nil {
 		t.Fatalf("upload input file: %v", err)
 	}

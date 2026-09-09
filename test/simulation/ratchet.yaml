@@ -7,14 +7,14 @@
 # Promote broken -> fixed as rearchitecture phases land. Demoting fixed ->
 # broken is a reviewable change that requires justification in the PR.
 scenarios:
-  F1a_create_crash_before_enqueue: broken
-  F1b_enqueue_false_failure: broken
-  F1c_create_compensation_partition: broken
-  F4b_duplicate_execution: broken
-  F3_terminal_overwrite: broken
-  F4a_worker_crash_strands_job: broken
-  F2a_cancel_reverted: broken
-  F2b_cancel_event_lost: broken
-  F5_orphaned_blob: broken
-  F6_finalization_strand: broken
-  A1_async_result_destruction: broken
+  create_crash_after_store: broken
+  enqueue_false_failure: broken
+  create_compensation_partition: broken
+  duplicate_execution: broken
+  terminal_overwrite: broken
+  worker_crash_strands_job: broken
+  cancel_reverted: broken
+  cancel_event_lost: broken
+  orphaned_blob: broken
+  finalization_strand: broken
+  async_result_destruction: broken

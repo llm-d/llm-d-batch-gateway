@@ -117,12 +117,12 @@ proxy (`config/toxiproxy.json`), so a scenario can partition exactly one edge:
 cut apiserver↔redis while the processor's redis connection stays healthy.
 Scenarios apply and remove toxics through the control API on host port 18474
 (`toxics.go`); harness cleanup heals all proxies so a failed scenario cannot
-poison the next. The false-failure scenarios (F1b, F1c) and any scenario
+poison the next. The false-failure scenarios (enqueue_false_failure, create_compensation_partition) and any scenario
 needing the vcr request-log witness skip on the kind backend.
 
 The fake vllm engine logs every request it serves (`--log-requests`),
 so duplicate or phantom execution is counted at the one place it cannot be
-hidden. `F4b` asserts requests served ≤ batch line count; `F1b` asserts a
+hidden. `duplicate_execution` asserts requests served ≤ batch line count; `enqueue_false_failure` asserts a
 5xx'd create serves zero.
 
 ## The ratchet

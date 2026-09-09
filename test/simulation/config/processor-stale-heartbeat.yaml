@@ -16,7 +16,7 @@ terminate_on_observability_failure: false
 shutdown_timeout: "10s"
 
 # Heartbeat effectively disabled: the in-flight entry set at dequeue goes
-# stale after the reconciler threshold, simulating sustained Redis heartbeat failure (F3/F4).
+# stale after the reconciler threshold, simulating sustained Redis heartbeat failure (terminal_overwrite, worker_crash_strands_job).
 heartbeat_interval: "10m"
 
 work_dir: "/tmp/processor"

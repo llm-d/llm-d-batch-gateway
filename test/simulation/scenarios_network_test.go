@@ -27,7 +27,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 )
 
-// TestF1bEnqueueFalseFailure reproduces finding F1b: PQEnqueue lands in Redis
+// TestEnqueueFalseFailure reproduces this failure: PQEnqueue lands in Redis
 // but the response is lost, so the apiserver times out, runs the compensating
 // DBDelete, and returns 500. The processor dequeues the phantom entry long
 // before the slow timeout fires, fetches the still-present row, and starts
@@ -37,14 +37,14 @@ import (
 //
 // Violated invariant (API honesty): a create that returned 5xx must never
 // produce a batch that executes.
-func TestF1bEnqueueFalseFailure(t *testing.T) {
-	const scenario = "F1b_enqueue_false_failure"
+func TestEnqueueFalseFailure(t *testing.T) {
+	const scenario = "enqueue_false_failure"
 	h := newHarness(t, nil)
 	baseline := h.inferenceWitness()
 	tox := h.toxics()
 	client := newAPIClient().withTimeout(90 * time.Second)
 
-	fileID, err := client.uploadFile("f1b.jsonl", inputJSONL(4, 300))
+	fileID, err := client.uploadFile("enqueue-false-failure.jsonl", inputJSONL(4, 300))
 	if err != nil {
 		t.Fatalf("upload input file: %v", err)
 	}
@@ -74,26 +74,26 @@ func TestF1bEnqueueFalseFailure(t *testing.T) {
 	judge(t, scenario, served > 0, detail)
 }
 
-// TestF1cCreateCompensationPartition reproduces finding F1c: the enqueue
+// TestCreateCompensationPartition reproduces this failure: the enqueue
 // fails AND the compensating DBDelete fails, because the apiserver is
 // partitioned from both stores after the row was stored. A sleep failpoint
 // holds the DBStore->PQEnqueue window open while the partition is applied.
 // The client gets 500 and the row survives unqueued, so the reconciler later
 // re-enqueues it as an orphaned validating job and it runs, same class of
-// violation as F1a but reachable by network faults alone once the create
+// violation as TestCreateCrashAfterStore but reachable by network faults alone once the create
 // becomes transactional.
 //
 // Violated invariant (API honesty): a create that returned 5xx must never
 // produce a batch that executes.
-func TestF1cCreateCompensationPartition(t *testing.T) {
-	const scenario = "F1c_create_compensation_partition"
+func TestCreateCompensationPartition(t *testing.T) {
+	const scenario = "create_compensation_partition"
 	h := newHarness(t, map[string]string{
 		"APISERVER_FAILPOINTS": "apiserver/after-batch-dbstore=sleep(6000)",
 	})
 	tox := h.toxics()
 	client := newAPIClient().withTimeout(90 * time.Second)
 
-	fileID, err := client.uploadFile("f1c.jsonl", inputJSONL(2, 10))
+	fileID, err := client.uploadFile("create-compensation-partition.jsonl", inputJSONL(2, 10))
 	if err != nil {
 		t.Fatalf("upload input file: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestF1cCreateCompensationPartition(t *testing.T) {
 	judge(t, scenario, ran, detail)
 }
 
-// TestF4bDuplicateExecution reproduces the F4 double-execution race: the
+// TestDuplicateExecution reproduces the double-execution race: the
 // window between PQDequeue and InFlightSet leaves a dequeued job invisible,
 // still validating in the DB, absent from the queue, with no in-flight entry.
 // A sleep failpoint holds that window open past the reconciler's staleness
@@ -150,8 +150,8 @@ func TestF1cCreateCompensationPartition(t *testing.T) {
 //
 // Violated invariant (single execution): requests served by the engine for a
 // batch must not exceed its line count.
-func TestF4bDuplicateExecution(t *testing.T) {
-	const scenario = "F4b_duplicate_execution"
+func TestDuplicateExecution(t *testing.T) {
+	const scenario = "duplicate_execution"
 	const lines = 4
 	// The window must outlast the reconciler's staleness threshold plus one
 	// cycle so the re-enqueue happens while the first dequeue is held.
@@ -166,7 +166,7 @@ func TestF4bDuplicateExecution(t *testing.T) {
 	// second window; the dequeue gate accepts validating and in_progress, so
 	// the first execution must still be running when the duplicate wakes.
 	// ~27s generations outlast the window with margin.
-	fileID, err := client.uploadFile("f4b.jsonl", inputJSONL(lines, 900))
+	fileID, err := client.uploadFile("duplicate-execution.jsonl", inputJSONL(lines, 900))
 	if err != nil {
 		t.Fatalf("upload input file: %v", err)
 	}

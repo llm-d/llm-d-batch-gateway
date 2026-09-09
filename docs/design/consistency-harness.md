@@ -2,7 +2,7 @@
 
 ## Problem
 
-Previous human and AI-assisted consistency review (2026-08-18) identified seven classes of cross-store crash windows (F1 through F7) arising from non-atomic write sequences across Redis, Postgres, S3, and local disk. Before rearchitecting, we need an executable proof that these bugs exist today, and a regression gate that prevents them from returning once fixed.
+Previous human and AI-assisted consistency review (2026-08-18) identified several classes of cross-store crash windows arising from non-atomic write sequences across Redis, Postgres, S3, and local disk. Before rearchitecting, we need an executable proof that these bugs exist today, and a regression gate that prevents them from returning once fixed.
 
 These windows come from the topology itself: three stores, no cross-store
 transactions. That was a reasonable choice for the first version, and any
@@ -54,13 +54,13 @@ A small in-repo package (`internal/util/failpoint`) instruments the identified w
 
 | Failpoint | Location | Finding |
 |---|---|---|
-| `apiserver/after-batch-dbstore` | between DBStore and PQEnqueue | F1a |
-| `apiserver/after-cancel-pqdelete` | between PQDelete and DBUpdate | F2a |
-| `apiserver/after-cancel-dbupdate` | between DBUpdate and event send | F2b |
-| `processor/after-dequeue` | between PQDequeue and InFlightSet | F4 |
-| `processor/after-blob-store` | between S3 Store and file DBStore | F5 |
-| `processor/after-file-records` | between file records and terminal write | F6 |
-| `processor/before-terminal-write` | before UpdatePersistentStatus | F3 |
+| `apiserver/after-batch-dbstore` | between DBStore and PQEnqueue | create_crash_after_store |
+| `apiserver/after-cancel-pqdelete` | between PQDelete and DBUpdate | cancel_reverted |
+| `apiserver/after-cancel-dbupdate` | between DBUpdate and event send | cancel_event_lost |
+| `processor/after-dequeue` | between PQDequeue and InFlightSet | duplicate_execution |
+| `processor/after-blob-store` | between S3 Store and file DBStore | orphaned_blob |
+| `processor/after-file-records` | between file records and terminal write | finalization_strand |
+| `processor/before-terminal-write` | before UpdatePersistentStatus | terminal_overwrite |
 
 The armed action is `panic` or `os.Exit(137)`, simulating OOM kill at that instruction. Sleep actions are also available to hold a window open while another actor races.
 
@@ -68,9 +68,9 @@ The armed action is `panic` or `os.Exit(137)`, simulating OOM kill at that instr
 
 Failpoints cannot produce false failures, where an operation lands server-side but the client sees an error. Toxiproxy can, by cutting the response path after the request is delivered:
 
-- F1b: PQEnqueue succeeds in Redis, client sees timeout, compensating DBDelete runs.
-- F1c: enqueue fails and the compensating DBDelete also fails (full partition).
-- F4: the window between PQDequeue and InFlightSet leaves a dequeued job invisible; the reconciler re-enqueues it and the job runs twice.
+- enqueue_false_failure: PQEnqueue succeeds in Redis, client sees timeout, compensating DBDelete runs.
+- create_compensation_partition: enqueue fails and the compensating DBDelete also fails (full partition).
+- duplicate_execution: the window between PQDequeue and InFlightSet leaves a dequeued job invisible; the reconciler re-enqueues it and the job runs twice.
 
 Every component-store connection is routed through toxiproxy on its own proxy (`config/toxiproxy.json`, nine proxies), so a toxic partitions exactly one edge: apiserver↔redis can lie while processor↔redis stays healthy. Toxics are applied and removed by the runner per scenario through the control API; harness cleanup heals all proxies. Compose only; network-fault scenarios skip on the kind backend.
 
@@ -80,7 +80,7 @@ A `simcheck` package asserted by every scenario, with two modes.
 
 **Trace invariants** (continuous): an observer goroutine polls batch status via the API and directly from Postgres at 100ms, recording per-batch status timelines. Asserted against the legal transition graph from the processor design doc:
 
-- No transition out of a terminal state (catches F3: `failed` then `completed`).
+- No transition out of a terminal state (catches terminal_overwrite: `failed` then `completed`).
 - No regression `cancelling → in_progress` (catches the blind read-modify-write).
 - Timestamps monotonic and preserved across transitions.
 
@@ -88,13 +88,13 @@ A `simcheck` package asserted by every scenario, with two modes.
 
 | Invariant | Statement | Catches |
 |---|---|---|
-| Liveness | every batch is terminal, queued, or owned by a fresh lease/heartbeat | F1a, F2a, F6 |
-| Conservation | `completed + failed + rejected == total` for every terminal batch | F4 double-execution |
-| Referential (record → blob) | every `output_file_id` / `error_file_id` resolves to a file record and an S3 object | F6 |
-| Referential (blob → record) | every S3 object older than the grace period has a file record | F5 |
-| Cancel honored | a batch whose cancel was acked 200 ends in `cancelled` (or `completed` only if finalizing had begun) | F2 |
-| API honesty | a create that returned 5xx never produces a batch that runs | F1b, F1c |
-| Single execution | total inference requests observed by vllm-vcr for a batch ≤ line count | F4 |
+| Liveness | every batch is terminal, queued, or owned by a fresh lease/heartbeat | create_crash_after_store, cancel_reverted, finalization_strand |
+| Conservation | `completed + failed + rejected == total` for every terminal batch | duplicate_execution |
+| Referential (record → blob) | every `output_file_id` / `error_file_id` resolves to a file record and an S3 object | finalization_strand |
+| Referential (blob → record) | every S3 object older than the grace period has a file record | orphaned_blob |
+| Cancel honored | a batch whose cancel was acked 200 ends in `cancelled` (or `completed` only if finalizing had begun) | cancel_reverted, cancel_event_lost |
+| API honesty | a create that returned 5xx never produces a batch that runs | enqueue_false_failure, create_compensation_partition |
+| Single execution | total inference requests observed by vllm-vcr for a batch ≤ line count | duplicate_execution |
 
 The last invariant uses vllm-vcr's request log as a witness: the simulated backend counts every request it serves.
 
@@ -115,9 +115,9 @@ A seeded chaos mode complements the deterministic scenarios: random SIGKILL and 
 
 ```yaml
 scenarios:
-  F1a_create_crash_before_enqueue: broken   # invariant violation expected and asserted
-  F3_terminal_overwrite:           broken
-  F5_orphaned_blob:                broken
+  create_crash_after_store: broken   # invariant violation expected and asserted
+  terminal_overwrite:           broken
+  orphaned_blob:                broken
   # flipped to fixed as rearchitecture phases land
 ```
 
@@ -138,21 +138,21 @@ ratchet manifest, and seven scenarios that each reproduce their finding:
 
 | Scenario | Invariant violated | Mechanism |
 |---|---|---|
-| F1a_create_crash_before_enqueue | API honesty | crash between DBStore and PQEnqueue |
-| F2a_cancel_reverted | cancel effectiveness | crash between PQDelete and DBUpdate |
-| F2b_cancel_event_lost | legal transitions | crash between DBUpdate and cancel event |
-| F3_terminal_overwrite | terminal immutability | sleep before CAS-less terminal write |
-| F4a_worker_crash_strands_job | work conservation | SIGKILL + pod replacement |
-| F5_orphaned_blob | blob referential | crash between S3 Store and file record |
-| F6_finalization_strand | results reachability | crash between file records and completed write |
-| F1b_enqueue_false_failure | API honesty | enqueue lands, response blackholed; compensation deletes the row under a running job |
-| F1c_create_compensation_partition | API honesty | partition after DBStore; enqueue and compensating delete both fail |
-| F4b_duplicate_execution | single execution | dequeue held past staleness; reconciler re-enqueues; both copies run |
+| create_crash_after_store | API honesty | crash between DBStore and PQEnqueue |
+| cancel_reverted | cancel effectiveness | crash between PQDelete and DBUpdate |
+| cancel_event_lost | legal transitions | crash between DBUpdate and cancel event |
+| terminal_overwrite | terminal immutability | sleep before CAS-less terminal write |
+| worker_crash_strands_job | work conservation | SIGKILL + pod replacement |
+| orphaned_blob | blob referential | crash between S3 Store and file record |
+| finalization_strand | results reachability | crash between file records and completed write |
+| enqueue_false_failure | API honesty | enqueue lands, response blackholed; compensation deletes the row under a running job |
+| create_compensation_partition | API honesty | partition after DBStore; enqueue and compensating delete both fail |
+| duplicate_execution | single execution | dequeue held past staleness; reconciler re-enqueues; both copies run |
 
 The last three (PR 2) need the network to lie: store connections run through
 per-component toxiproxy proxies, and vllm-vcr's request log is the witness
 (the engine counts every request it serves, so phantom and duplicate
-execution are measured where they cannot be hidden). F4b found that the
+execution are measured where they cannot be hidden). duplicate_execution found that the
 dequeue-time runnable gate accepts `in_progress`, so a re-enqueued duplicate
 launches as long as the first execution is still running; and that requests
 already sent keep executing after the losing worker's heartbeat abort.
@@ -197,7 +197,7 @@ long-lived `ResultBroadcaster`s. The async queues are plain Redis structures
 on the stack's existing Redis, so the topology is a processor config
 (`processor-async.yaml`) plus a harness-run queue consumer
 (`asyncbridge.go`) that plays the worker fleet: pop request, forward to vcr,
-push result. Implemented and reproducing: A1_async_result_destruction —
+push result. Implemented and reproducing: async_result_destruction —
 processor killed after submission, pending map gone, replacement's
 broadcasters pop and discard every returning result, reconciler terminalizes
 the orphan as failed. Remaining async scenarios: broadcaster restart losing

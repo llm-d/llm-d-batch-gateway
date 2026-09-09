@@ -27,7 +27,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 )
 
-// TestA1AsyncResultDestruction reproduces async finding A1: in async dispatch
+// TestAsyncResultDestruction reproduces this failure: in async dispatch
 // the processor submits requests fire-and-forget with an in-memory pending
 // map as the only record, and long-lived ResultBroadcasters pop results from
 // the shared Redis result queue destructively. Kill the processor after
@@ -37,8 +37,8 @@ import (
 //
 // Violated invariant (work conservation): inference that was paid for and
 // whose results were durably produced must not be silently destroyed.
-func TestA1AsyncResultDestruction(t *testing.T) {
-	const scenario = "A1_async_result_destruction"
+func TestAsyncResultDestruction(t *testing.T) {
+	const scenario = "async_result_destruction"
 	const lines = 4
 	if backendName() != "compose" {
 		t.Skip("async scenarios need the harness-run queue consumer; compose only")
@@ -53,7 +53,7 @@ func TestA1AsyncResultDestruction(t *testing.T) {
 	client := newAPIClient()
 
 	// ~9s generations so the kill lands after submission, before results.
-	fileID, err := client.uploadFile("a1.jsonl", inputJSONL(lines, 300))
+	fileID, err := client.uploadFile("async-result-destruction.jsonl", inputJSONL(lines, 300))
 	if err != nil {
 		t.Fatalf("upload input file: %v", err)
 	}
