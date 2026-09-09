@@ -61,6 +61,7 @@ A small in-repo package (`internal/util/failpoint`) instruments the identified w
 | `processor/after-blob-store` | between S3 Store and file DBStore | orphaned_blob |
 | `processor/after-file-records` | between file records and terminal write | finalization_strand |
 | `processor/before-terminal-write` | before UpdatePersistentStatus | terminal_overwrite |
+| `apiserver/before-cancel-dbupdate` | between the cancel handler's read and its write | cancel_racing_completion |
 
 The armed action is `panic` or `os.Exit(137)`, simulating OOM kill at that instruction. Sleep actions are also available to hold a window open while another actor races.
 
@@ -148,6 +149,8 @@ ratchet manifest, and seven scenarios that each reproduce their finding:
 | enqueue_false_failure | API honesty | enqueue lands, response blackholed; compensation deletes the row under a running job |
 | create_compensation_partition | API honesty | partition after DBStore; enqueue and compensating delete both fail |
 | duplicate_execution | single execution | dequeue held past staleness; reconciler re-enqueues; both copies run |
+| recovery_crash_loop | bounded recovery | crash after the blob upload on every recovery of the same job |
+| cancel_racing_completion | terminal immutability | cancel handler stalled between read and write while the job completes |
 
 The last three (PR 2) need the network to lie: store connections run through
 per-component toxiproxy proxies, and vllm-vcr's request log is the witness
