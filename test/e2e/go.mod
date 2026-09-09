@@ -1,6 +1,6 @@
 module github.com/llm-d/llm-d-batch-gateway/test/e2e
 
-go 1.26.0
+go 1.27.1
 
 require (
 	github.com/llm-d/llm-d-async/api v0.7.4

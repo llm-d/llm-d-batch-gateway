@@ -1,7 +1,7 @@
 # Batch Gateway
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/llm-d/llm-d-batch-gateway)](https://goreportcard.com/report/github.com/llm-d/llm-d-batch-gateway)
-[![Go Version](https://img.shields.io/badge/Go-1.26-blue.svg)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go-1.27.1-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://llm-d.slack.com/archives/C0AA8772H7T)
 [![apiserver](https://img.shields.io/github/v/release/llm-d/llm-d-batch-gateway?label=apiserver)](https://github.com/llm-d/llm-d-batch-gateway/pkgs/container/batch-gateway-apiserver)
@@ -163,7 +163,7 @@ batch-gateway/
 
 ### Prerequisites
 
-- Go 1.26 or later.
+- Go 1.27.1 or later.
 - PostgreSQL 12+ (for metadata storage).
 - Redis 6+ or Valkey 8+ (for job queue).
 - S3-compatible object storage or local filesystem.

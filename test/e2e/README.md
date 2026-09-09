@@ -5,7 +5,7 @@ End-to-end tests for the batch-gateway. They run against a live deployment and c
 ## Prerequisites
 
 - `kubectl`, `helm`, `kind`, Docker or Podman
-- Go 1.26+
+- Go 1.27.1 or later
 - The vllm-vcr image (`ghcr.io/neuralmagic/vllm-vcr`, multi-arch: linux/amd64
   and linux/arm64). To test an unreleased vllm-vcr build it locally
   (`docker build --load -t ghcr.io/neuralmagic/vllm-vcr:dev .`) and set
