@@ -61,9 +61,9 @@ func newComposeBackend(t *testing.T) *composeBackend {
 		b.startHostVCR()
 		b.files = append(b.files, filepath.Join(b.dir, "compose.hostvcr.yaml"))
 	}
-	b.compose("down", "-v", "--remove-orphans")
+	b.downAll()
 	t.Cleanup(func() {
-		b.compose("down", "-v", "--remove-orphans")
+		b.downAll()
 		b.stopHostVCR()
 	})
 	return b
@@ -84,6 +84,53 @@ func (b *composeBackend) applyEnv(key, value string) { b.env[key] = value }
 func (b *composeBackend) restart(service string) {
 	b.t.Helper()
 	b.compose("up", "-d", "--wait", service)
+}
+
+// downAll tears the stack down including profile-only services, which a
+// plain down leaves running.
+func (b *composeBackend) downAll() {
+	b.t.Helper()
+	// A paused container cannot be stopped or removed.
+	if id := b.containerID("processor"); id != "" {
+		_ = exec.Command("docker", "unpause", id).Run()
+	}
+	b.compose("rm", "-sf", "processor-1", "processor-2", "processor-zombie")
+	b.compose("down", "-v", "--remove-orphans")
+}
+
+// pause and unpause go through the container engine directly: the compose
+// subcommands return success without acting on a podman-backed daemon.
+func (b *composeBackend) pause(service string) {
+	b.t.Helper()
+	b.dockerContainer("pause", service)
+}
+
+func (b *composeBackend) unpause(service string) {
+	b.t.Helper()
+	b.dockerContainer("unpause", service)
+}
+
+func (b *composeBackend) dockerContainer(verb, service string) {
+	b.t.Helper()
+	id := b.containerID(service)
+	if id == "" {
+		b.t.Fatalf("resolve container for %s: none found", service)
+	}
+	if out, err := exec.Command("docker", verb, id).CombinedOutput(); err != nil {
+		b.t.Fatalf("docker %s %s: %v\n%s", verb, service, err, out)
+	}
+}
+
+// containerID resolves a service's container in any state; compose ps
+// skips paused containers.
+func (b *composeBackend) containerID(service string) string {
+	out, err := exec.Command("docker", "ps", "-a", "-q",
+		"--filter", "label=com.docker.compose.project="+composeProject,
+		"--filter", "label=com.docker.compose.service="+service).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
 }
 
 func (b *composeBackend) stop(service string) {
@@ -136,7 +183,7 @@ func (b *composeBackend) inferenceRequests() (int, bool) {
 }
 
 func (b *composeBackend) dumpLogs() string {
-	cmd := b.composeArgs("logs", "--no-color", "--tail", "200", "apiserver", "processor", "gc")
+	cmd := b.composeArgs("logs", "--no-color", "--tail", "200", "apiserver", "processor", "processor-1", "processor-2", "processor-zombie", "gc")
 	out, _ := cmd.CombinedOutput()
 	return string(out)
 }

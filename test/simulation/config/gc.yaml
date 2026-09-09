@@ -9,7 +9,8 @@ collector:
   max_concurrency: 4
 
 reconciler:
-  enabled: true
+  # The pod watcher needs a cluster; compose relies on same-identity self-recovery.
+  enabled: false
   interval: 5s
 
 db_client:

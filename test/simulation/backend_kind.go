@@ -245,6 +245,9 @@ func (b *kindBackend) kubectl(args ...string) (string, error) {
 // layer (vllm-sim) keeps no request log; scenarios needing either skip.
 func (b *kindBackend) restartsOnExit() bool { return true }
 
+func (b *kindBackend) pause(string)   { b.t.Skip("kind backend cannot freeze a pod in place") }
+func (b *kindBackend) unpause(string) {}
+
 func (b *kindBackend) healthy(service string) bool {
 	out, err := b.kubectl("get", "pods", "-l", "app.kubernetes.io/name="+kindDeployments[service],
 		"-o", "jsonpath={range .items[*]}{.status.containerStatuses[*].ready}{\"\\n\"}{end}")

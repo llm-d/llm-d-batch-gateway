@@ -115,6 +115,18 @@ func (h *harness) waitHealthy(service string, timeout time.Duration) bool {
 	return false
 }
 
+func (h *harness) pause(service string) {
+	h.t.Helper()
+	h.rec.event("service-pause", map[string]any{"service": service})
+	h.b.pause(service)
+}
+
+func (h *harness) unpause(service string) {
+	h.t.Helper()
+	h.rec.event("service-unpause", map[string]any{"service": service})
+	h.b.unpause(service)
+}
+
 func (h *harness) waitAPIReady() {
 	h.t.Helper()
 	deadline := time.Now().Add(readyTimeout)

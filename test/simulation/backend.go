@@ -58,6 +58,10 @@ type stackBackend interface {
 	restartsOnExit() bool
 	// healthy reports whether the service is up and serving.
 	healthy(service string) bool
+	// pause freezes the service's process without stopping it, a stand-in for
+	// a network partition; unpause resumes it.
+	pause(service string)
+	unpause(service string)
 }
 
 // simParams are backend timing characteristics scenarios must scale to.

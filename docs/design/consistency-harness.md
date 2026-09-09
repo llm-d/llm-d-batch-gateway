@@ -149,6 +149,8 @@ ratchet manifest, and seven scenarios that each reproduce their finding:
 | duplicate_execution | single execution | dequeue held past two reconciler cycles before launch |
 | recovery_crash_loop | bounded recovery | crash after the blob upload on every recovery of the same job |
 | cancel_racing_completion | terminal immutability | cancel handler stalled between read and write while the job completes |
+| zombie_owner_burns_inference | bounded waste | owner frozen mid-job, same-identity replacement finishes it, owner thawed |
+| replicas_execute_once | single execution | three replicas race for a burst of batches |
 
 duplicate_execution needs the network-fault topology: store connections run
 through per-component toxiproxy proxies, and vllm-vcr's request log is the
