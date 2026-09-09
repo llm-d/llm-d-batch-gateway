@@ -53,6 +53,11 @@ type stackBackend interface {
 	// scenario, from vcr's request log. The witness for the single-execution
 	// and API-honesty invariants. ok=false when the backend has no witness.
 	inferenceRequests() (n int, ok bool)
+	// restartsOnExit reports whether the backend brings a crashed service back
+	// by itself (kubelet container restarts) or leaves it down (compose).
+	restartsOnExit() bool
+	// healthy reports whether the service is up and serving.
+	healthy(service string) bool
 }
 
 // simParams are backend timing characteristics scenarios must scale to.

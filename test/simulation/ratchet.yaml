@@ -18,3 +18,5 @@ scenarios:
   orphaned_blob: broken
   finalization_strand: broken
   async_result_destruction: broken
+  recovery_crash_loop: fixed
+  cancel_racing_completion: broken

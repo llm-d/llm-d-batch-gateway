@@ -272,6 +272,26 @@ func (b *kindBackend) kubectl(args ...string) (string, error) {
 
 // The kind backend has no toxiproxy on the store paths and its inference
 // layer (vllm-sim) keeps no request log; scenarios needing either skip.
+func (b *kindBackend) restartsOnExit() bool { return true }
+
+func (b *kindBackend) healthy(service string) bool {
+	out, err := b.kubectl("get", "pods", "-l", "app.kubernetes.io/name="+kindDeployments[service],
+		"-o", "jsonpath={range .items[*]}{.status.containerStatuses[*].ready}{\"\\n\"}{end}")
+	if err != nil {
+		return false
+	}
+	lines := strings.Fields(out)
+	if len(lines) == 0 {
+		return false
+	}
+	for _, l := range lines {
+		if l != "true" {
+			return false
+		}
+	}
+	return true
+}
+
 func (b *kindBackend) toxiproxyAddr() (string, bool)  { return "", false }
 func (b *kindBackend) inferenceRequests() (int, bool) { return 0, false }
 

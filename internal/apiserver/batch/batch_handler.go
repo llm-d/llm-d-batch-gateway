@@ -539,6 +539,8 @@ func (c *BatchAPIHandler) CancelBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	failpoint.Inject("apiserver/before-cancel-dbupdate")
+
 	dbItem.Epoch = item.Epoch
 	if err := c.clients.BatchDB.DBUpdate(ctx, dbItem, item.Status); err != nil {
 		if errors.Is(err, api.ErrConflict) {

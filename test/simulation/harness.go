@@ -101,6 +101,20 @@ func (h *harness) kill(service string) {
 	h.b.kill(service)
 }
 
+func (h *harness) restartsOnExit() bool { return h.b.restartsOnExit() }
+
+// waitHealthy polls until the service is up and serving, or the timeout passes.
+func (h *harness) waitHealthy(service string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if h.b.healthy(service) {
+			return true
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return false
+}
+
 func (h *harness) waitAPIReady() {
 	h.t.Helper()
 	deadline := time.Now().Add(readyTimeout)

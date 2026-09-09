@@ -98,6 +98,21 @@ func (b *composeBackend) kill(service string) {
 
 func (b *composeBackend) toxiproxyAddr() (string, bool) { return "http://127.0.0.1:18474", true }
 
+func (b *composeBackend) restartsOnExit() bool { return false }
+
+func (b *composeBackend) healthy(service string) bool {
+	out, err := b.composeArgs("ps", "--status", "running", "--services").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == service {
+			return true
+		}
+	}
+	return false
+}
+
 // vcrRequestLogLine marks one request reaching the simulated engine
 // (vllm-vcr --log-requests, on in both the container entrypoint and the
 // host-vcr fallback).
