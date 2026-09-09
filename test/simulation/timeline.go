@@ -28,7 +28,8 @@ import (
 )
 
 // legalEdges is the allowed status transition graph from
-// docs/design/batch_processor_architecture.md section 2.
+// docs/design/batch_processor_architecture.md section 2, plus the
+// re-enqueue edges recovery takes when an owned job goes back to the queue.
 var legalEdges = map[openai.BatchStatus][]openai.BatchStatus{
 	openai.BatchStatusValidating: {
 		openai.BatchStatusInProgress, openai.BatchStatusFailed,
@@ -38,10 +39,11 @@ var legalEdges = map[openai.BatchStatus][]openai.BatchStatus{
 	openai.BatchStatusInProgress: {
 		openai.BatchStatusFinalizing, openai.BatchStatusFailed,
 		openai.BatchStatusExpired, openai.BatchStatusCancelling,
+		openai.BatchStatusValidating,
 	},
 	openai.BatchStatusFinalizing: {
 		openai.BatchStatusCompleted, openai.BatchStatusFailed,
-		openai.BatchStatusCancelled,
+		openai.BatchStatusCancelled, openai.BatchStatusValidating,
 	},
 	openai.BatchStatusCancelling: {
 		openai.BatchStatusCancelled, openai.BatchStatusFailed,
