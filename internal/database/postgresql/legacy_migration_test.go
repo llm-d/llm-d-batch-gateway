@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +41,17 @@ func TestLegacyRowsAfterMigration(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, preQueueSchema); err != nil {
 		t.Fatalf("old schema: %v", err)
+	}
+	// Simulate the queue index installed before the resumable marker existed.
+	// The migration must create the replacement predicate before dropping it.
+	if _, err := pool.Exec(ctx, `
+		ALTER TABLE batch_items ADD COLUMN processor_id TEXT;
+		ALTER TABLE batch_items ADD COLUMN priority BIGINT;
+		CREATE INDEX idx_batch_items_queue ON batch_items (priority ASC)
+			WHERE processor_id IS NULL
+			  AND status IS NOT NULL
+			  AND status::jsonb->>'status' = 'validating'`); err != nil {
+		t.Fatalf("old queue index: %v", err)
 	}
 	slo := time.Now().Add(24 * time.Hour).UTC().UnixMicro()
 	tags := `{"slo_unix_micro":"` + strconv.FormatInt(slo, 10) + `"}`
@@ -110,6 +122,28 @@ func TestLegacyRowsAfterMigration(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatalf("PQEnqueue: %v", err)
+		}
+	})
+
+	t.Run("queue index is replaced with resumable predicate", func(t *testing.T) {
+		var definition string
+		if err := pool.QueryRow(ctx,
+			`SELECT indexdef FROM pg_indexes WHERE tablename = 'batch_items' AND indexname = 'idx_batch_items_queue_non_resumable'`,
+		).Scan(&definition); err != nil {
+			t.Fatalf("new queue index: %v", err)
+		}
+		if !strings.Contains(definition, "resumable = false") {
+			t.Fatalf("new queue index lacks resumable predicate: %s", definition)
+		}
+
+		var oldIndexCount int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_indexes WHERE tablename = 'batch_items' AND indexname = 'idx_batch_items_queue'`,
+		).Scan(&oldIndexCount); err != nil {
+			t.Fatalf("old queue index lookup: %v", err)
+		}
+		if oldIndexCount != 0 {
+			t.Fatal("pre-resumable queue index was not removed")
 		}
 	})
 }
