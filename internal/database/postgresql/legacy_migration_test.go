@@ -92,9 +92,24 @@ func TestLegacyRowsAfterMigration(t *testing.T) {
 		}
 		for _, it := range items {
 			if it.ID == "legacy-inflight" {
+				if it.Resumable {
+					t.Error("legacy row must default to non-resumable")
+				}
 				return
 			}
 		}
 		t.Errorf("legacy-inflight (in_progress, no processor_id) is invisible to both the queue and the reconciler; got %d owned items", len(items))
+	})
+
+	t.Run("in-flight legacy row can be re-enqueued at epoch zero", func(t *testing.T) {
+		err := queue.PQEnqueue(ctx, &api.BatchJobPriority{
+			ID:             "legacy-inflight",
+			Epoch:          0,
+			ProcessorID:    "pre-migration",
+			ExpectedStatus: "in_progress",
+		})
+		if err != nil {
+			t.Fatalf("PQEnqueue: %v", err)
+		}
 	})
 }

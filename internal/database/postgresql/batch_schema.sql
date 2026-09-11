@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS batch_items (
     processor_id  TEXT,
     priority      BIGINT,
     epoch         BIGINT NOT NULL DEFAULT 0,
-    recovery_attempts BIGINT NOT NULL DEFAULT 0
+    recovery_attempts BIGINT NOT NULL DEFAULT 0,
+    resumable     BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 -- Schema migration for existing tables from previous versions.
@@ -29,6 +30,7 @@ ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS processor_id TEXT;
 ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS priority BIGINT;
 ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS epoch BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS recovery_attempts BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS resumable BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Rows written before the queue columns existed carry the SLO in a tag and
 -- have no owner. Restore the queue order from the tag and hand in-flight rows
@@ -49,6 +51,7 @@ CREATE INDEX IF NOT EXISTS idx_batch_items_tags ON batch_items USING GIN (tags) 
 CREATE INDEX IF NOT EXISTS idx_batch_items_queue
     ON batch_items (priority ASC)
     WHERE processor_id IS NULL
+      AND resumable = FALSE
       AND status IS NOT NULL
       AND status::jsonb->>'status' = 'validating';
 
