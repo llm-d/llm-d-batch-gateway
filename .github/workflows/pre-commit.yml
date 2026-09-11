@@ -16,6 +16,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: batch_gateway_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d batch_gateway_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -44,6 +58,11 @@ jobs:
 
       - name: Run integration tests
         run: make test-integration
+        env:
+          # The PostgreSQL-backed tests share one schema and perform destructive
+          # setup, so keep package execution serial until they use isolated DBs.
+          GOFLAGS: -p=1
+          TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/batch_gateway_test?sslmode=disable
 
       - name: Lint Helm chart
         run: |
