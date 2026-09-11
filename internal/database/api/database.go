@@ -109,6 +109,10 @@ type BatchJobPriority struct {
 	Data  []byte    `json:"data,omitempty"`  // [optional] User defined data.
 	TTL   int       `json:"ttl,omitempty"`   // [optional] TTL in seconds applied on the entire queue. If used, this should be set to a sufficiently large value to prevent premature removal of items.
 	Epoch int64     `json:"epoch,omitempty"` // Fencing token incremented on every ownership change.
+	// ProcessorID and ExpectedStatus fence Postgres re-enqueue against the
+	// ownership and lifecycle state observed by the caller.
+	ProcessorID    string `json:"processor_id,omitempty"`
+	ExpectedStatus string `json:"expected_status,omitempty"`
 	// RecoveryAttempts counts startup recoveries of the current ownership.
 	RecoveryAttempts int64 `json:"recovery_attempts,omitempty"`
 }

@@ -32,6 +32,7 @@ import (
 	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/batch_utils"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
+	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
 	uotel "github.com/llm-d/llm-d-batch-gateway/internal/util/otel"
 )
 
@@ -217,6 +218,10 @@ func (r *Reconciler) triageOrphan(ctx context.Context, job *db.BatchItem, result
 	defer span.End()
 	span.SetAttributes(attribute.String(uotel.AttrBatchID, job.ID))
 	logger := logr.FromContextOrDiscard(ctx)
+	if job.Resumable {
+		logger.V(logging.DEBUG).Info("Reconciler: startup recovery owns resumable job")
+		return
+	}
 
 	var statusInfo openai.BatchStatusInfo
 	if err := json.Unmarshal(job.Status, &statusInfo); err != nil {
@@ -233,7 +238,7 @@ func (r *Reconciler) triageOrphan(ctx context.Context, job *db.BatchItem, result
 		if isSLOExpired(job) {
 			r.transitionOrphan(ctx, job, &statusInfo, openai.BatchStatusFailed, result, logger)
 		} else {
-			r.reEnqueueOrphan(ctx, job, result, logger)
+			r.reEnqueueOrphan(ctx, job, statusInfo.Status, result, logger)
 		}
 	}
 }
@@ -260,11 +265,13 @@ func (r *Reconciler) transitionOrphan(ctx context.Context, job *db.BatchItem, st
 		return
 	}
 
+	expectedResumable := false
 	updateItem := &db.BatchItem{
-		BaseIndexes:  db.BaseIndexes{ID: job.ID},
-		BaseContents: db.BaseContents{Status: updatedBytes},
-		Epoch:        job.Epoch,
-		BumpEpoch:    true,
+		BaseIndexes:      db.BaseIndexes{ID: job.ID},
+		BaseContents:     db.BaseContents{Status: updatedBytes},
+		Epoch:            job.Epoch,
+		BumpEpoch:        true,
+		ExpectedResumable: &expectedResumable,
 	}
 	if err := r.batchDB.DBUpdate(ctx, updateItem, job.Status); err != nil {
 		if errors.Is(err, db.ErrConflict) {
@@ -282,7 +289,7 @@ func (r *Reconciler) transitionOrphan(ctx context.Context, job *db.BatchItem, st
 }
 
 // reEnqueueOrphan re-enqueues an orphaned job whose SLO is still valid.
-func (r *Reconciler) reEnqueueOrphan(ctx context.Context, job *db.BatchItem, result *Result, logger logr.Logger) {
+func (r *Reconciler) reEnqueueOrphan(ctx context.Context, job *db.BatchItem, expectedStatus openai.BatchStatus, result *Result, logger logr.Logger) {
 	if job.Priority <= 0 {
 		logger.Error(fmt.Errorf("missing priority"), "Reconciler: cannot re-enqueue orphan without priority")
 		result.Errors++
@@ -298,8 +305,11 @@ func (r *Reconciler) reEnqueueOrphan(ctx context.Context, job *db.BatchItem, res
 	}
 
 	task := &db.BatchJobPriority{
-		ID:  job.ID,
-		SLO: slo,
+		ID:             job.ID,
+		SLO:            slo,
+		Epoch:          job.Epoch,
+		ProcessorID:    job.ProcessorID,
+		ExpectedStatus: string(expectedStatus),
 	}
 	if err := r.queue.PQEnqueue(ctx, task); err != nil {
 		logger.Error(err, "Reconciler: failed to re-enqueue orphan")
