@@ -69,18 +69,17 @@ type recoveryResult struct {
 // writes at the new epoch and a zombie holding the previous one is fenced out.
 //
 // Runs once at startup before the polling loop.
-func (p *Processor) recoverOwnedJobs(ctx context.Context) {
+func (p *Processor) recoverOwnedJobs(ctx context.Context) error {
 	logger := logr.FromContextOrDiscard(ctx)
 
 	tasks, err := p.poller.claimOwned(ctx)
 	if err != nil {
-		logger.Error(err, "Startup recovery: failed to claim owned jobs")
-		return
+		return fmt.Errorf("claim owned jobs: %w", err)
 	}
 
 	if len(tasks) == 0 {
 		logger.V(logging.DEBUG).Info("Startup recovery: no owned jobs found")
-		return
+		return nil
 	}
 
 	logger.V(logging.INFO).Info("Startup recovery: found owned jobs", "count", len(tasks))
@@ -95,16 +94,21 @@ func (p *Processor) recoverOwnedJobs(ctx context.Context) {
 			if task.RecoveryAttempts > maxRecoveryAttempts {
 				if failErr := p.recoverExhausted(jctx, task.ID); failErr != nil {
 					jlogger.Error(failErr, "Startup recovery: failed to fail job past its recovery budget")
+					return failErr
 				}
 				return nil
 			}
 			if recoverErr := p.recoverJob(jctx, task.ID); recoverErr != nil {
 				jlogger.Error(recoverErr, "Startup recovery: failed to recover owned job")
+				return recoverErr
 			}
 			return nil
 		})
 	}
-	_ = grp.Wait()
+	if err := grp.Wait(); err != nil {
+		return fmt.Errorf("recover owned jobs: %w", err)
+	}
+	return nil
 }
 
 // maxRecoveryAttempts bounds how often one ownership may recover a job before
@@ -119,6 +123,9 @@ func (p *Processor) recoverExhausted(ctx context.Context, jobID string) error {
 	}
 	if dbItem == nil {
 		return nil
+	}
+	if dbItem.Resumable {
+		return fmt.Errorf("recovery attempts exhausted after %d for resumable job %s", maxRecoveryAttempts, jobID)
 	}
 	jobInfo, _ := batch_utils.FromDBItemToJobInfoObject(dbItem)
 	logr.FromContextOrDiscard(ctx).Info("Startup recovery: recovery budget exhausted, failing job")
@@ -149,6 +156,12 @@ func (p *Processor) recoverJob(ctx context.Context, jobID string) error {
 		metrics.RecordStartupRecovery(string(recoveryUnknownStatus), recoveryActionCleanedUp)
 		p.cleanupStaleJobDir(ctx, jobID)
 		return nil
+	}
+	// The resumable writer and durable-manifest recovery path are introduced in
+	// later stages. Until then, fail closed rather than applying legacy recovery
+	// actions that may reset or terminalize resumable work.
+	if dbItem.Resumable {
+		return fmt.Errorf("resumable recovery is not enabled for job %s", jobID)
 	}
 
 	jobInfo, err := batch_utils.FromDBItemToJobInfoObject(dbItem)
@@ -321,7 +334,7 @@ func (p *Processor) recoverReEnqueue(ctx context.Context, dbItem *db.BatchItem, 
 		}
 	}
 
-	task, err := p.buildRecoveryTask(dbItem, slo)
+	task, err := p.buildRecoveryTask(dbItem, slo, openai.BatchStatusValidating)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build recovery task: %w", err)
 	}
@@ -439,14 +452,17 @@ func (p *Processor) extractRecoverySLO(dbItem *db.BatchItem, jobInfo *batch_type
 }
 
 // buildRecoveryTask constructs a BatchJobPriority for re-enqueue.
-func (p *Processor) buildRecoveryTask(dbItem *db.BatchItem, slo *time.Time) (*db.BatchJobPriority, error) {
+func (p *Processor) buildRecoveryTask(dbItem *db.BatchItem, slo *time.Time, expectedStatus openai.BatchStatus) (*db.BatchJobPriority, error) {
 	if slo == nil || slo.IsZero() {
 		return nil, fmt.Errorf("missing recovery SLO for job %s", dbItem.ID)
 	}
 
 	task := &db.BatchJobPriority{
-		ID:  dbItem.ID,
-		SLO: slo.UTC(),
+		ID:             dbItem.ID,
+		SLO:            slo.UTC(),
+		Epoch:          dbItem.Epoch,
+		ProcessorID:    dbItem.ProcessorID,
+		ExpectedStatus: string(expectedStatus),
 	}
 	return task, nil
 }
