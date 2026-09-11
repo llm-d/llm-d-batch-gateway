@@ -47,13 +47,17 @@ CREATE INDEX IF NOT EXISTS idx_batch_items_tenant_id ON batch_items(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_batch_items_expiry ON batch_items(expiry) WHERE expiry IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_batch_items_tags ON batch_items USING GIN (tags) WHERE tags IS NOT NULL;
 
--- Queue index: unclaimed jobs ordered by priority (SLO deadline, earliest first).
-CREATE INDEX IF NOT EXISTS idx_batch_items_queue
+-- Queue index: unclaimed, non-resumable jobs ordered by priority. Use a new
+-- name so existing installations do not retain the pre-resumable predicate
+-- through CREATE INDEX IF NOT EXISTS. Create the replacement before removing
+-- the old index so an upgrade never leaves the queue without an index.
+CREATE INDEX IF NOT EXISTS idx_batch_items_queue_non_resumable
     ON batch_items (priority ASC)
     WHERE processor_id IS NULL
       AND resumable = FALSE
       AND status IS NOT NULL
       AND status::jsonb->>'status' = 'validating';
+DROP INDEX IF EXISTS idx_batch_items_queue;
 
 -- Processor ownership index: find jobs owned by a specific processor for crash recovery.
 CREATE INDEX IF NOT EXISTS idx_batch_items_processor
