@@ -134,8 +134,8 @@ func TestPQClaimOwned(t *testing.T) {
 
 		mock.ExpectQuery("UPDATE batch_items").
 			WithArgs(testProcessorID).
-			WillReturnRows(pgxmock.NewRows([]string{"id", "priority", "epoch", "recovery_attempts"}).
-				AddRow("batch-1", int64(1234567890123456), int64(4), int64(2)))
+			WillReturnRows(pgxmock.NewRows([]string{"id", "priority", "epoch", "recovery_attempts", "resumable"}).
+				AddRow("batch-1", int64(1234567890123456), int64(4), int64(2), true))
 
 		jobs, err := client.PQClaimOwned(ctx)
 		if err != nil {
@@ -146,6 +146,9 @@ func TestPQClaimOwned(t *testing.T) {
 		}
 		if jobs[0].ID != "batch-1" || jobs[0].Epoch != 4 || jobs[0].RecoveryAttempts != 2 {
 			t.Errorf("unexpected job: %+v", jobs[0])
+		}
+		if !jobs[0].Resumable {
+			t.Error("resumable marker was not returned from the claimed row")
 		}
 		if !jobs[0].SLO.Equal(time.UnixMicro(1234567890123456)) {
 			t.Errorf("SLO: got %v, want %v", jobs[0].SLO, time.UnixMicro(1234567890123456))

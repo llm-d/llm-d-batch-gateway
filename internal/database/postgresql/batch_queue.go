@@ -187,7 +187,7 @@ func (c *PostgresBatchQueueClient) PQClaimOwned(ctx context.Context) ([]*api.Bat
 		WHERE processor_id = $1
 		  AND status IS NOT NULL
 		  AND `+nonTerminalCondition+`
-		RETURNING id, COALESCE(priority, 0), epoch, recovery_attempts`,
+		RETURNING id, COALESCE(priority, 0), epoch, recovery_attempts, resumable`,
 		c.processorID,
 	)
 	if err != nil {
@@ -199,7 +199,8 @@ func (c *PostgresBatchQueueClient) PQClaimOwned(ctx context.Context) ([]*api.Bat
 	for rows.Next() {
 		var id string
 		var priority, epoch, attempts int64
-		if err := rows.Scan(&id, &priority, &epoch, &attempts); err != nil {
+		var resumable bool
+		if err := rows.Scan(&id, &priority, &epoch, &attempts, &resumable); err != nil {
 			return nil, fmt.Errorf("PQClaimOwned: scan: %w", err)
 		}
 		result = append(result, &api.BatchJobPriority{
@@ -207,6 +208,7 @@ func (c *PostgresBatchQueueClient) PQClaimOwned(ctx context.Context) ([]*api.Bat
 			SLO:              time.UnixMicro(priority),
 			Epoch:            epoch,
 			RecoveryAttempts: attempts,
+			Resumable:        resumable,
 		})
 	}
 	if err := rows.Err(); err != nil {
