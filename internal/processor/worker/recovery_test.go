@@ -59,6 +59,16 @@ func seedDBJobWithStatus(t *testing.T, dbClient db.BatchDBClient, jobID, tenantI
 
 func seedDBJobWithStatusAndSLO(t *testing.T, dbClient db.BatchDBClient, jobID, tenantID string, status openai.BatchStatus, counts *openai.BatchRequestCounts, slo time.Time) {
 	t.Helper()
+	seedDBJobWithStatusAndSLOAndResumable(t, dbClient, jobID, tenantID, status, counts, slo, false)
+}
+
+func seedResumableDBJobWithStatus(t *testing.T, dbClient db.BatchDBClient, jobID, tenantID string, status openai.BatchStatus, counts *openai.BatchRequestCounts) {
+	t.Helper()
+	seedDBJobWithStatusAndSLOAndResumable(t, dbClient, jobID, tenantID, status, counts, time.Now().UTC().Add(24*time.Hour), true)
+}
+
+func seedDBJobWithStatusAndSLOAndResumable(t *testing.T, dbClient db.BatchDBClient, jobID, tenantID string, status openai.BatchStatus, counts *openai.BatchRequestCounts, slo time.Time, resumable bool) {
+	t.Helper()
 
 	expiresAt := slo.Unix()
 	statusInfo := openai.BatchStatusInfo{
@@ -86,7 +96,8 @@ func seedDBJobWithStatusAndSLO(t *testing.T, dbClient db.BatchDBClient, jobID, t
 			Status: statusBytes,
 			Spec:   specBytes,
 		},
-		Priority: slo.UTC().UnixMicro(),
+		Priority:  slo.UTC().UnixMicro(),
+		Resumable: resumable,
 	}
 	if err := dbClient.DBStore(context.Background(), item); err != nil {
 		t.Fatalf("seed DB job: %v", err)
@@ -267,6 +278,35 @@ func TestRecoverOwnedJobs(t *testing.T) {
 		}
 	})
 
+	t.Run("legacy recovery error remains best effort", func(t *testing.T) {
+		workDir := t.TempDir()
+		p, _, spyQueue := newRecoveryTestProcessorWithQueryFilter(t, workDir)
+		queue := spyQueue.inner.(*mockdb.MockBatchPriorityQueueClient)
+		queue.OnClaimOwned = func(context.Context) ([]*db.BatchJobPriority, error) {
+			return []*db.BatchJobPriority{{ID: "legacy-1"}}, nil
+		}
+		p.poller.db = &failOnGetDB{err: errors.New("transient read failure")}
+
+		if err := p.recoverOwnedJobs(testLoggerCtx(t)); err != nil {
+			t.Fatalf("legacy recovery error must not abort startup: %v", err)
+		}
+	})
+
+	t.Run("claimed resumable marker makes follow-up read error fatal", func(t *testing.T) {
+		workDir := t.TempDir()
+		p, _, spyQueue := newRecoveryTestProcessorWithQueryFilter(t, workDir)
+		readErr := errors.New("transient read failure")
+		queue := spyQueue.inner.(*mockdb.MockBatchPriorityQueueClient)
+		queue.OnClaimOwned = func(context.Context) ([]*db.BatchJobPriority, error) {
+			return []*db.BatchJobPriority{{ID: "resumable-1", Resumable: true}}, nil
+		}
+		p.poller.db = &failOnGetDB{err: readErr}
+
+		if err := p.recoverOwnedJobs(testLoggerCtx(t)); !errors.Is(err, readErr) {
+			t.Fatalf("resumable read failure must abort startup: %v", err)
+		}
+	})
+
 	t.Run("claims every owned job in one call", func(t *testing.T) {
 		workDir := t.TempDir()
 		p, batchDB, spyQueue := newRecoveryTestProcessorWithQueryFilter(t, workDir)
@@ -330,18 +370,10 @@ func TestRecoverOwnedJobs(t *testing.T) {
 		p, batchDB, spyQueue := newRecoveryTestProcessorWithQueryFilter(t, workDir)
 
 		const id = "resumable-1"
-		seedDBJobWithStatus(t, batchDB, id, "tenant-1", openai.BatchStatusInProgress, nil)
+		seedResumableDBJobWithStatus(t, batchDB, id, "tenant-1", openai.BatchStatusInProgress, nil)
 		setProcessorID(t, batchDB, id, p.processorID)
-		items, _, _, err := batchDB.DBGet(context.Background(), &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{id}}}, true, 0, 1)
-		if err != nil || len(items) != 1 {
-			t.Fatalf("DBGet: %v", err)
-		}
-		items[0].Resumable = true
-		if err := batchDB.DBUpdate(context.Background(), items[0], nil); err != nil {
-			t.Fatalf("DBUpdate: %v", err)
-		}
 
-		err = p.recoverOwnedJobs(testLoggerCtx(t))
+		err := p.recoverOwnedJobs(testLoggerCtx(t))
 		if err == nil {
 			t.Fatal("expected resumable recovery to fail closed")
 		}
@@ -350,6 +382,26 @@ func TestRecoverOwnedJobs(t *testing.T) {
 		}
 		if got := getDBJobStatus(t, batchDB, id); got != openai.BatchStatusInProgress {
 			t.Fatalf("resumable job was terminalized or reset: %s", got)
+		}
+	})
+
+	t.Run("resumable failure does not prevent legacy recovery", func(t *testing.T) {
+		workDir := t.TempDir()
+		p, batchDB, spyQueue := newRecoveryTestProcessorWithQueryFilter(t, workDir)
+
+		seedDBJobWithStatus(t, batchDB, "legacy-1", "tenant-1", openai.BatchStatusInProgress, nil)
+		seedResumableDBJobWithStatus(t, batchDB, "resumable-1", "tenant-1", openai.BatchStatusInProgress, nil)
+		for _, id := range []string{"legacy-1", "resumable-1"} {
+			setProcessorID(t, batchDB, id, p.processorID)
+			createJobDir(t, p, id, "tenant-1")
+		}
+
+		err := p.recoverOwnedJobs(testLoggerCtx(t))
+		if !errors.Is(err, errResumableRecoveryUnavailable) {
+			t.Fatalf("expected resumable recovery error, got %v", err)
+		}
+		if spyQueue.EnqueueCalls() != 1 {
+			t.Fatalf("legacy job was not recovered exactly once: %d enqueue calls", spyQueue.EnqueueCalls())
 		}
 	})
 }
