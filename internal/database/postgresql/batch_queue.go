@@ -61,8 +61,9 @@ func (c *PostgresBatchQueueClient) Close() error {
 // GC recovery or processor graceful shutdown). It resets status to 'validating',
 // clears processor_id so the job becomes visible to PQDequeue again, and bumps
 // epoch to fence out any zombie writes from the previous owner.
-// The UPDATE is guarded to only affect non-terminal jobs that are currently claimed
-// by a processor, preventing accidental resurrection of completed/failed work.
+// The UPDATE is guarded to only affect non-resumable, non-terminal jobs that
+// are currently claimed by a processor. Resumable jobs are exclusively owned
+// by startup recovery and must never be reset through a queue re-enqueue.
 // If the guard matches nothing (job already terminal, or already back in the
 // queue) it returns api.ErrConflict so callers can distinguish a no-op from a
 // real re-enqueue.
@@ -73,6 +74,15 @@ func (c *PostgresBatchQueueClient) PQEnqueue(ctx context.Context, jobPriority *a
 	if jobPriority.ID == "" {
 		return fmt.Errorf("PQEnqueue: empty job ID")
 	}
+	if jobPriority.Epoch < 0 {
+		return fmt.Errorf("PQEnqueue: invalid epoch for %s", jobPriority.ID)
+	}
+	if jobPriority.ProcessorID == "" {
+		return fmt.Errorf("PQEnqueue: empty processor ID for %s", jobPriority.ID)
+	}
+	if jobPriority.ExpectedStatus == "" {
+		return fmt.Errorf("PQEnqueue: empty expected status for %s", jobPriority.ID)
+	}
 	result, err := c.pool.Exec(ctx,
 		`WITH re_enqueued AS (
 			UPDATE batch_items
@@ -80,20 +90,23 @@ func (c *PostgresBatchQueueClient) PQEnqueue(ctx context.Context, jobPriority *a
 			    status = jsonb_set(status, '{status}', '"validating"'),
 			    epoch = epoch + 1
 			WHERE id = $1
-			  AND processor_id IS NOT NULL
+			  AND epoch = $2
+			  AND processor_id = $3
+			  AND status::jsonb->>'status' = $4
+			  AND resumable = FALSE
 			  AND `+nonTerminalCondition+`
 			RETURNING id
 		)
 		-- TODO: the processor polling loop (worker.go) could LISTEN on this channel
 		-- to wake up immediately instead of waiting for the next poll interval.
 		SELECT pg_notify('batch_jobs_available', '') FROM re_enqueued`,
-		jobPriority.ID,
+		jobPriority.ID, jobPriority.Epoch, jobPriority.ProcessorID, jobPriority.ExpectedStatus,
 	)
 	if err != nil {
 		return fmt.Errorf("PQEnqueue: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return fmt.Errorf("PQEnqueue: %s is not owned or already terminal: %w", jobPriority.ID, api.ErrConflict)
+		return fmt.Errorf("PQEnqueue: %s is resumable, not owned, or already terminal: %w", jobPriority.ID, api.ErrConflict)
 	}
 	return nil
 }
@@ -115,6 +128,7 @@ func (c *PostgresBatchQueueClient) PQDequeue(ctx context.Context, _ time.Duratio
 		`WITH claimed AS (
 			SELECT id FROM batch_items
 			WHERE processor_id IS NULL
+			  AND resumable = FALSE
 			  AND status IS NOT NULL
 			  AND status::jsonb->>'status' = 'validating'
 			ORDER BY priority ASC
@@ -143,9 +157,11 @@ func (c *PostgresBatchQueueClient) PQDequeue(ctx context.Context, _ time.Duratio
 			return nil, fmt.Errorf("PQDequeue: scan: %w", err)
 		}
 		result = append(result, &api.BatchJobPriority{
-			ID:    id,
-			SLO:   time.UnixMicro(priority),
-			Epoch: epoch,
+			ID:             id,
+			SLO:            time.UnixMicro(priority),
+			Epoch:          epoch,
+			ProcessorID:    c.processorID,
+			ExpectedStatus: "validating",
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -200,8 +216,8 @@ func (c *PostgresBatchQueueClient) PQClaimOwned(ctx context.Context) ([]*api.Bat
 }
 
 // PQDelete atomically removes a job from the queue by transitioning it to
-// cancelled with a cancelled_at timestamp, but only if it is still unclaimed
-// (validating with no processor_id).
+// cancelled with a cancelled_at timestamp, but only if it is non-resumable and
+// still unclaimed (validating with no processor_id).
 // Returns 1 if the job was cancelled, 0 if it was already claimed by a processor.
 // The FOR UPDATE SKIP LOCKED prevents races with concurrent PQDequeue calls.
 func (c *PostgresBatchQueueClient) PQDelete(ctx context.Context, jobPriority *api.BatchJobPriority) (int, error) {
@@ -215,6 +231,7 @@ func (c *PostgresBatchQueueClient) PQDelete(ctx context.Context, jobPriority *ap
 			SELECT id FROM batch_items
 			WHERE id = $1
 			  AND processor_id IS NULL
+			  AND resumable = FALSE
 			  AND status IS NOT NULL
 			  AND status::jsonb->>'status' = 'validating'
 			FOR UPDATE SKIP LOCKED
