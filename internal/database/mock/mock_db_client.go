@@ -151,9 +151,20 @@ func (m *MockDBClient[T, Q]) DBUpdate(ctx context.Context, item *T, expectedStat
 		// Epoch fencing: if the update item has Epoch > 0, check it matches.
 		updateVal := reflect.ValueOf(*item)
 		epochField := updateVal.FieldByName("Epoch")
-		if epochField.IsValid() && epochField.Kind() == reflect.Int64 && epochField.Int() > 0 {
+		bumpEpochField := updateVal.FieldByName("BumpEpoch")
+		bumpEpoch := bumpEpochField.IsValid() && bumpEpochField.Kind() == reflect.Bool && bumpEpochField.Bool()
+		if epochField.IsValid() && epochField.Kind() == reflect.Int64 && (epochField.Int() > 0 || bumpEpoch) {
 			existingEpoch := val.FieldByName("Epoch")
 			if existingEpoch.IsValid() && existingEpoch.Int() != epochField.Int() {
+				return fmt.Errorf("DBUpdate: %w", api.ErrConflict)
+			}
+		}
+
+		expectedResumableField := updateVal.FieldByName("ExpectedResumable")
+		if expectedResumableField.IsValid() && expectedResumableField.Kind() == reflect.Pointer && !expectedResumableField.IsNil() {
+			existingResumable := val.FieldByName("Resumable")
+			if existingResumable.IsValid() && existingResumable.Kind() == reflect.Bool &&
+				existingResumable.Bool() != expectedResumableField.Elem().Bool() {
 				return fmt.Errorf("DBUpdate: %w", api.ErrConflict)
 			}
 		}

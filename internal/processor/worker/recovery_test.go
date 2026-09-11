@@ -216,7 +216,9 @@ func TestRecoverOwnedJobs(t *testing.T) {
 		createJobDir(t, p, "owned-2", "tenant-1")
 
 		ctx := testLoggerCtx(t)
-		p.recoverOwnedJobs(ctx)
+		if err := p.recoverOwnedJobs(ctx); err != nil {
+			t.Fatalf("recoverOwnedJobs: %v", err)
+		}
 
 		// owned-1 was in_progress with no local artifacts → re-enqueued.
 		// owned-2 was finalizing with no output files → transitions to failed.
@@ -241,23 +243,28 @@ func TestRecoverOwnedJobs(t *testing.T) {
 		setProcessorID(t, batchDB, "other-1", "other-processor")
 
 		ctx := testLoggerCtx(t)
-		p.recoverOwnedJobs(ctx)
+		if err := p.recoverOwnedJobs(ctx); err != nil {
+			t.Fatalf("recoverOwnedJobs: %v", err)
+		}
 
 		if spyQueue.EnqueueCalls() != 0 {
 			t.Errorf("expected 0 enqueue calls, got %d", spyQueue.EnqueueCalls())
 		}
 	})
 
-	t.Run("DB error is handled gracefully", func(t *testing.T) {
+	t.Run("claim error is returned", func(t *testing.T) {
 		workDir := t.TempDir()
-		p, _, _ := newRecoveryTestProcessorWithQueryFilter(t, workDir)
+		p, _, spyQueue := newRecoveryTestProcessorWithQueryFilter(t, workDir)
 
-		// Replace batchDB with one that always fails on DBGet.
-		p.batchDB = &failOnGetDB{err: fmt.Errorf("connection refused")}
+		claimErr := fmt.Errorf("connection refused")
+		spyQueue.inner.(*mockdb.MockBatchPriorityQueueClient).OnClaimOwned = func(context.Context) ([]*db.BatchJobPriority, error) {
+			return nil, claimErr
+		}
 
 		ctx := testLoggerCtx(t)
-		// Should not panic — just logs the error and returns.
-		p.recoverOwnedJobs(ctx)
+		if err := p.recoverOwnedJobs(ctx); !errors.Is(err, claimErr) {
+			t.Fatalf("expected claim error, got %v", err)
+		}
 	})
 
 	t.Run("claims every owned job in one call", func(t *testing.T) {
@@ -272,7 +279,9 @@ func TestRecoverOwnedJobs(t *testing.T) {
 		}
 
 		ctx := testLoggerCtx(t)
-		p.recoverOwnedJobs(ctx)
+		if err := p.recoverOwnedJobs(ctx); err != nil {
+			t.Fatalf("recoverOwnedJobs: %v", err)
+		}
 
 		if spyQueue.EnqueueCalls() != 5 {
 			t.Errorf("expected 5 re-enqueue calls, got %d", spyQueue.EnqueueCalls())
@@ -299,7 +308,9 @@ func TestRecoverOwnedJobs(t *testing.T) {
 		createJobDir(t, p, id, "tenant-1")
 
 		ctx := testLoggerCtx(t)
-		p.recoverOwnedJobs(ctx)
+		if err := p.recoverOwnedJobs(ctx); err != nil {
+			t.Fatalf("recoverOwnedJobs: %v", err)
+		}
 
 		items, _, _, err = batchDB.DBGet(context.Background(), &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{id}}}, true, 0, 1)
 		if err != nil || len(items) != 1 {
@@ -311,6 +322,34 @@ func TestRecoverOwnedJobs(t *testing.T) {
 		}
 		if info.Status != openai.BatchStatusFailed {
 			t.Errorf("job past its recovery budget should be failed, got %s", info.Status)
+		}
+	})
+
+	t.Run("resumable job fails closed", func(t *testing.T) {
+		workDir := t.TempDir()
+		p, batchDB, spyQueue := newRecoveryTestProcessorWithQueryFilter(t, workDir)
+
+		const id = "resumable-1"
+		seedDBJobWithStatus(t, batchDB, id, "tenant-1", openai.BatchStatusInProgress, nil)
+		setProcessorID(t, batchDB, id, p.processorID)
+		items, _, _, err := batchDB.DBGet(context.Background(), &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{id}}}, true, 0, 1)
+		if err != nil || len(items) != 1 {
+			t.Fatalf("DBGet: %v", err)
+		}
+		items[0].Resumable = true
+		if err := batchDB.DBUpdate(context.Background(), items[0], nil); err != nil {
+			t.Fatalf("DBUpdate: %v", err)
+		}
+
+		err = p.recoverOwnedJobs(testLoggerCtx(t))
+		if err == nil {
+			t.Fatal("expected resumable recovery to fail closed")
+		}
+		if spyQueue.EnqueueCalls() != 0 {
+			t.Fatalf("resumable job was re-enqueued %d times", spyQueue.EnqueueCalls())
+		}
+		if got := getDBJobStatus(t, batchDB, id); got != openai.BatchStatusInProgress {
+			t.Fatalf("resumable job was terminalized or reset: %s", got)
 		}
 	})
 }
@@ -1037,7 +1076,9 @@ func TestRecoverOwnedJobs_RunsConcurrently(t *testing.T) {
 	}
 
 	ctx := testLoggerCtx(t)
-	p.recoverOwnedJobs(ctx)
+	if err := p.recoverOwnedJobs(ctx); err != nil {
+		t.Fatalf("recoverOwnedJobs: %v", err)
+	}
 
 	// With concurrency=5 and 5 jobs at 50ms delay each, parallel should
 	// complete in ~50ms. Sequential would take ~250ms.

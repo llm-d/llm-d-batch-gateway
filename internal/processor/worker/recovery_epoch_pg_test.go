@@ -84,7 +84,9 @@ func TestRecoverOwnedJobsFencesPreviousEpoch(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	p.recoverOwnedJobs(ctx)
+	if err := p.recoverOwnedJobs(ctx); err != nil {
+		t.Fatalf("recoverOwnedJobs: %v", err)
+	}
 
 	if got := getDBJobStatus(t, batchDB, jobID); got != openai.BatchStatusCancelled {
 		t.Fatalf("recovery did not finish the cancel: status %s", got)
@@ -119,7 +121,9 @@ func TestRecoverOwnedJobsFencesPreviousEpoch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed poison: %v", err)
 	}
-	p.recoverOwnedJobs(ctx)
+	if err := p.recoverOwnedJobs(ctx); err != nil {
+		t.Fatalf("recoverOwnedJobs: %v", err)
+	}
 	if got := getDBJobStatus(t, batchDB, poisonID); got != openai.BatchStatusFailed {
 		t.Errorf("job past its recovery budget should be failed, got %s", got)
 	}
