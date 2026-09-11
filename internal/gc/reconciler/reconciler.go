@@ -312,8 +312,13 @@ func (r *Reconciler) reEnqueueOrphan(ctx context.Context, job *db.BatchItem, exp
 		ExpectedStatus: string(expectedStatus),
 	}
 	if err := r.queue.PQEnqueue(ctx, task); err != nil {
-		logger.Error(err, "Reconciler: failed to re-enqueue orphan")
-		result.Errors++
+		if errors.Is(err, db.ErrConflict) {
+			logger.Info("Reconciler: conflict during orphan re-enqueue")
+			result.Conflicts++
+		} else {
+			logger.Error(err, "Reconciler: failed to re-enqueue orphan")
+			result.Errors++
+		}
 		return
 	}
 

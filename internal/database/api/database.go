@@ -115,6 +115,9 @@ type BatchJobPriority struct {
 	ExpectedStatus string `json:"expected_status,omitempty"`
 	// RecoveryAttempts counts startup recoveries of the current ownership.
 	RecoveryAttempts int64 `json:"recovery_attempts,omitempty"`
+	// Resumable is the durable marker observed by PQClaimOwned. Recovery uses
+	// this claimed-row value when a follow-up database read is unavailable.
+	Resumable bool `json:"resumable,omitempty"`
 }
 
 func (bj *BatchJobPriority) IsValid() error {
