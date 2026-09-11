@@ -19,6 +19,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,6 +47,8 @@ const (
 
 	recoveryUnknownStatus openai.BatchStatus = "unknown"
 )
+
+var errResumableRecoveryUnavailable = errors.New("resumable recovery is not enabled")
 
 // recoveryResult carries the outcome of a recover* function back to recoverJob
 // so that cleanup, metrics, and fallback logic are handled in a single place.
@@ -94,13 +97,17 @@ func (p *Processor) recoverOwnedJobs(ctx context.Context) error {
 			if task.RecoveryAttempts > maxRecoveryAttempts {
 				if failErr := p.recoverExhausted(jctx, task.ID); failErr != nil {
 					jlogger.Error(failErr, "Startup recovery: failed to fail job past its recovery budget")
-					return failErr
+					if task.Resumable || errors.Is(failErr, errResumableRecoveryUnavailable) {
+						return failErr
+					}
 				}
 				return nil
 			}
 			if recoverErr := p.recoverJob(jctx, task.ID); recoverErr != nil {
 				jlogger.Error(recoverErr, "Startup recovery: failed to recover owned job")
-				return recoverErr
+				if task.Resumable || errors.Is(recoverErr, errResumableRecoveryUnavailable) {
+					return recoverErr
+				}
 			}
 			return nil
 		})
@@ -125,7 +132,7 @@ func (p *Processor) recoverExhausted(ctx context.Context, jobID string) error {
 		return nil
 	}
 	if dbItem.Resumable {
-		return fmt.Errorf("recovery attempts exhausted after %d for resumable job %s", maxRecoveryAttempts, jobID)
+		return fmt.Errorf("%w: recovery attempts exhausted after %d for job %s", errResumableRecoveryUnavailable, maxRecoveryAttempts, jobID)
 	}
 	jobInfo, _ := batch_utils.FromDBItemToJobInfoObject(dbItem)
 	logr.FromContextOrDiscard(ctx).Info("Startup recovery: recovery budget exhausted, failing job")
@@ -161,7 +168,7 @@ func (p *Processor) recoverJob(ctx context.Context, jobID string) error {
 	// later stages. Until then, fail closed rather than applying legacy recovery
 	// actions that may reset or terminalize resumable work.
 	if dbItem.Resumable {
-		return fmt.Errorf("resumable recovery is not enabled for job %s", jobID)
+		return fmt.Errorf("%w for job %s", errResumableRecoveryUnavailable, jobID)
 	}
 
 	jobInfo, err := batch_utils.FromDBItemToJobInfoObject(dbItem)
