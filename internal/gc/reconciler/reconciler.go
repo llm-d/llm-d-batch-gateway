@@ -267,10 +267,10 @@ func (r *Reconciler) transitionOrphan(ctx context.Context, job *db.BatchItem, st
 
 	expectedResumable := false
 	updateItem := &db.BatchItem{
-		BaseIndexes:      db.BaseIndexes{ID: job.ID},
-		BaseContents:     db.BaseContents{Status: updatedBytes},
-		Epoch:            job.Epoch,
-		BumpEpoch:        true,
+		BaseIndexes:       db.BaseIndexes{ID: job.ID},
+		BaseContents:      db.BaseContents{Status: updatedBytes},
+		Epoch:             job.Epoch,
+		BumpEpoch:         true,
 		ExpectedResumable: &expectedResumable,
 	}
 	if err := r.batchDB.DBUpdate(ctx, updateItem, job.Status); err != nil {
