@@ -861,7 +861,7 @@ verify_dispatcher_config() {
     # 1. Processor dispatch mode
     step "Checking batch processor dispatch mode..."
     local dispatch_mode
-    dispatch_mode=$(echo "${config_yaml}" | yq '.dispatch_mode // "sync"')
+    dispatch_mode=$(echo "${config_yaml}" | yq '.dispatch_mode // ""')
     if [ "${dispatch_mode}" = "async" ]; then
         log "Processor configured with dispatch_mode: async"
     else
@@ -871,13 +871,28 @@ verify_dispatcher_config() {
 
     # 2. Processor inferencePoolName
     step "Checking batch processor inferencePoolName..."
+    local models_path=".async_dispatch.models"
+    case "${BATCH_RELEASE_VERSION}" in
+        v0.3.0|v0.4.0) models_path=".model_gateways" ;;
+    esac
     local pool_name
-    pool_name=$(echo "${config_yaml}" | yq ".model_gateways.${MODEL_NAME}.inference_pool_name // \"\"")
-    if [ -n "${pool_name}" ]; then
+    pool_name=$(echo "${config_yaml}" | MODEL_NAME="${MODEL_NAME}" yq "${models_path}[strenv(MODEL_NAME)].inference_pool_name // \"\"")
+    if [ "${pool_name}" = "${LLMD_POOL_NAME}" ]; then
         log "Processor inference_pool_name: ${pool_name}"
     else
-        warn "Processor missing inference_pool_name for model '${MODEL_NAME}'"
+        warn "Processor inference_pool_name for model '${MODEL_NAME}' is '${pool_name}', expected '${LLMD_POOL_NAME}'"
         errors=$((errors + 1))
+    fi
+
+    if [ "${ENABLE_FLOW_CONTROL}" = "true" ]; then
+        local objective
+        objective=$(echo "${config_yaml}" | MODEL_NAME="${MODEL_NAME}" yq "${models_path}[strenv(MODEL_NAME)].inference_objective // \"\"")
+        if [ "${objective}" = "${BATCH_FLOW_CONTROL_OBJECTIVE}" ]; then
+            log "Processor inference_objective: ${objective}"
+        else
+            warn "Processor inference_objective for model '${MODEL_NAME}' is '${objective}', expected '${BATCH_FLOW_CONTROL_OBJECTIVE}'"
+            errors=$((errors + 1))
+        fi
     fi
 
     # 3. Async-processor started successfully
@@ -905,17 +920,23 @@ verify_dispatcher_config() {
 deploy_batch_gateway_k8s() {
     banner "Installing Batch Gateway"
 
-    local model_key="${MODEL_NAME}"
+    local model_key="${MODEL_NAME//./\\.}"
+    local model_config="processor.config.modelGateways"
     local helm_args=(
         --set "apiserver.config.batchAPI.passThroughHeaders={Authorization}"
     )
 
     if [ "${ENABLE_DISPATCHER}" = "true" ]; then
         # Async dispatch: processor sends requests via Redis to async-processor
+        model_config="processor.config.asyncDispatch.models"
+        # These released charts predate asyncDispatch.models.
+        case "${BATCH_RELEASE_VERSION}" in
+            v0.3.0|v0.4.0) model_config="processor.config.modelGateways" ;;
+        esac
         helm_args+=(
             --set "processor.config.dispatchMode=async"
             --set "processor.config.asyncDispatch.resultPollTimeout=30s"
-            --set "processor.config.modelGateways.${model_key}.inferencePoolName=${LLMD_POOL_NAME}"
+            --set "${model_config}.${model_key}.inferencePoolName=${LLMD_POOL_NAME}"
         )
         log "Async dispatch enabled: processor will route through llm-d-async (pool: ${LLMD_POOL_NAME})"
     else
@@ -929,6 +950,7 @@ deploy_batch_gateway_k8s() {
         log "Model URL (via Internal Gateway): ${model_url}"
 
         helm_args+=(
+            --set "processor.config.dispatchMode=sync"
             --set "processor.config.modelGateways.${model_key}.url=${model_url}"
             --set "processor.config.modelGateways.${model_key}.requestTimeout=${GW_REQUEST_TIMEOUT}"
             --set "processor.config.modelGateways.${model_key}.maxRetries=${GW_MAX_RETRIES}"
@@ -939,7 +961,7 @@ deploy_batch_gateway_k8s() {
 
     if [ "${ENABLE_FLOW_CONTROL}" = "true" ]; then
         helm_args+=(
-            --set "processor.config.modelGateways.${model_key}.inferenceObjective=${BATCH_FLOW_CONTROL_OBJECTIVE}"
+            --set "${model_config}.${model_key}.inferenceObjective=${BATCH_FLOW_CONTROL_OBJECTIVE}"
         )
         log "Flow control: processor will send x-gateway-inference-objective: ${BATCH_FLOW_CONTROL_OBJECTIVE}"
     fi
@@ -1093,6 +1115,14 @@ check_prerequisites() {
 
 cmd_install() {
     banner "llm-d + Batch Gateway Setup"
+
+    case "${BATCH_RELEASE_VERSION}" in
+        v0.1.0|v0.2.0)
+            if [ "${ENABLE_DISPATCHER}" = "true" ]; then
+                die "${BATCH_RELEASE_VERSION} does not support async dispatch. Set ENABLE_DISPATCHER=false or use a newer chart."
+            fi
+            ;;
+    esac
 
     check_prerequisites
 
@@ -1359,14 +1389,14 @@ usage() {
     echo "  BATCH_RELEASE_VERSION  Install released OCI chart (e.g. v1.0.0)"
     echo "  ENABLE_FLOW_CONTROL   Enable GIE flow control (default: true)"
     echo "  BATCH_FLOW_CONTROL_OBJECTIVE InferenceObjective name for batch (default: batch-sheddable)"
-    echo "  ENABLE_DISPATCHER      Deploy llm-d-async dispatcher for async dispatch (default: false)"
+    echo "  ENABLE_DISPATCHER      Deploy llm-d-async dispatcher (default: true; false selects HTTP sync)"
     echo "  DISPATCHER_VERSION     llm-d-async version (default: v0.7.3)"
     echo "  UNINSTALL_ALL          Set to 1 to also remove Kuadrant/Istio/cert-manager and CRDs (ephemeral clusters only)"
     echo ""
     echo "Examples:"
     echo "  $0 install"
     echo "  MODEL_NAME=my-model LLMD_VERSION=v0.8.1 $0 install"
-    echo "  ENABLE_DISPATCHER=true $0 install"
+    echo "  ENABLE_DISPATCHER=false $0 install"
     exit "${1:-0}"
 }
 

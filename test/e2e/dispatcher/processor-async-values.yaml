@@ -1,11 +1,15 @@
 processor:
   config:
     dispatchMode: async
+    modelGateways: null
+    globalInferenceGateway: null
     asyncDispatch:
       resultPollTimeout: "30s"
       models:
         sim-model:
           inferencePoolName: "sim-pool"
+        sim-model-b:
+          inferencePoolName: "sim-pool-b"
         sim-model-gate:
           inferencePoolName: "sim-pool-gate"
         sim-model-inject:

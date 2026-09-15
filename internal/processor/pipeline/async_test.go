@@ -3,7 +3,9 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,15 +14,19 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/llm-d/llm-d-batch-gateway/internal/processor/batchctx"
 	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 )
 
 type fakeAsyncClient struct {
 	mu           sync.Mutex
 	submitted    []*inference.GenerateRequest
+	submittedCh  chan struct{}
 	results      chan *inference.GenerateResponse
 	cancelledIDs []string
 }
+
+var _ inference.AsyncInferenceClient = (*fakeAsyncClient)(nil)
 
 func newFakeAsyncClient() *fakeAsyncClient {
 	return &fakeAsyncClient{
@@ -28,10 +34,16 @@ func newFakeAsyncClient() *fakeAsyncClient {
 	}
 }
 
-func (c *fakeAsyncClient) Submit(_ context.Context, req *inference.GenerateRequest) *inference.ClientError {
+func (c *fakeAsyncClient) Submit(ctx context.Context, req *inference.GenerateRequest) *inference.ClientError {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.submitted = append(c.submitted, req)
+	c.mu.Unlock()
+	if c.submittedCh != nil {
+		select {
+		case c.submittedCh <- struct{}{}:
+		case <-ctx.Done():
+		}
+	}
 	return nil
 }
 
@@ -65,6 +77,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	// Shared client — same instance for submit (via ClientFor) and
 	// collect (via SharedClientFor → broadcaster)
 	client := newFakeAsyncClient()
+	client.submittedCh = make(chan struct{})
 	resolver := inference.NewTestAsyncResolver(map[string]func() inference.AsyncInferenceClient{
 		"m1": func() inference.AsyncInferenceClient { return client },
 	})
@@ -74,8 +87,15 @@ func TestAsyncEndToEnd(t *testing.T) {
 	broadcaster := NewResultBroadcaster(client, logr.Discard())
 	broadcasters := NewBroadcasterGroup([]*ResultBroadcaster{broadcaster})
 	broadcasterCtx, broadcasterCancel := context.WithCancel(context.Background())
-	defer broadcasterCancel()
-	go broadcaster.Run(broadcasterCtx)
+	broadcasterDone := make(chan struct{})
+	defer func() {
+		broadcasterCancel()
+		<-broadcasterDone
+	}()
+	go func() {
+		defer close(broadcasterDone)
+		broadcaster.Run(broadcasterCtx)
+	}()
 
 	items := []RequestItem{
 		{RequestID: "req-1", CustomID: "c-1", ModelID: "m1", Endpoint: "/v1/chat/completions"},
@@ -101,15 +121,29 @@ func TestAsyncEndToEnd(t *testing.T) {
 		Logger:     logr.Discard(),
 	})
 
-	// Deliver results asynchronously after a short delay
+	// Do not make any result available until every request has been submitted.
+	// This verifies queue submission is independent from inference completion.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	deliveryDone := make(chan struct{})
+	defer func() {
+		cancel()
+		<-deliveryDone
+	}()
 	go func() {
-		time.Sleep(50 * time.Millisecond)
-		for _, item := range items {
-			client.deliver(item.RequestID, map[string]any{"ok": true})
+		defer close(deliveryDone)
+		for range items {
+			select {
+			case <-client.submittedCh:
+			case <-ctx.Done():
+				return
+			}
+		}
+		for i := len(items) - 1; i >= 0; i-- {
+			client.deliver(items[i].RequestID, map[string]any{"ok": true})
 		}
 	}()
 
-	counts, err := executor.Execute(context.Background())
+	counts, err := executor.Execute(ctx)
 	if err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}
@@ -119,6 +153,12 @@ func TestAsyncEndToEnd(t *testing.T) {
 	}
 	if counts.Failed != 0 {
 		t.Errorf("Failed = %d, want 0", counts.Failed)
+	}
+	client.mu.Lock()
+	submitted := len(client.submitted)
+	client.mu.Unlock()
+	if submitted != len(items) {
+		t.Errorf("submitted requests = %d, want %d before results", submitted, len(items))
 	}
 
 	outputData := readFile(t, outputFile)
@@ -489,77 +529,137 @@ func TestAsyncDispatcher_ModelNotFound(t *testing.T) {
 }
 
 func TestAsyncCancellation(t *testing.T) {
-	client := newFakeAsyncClient()
-	resolver := inference.NewTestAsyncResolver(map[string]func() inference.AsyncInferenceClient{
-		"m1": func() inference.AsyncInferenceClient { return client },
-	})
-	defer func() { _ = resolver.Close() }()
-
-	broadcaster := NewResultBroadcaster(client, logr.Discard())
-	broadcasters := NewBroadcasterGroup([]*ResultBroadcaster{broadcaster})
-	broadcasterCtx, broadcasterCancel := context.WithCancel(context.Background())
-	defer broadcasterCancel()
-	go broadcaster.Run(broadcasterCtx)
-
-	items := makeItems(10, "m1")
-
-	pending := NewPendingRequests(0)
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
-	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
-
-	dispatcher := NewAsyncDispatcher(resolver,
-		broadcasters,
-		pending, logr.Discard())
-
-	executor := NewJobExecutor(JobExecutorConfig{
-		Source:     &sliceSource{items: items},
-		Dispatcher: dispatcher,
-		Collector:  collector,
-		Tracker:    tracker,
-		Logger:     logr.Discard(),
-	})
-
-	// Deliver only 3 results, then cancel
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		for i := 0; i < 3; i++ {
-			client.deliver(items[i].RequestID, map[string]any{"ok": true})
-		}
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
-
-	_, err := executor.Execute(ctx)
-	if err != nil && err != context.Canceled {
-		t.Fatalf("Execute() error = %v, want nil or context.Canceled", err)
+	tests := []struct {
+		name        string
+		cancelCause error
+		wantCode    string
+	}{
+		{
+			name:        "user cancellation",
+			cancelCause: context.Canceled,
+			wantCode:    "batch_cancelled",
+		},
+		{
+			name:        "deadline expiry",
+			cancelCause: context.DeadlineExceeded,
+			wantCode:    "batch_expired",
+		},
+		{
+			name:        "batch expiry sentinel",
+			cancelCause: batchctx.ErrExpired,
+			wantCode:    "batch_expired",
+		},
 	}
 
-	outputData := readFile(t, outputFile)
-	errorData := readFile(t, errorFile)
-	outputLines := countLines(outputData)
-	errorLines := countLines(errorData)
-	total := outputLines + errorLines
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newFakeAsyncClient()
+			client.submittedCh = make(chan struct{})
+			resolver := inference.NewTestAsyncResolver(map[string]func() inference.AsyncInferenceClient{
+				"m1": func() inference.AsyncInferenceClient { return client },
+			})
+			defer func() { _ = resolver.Close() }()
 
-	t.Logf("output=%d error=%d total=%d (of %d)", outputLines, errorLines, total, len(items))
+			broadcaster := NewResultBroadcaster(client, logr.Discard())
+			broadcasters := NewBroadcasterGroup([]*ResultBroadcaster{broadcaster})
+			broadcasterCtx, broadcasterCancel := context.WithCancel(context.Background())
+			broadcasterDone := make(chan struct{})
+			defer func() {
+				broadcasterCancel()
+				<-broadcasterDone
+			}()
+			go func() {
+				defer close(broadcasterDone)
+				broadcaster.Run(broadcasterCtx)
+			}()
 
-	if outputLines < 3 {
-		t.Errorf("expected at least 3 completed, got %d", outputLines)
+			items := makeItems(10, "m1")
+			pending := NewPendingRequests(0)
+			outputFile := tempFile(t)
+			errorFile := tempFile(t)
+			tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
+			collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+			dispatcher := NewAsyncDispatcher(resolver, broadcasters, pending, logr.Discard())
+			executor := NewJobExecutor(JobExecutorConfig{
+				Source:     &sliceSource{items: items},
+				Dispatcher: dispatcher,
+				Collector:  collector,
+				Tracker:    tracker,
+				Logger:     logr.Discard(),
+			})
+
+			parentCtx, parentCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer parentCancel()
+			ctx, cancel := context.WithCancelCause(parentCtx)
+			deliveryDone := make(chan struct{})
+			defer func() {
+				cancel(context.Canceled)
+				<-deliveryDone
+			}()
+			go func() {
+				defer close(deliveryDone)
+				for range items {
+					select {
+					case <-client.submittedCh:
+					case <-ctx.Done():
+						return
+					}
+				}
+				for i := 0; i < 3; i++ {
+					client.deliver(items[i].RequestID, map[string]any{"ok": true})
+				}
+				ticker := time.NewTicker(time.Millisecond)
+				defer ticker.Stop()
+				for pending.pending.Load() != int64(len(items)-3) {
+					select {
+					case <-ticker.C:
+					case <-ctx.Done():
+						return
+					}
+				}
+				cancel(tt.cancelCause)
+			}()
+
+			_, err := executor.Execute(ctx)
+			if err != nil && !errors.Is(err, ctx.Err()) {
+				t.Fatalf("Execute() error = %v, want nil or %v", err, ctx.Err())
+			}
+			if parentCtx.Err() != nil {
+				t.Fatal("timed out waiting for async submission and partial results")
+			}
+			if !errors.Is(context.Cause(ctx), tt.cancelCause) {
+				t.Fatalf("cancellation cause = %v, want %v", context.Cause(ctx), tt.cancelCause)
+			}
+
+			if got := countLines(readFile(t, outputFile)); got != 3 {
+				t.Errorf("output lines = %d, want 3", got)
+			}
+			errorLines := splitLines(readFile(t, errorFile))
+			if len(errorLines) != len(items)-3 {
+				t.Fatalf("error lines = %d, want %d", len(errorLines), len(items)-3)
+			}
+			for _, line := range errorLines {
+				var entry outputLine
+				if err := json.Unmarshal(line, &entry); err != nil {
+					t.Fatalf("unmarshal error output: %v", err)
+				}
+				if entry.Error == nil || entry.Error.Code != tt.wantCode {
+					t.Errorf("error = %+v, want code %q", entry.Error, tt.wantCode)
+				}
+			}
+
+			client.mu.Lock()
+			cancelled := append([]string(nil), client.cancelledIDs...)
+			client.mu.Unlock()
+			wantCancelled := make([]string, 0, len(items)-3)
+			for _, item := range items[3:] {
+				wantCancelled = append(wantCancelled, item.RequestID)
+			}
+			slices.Sort(cancelled)
+			slices.Sort(wantCancelled)
+			if !slices.Equal(cancelled, wantCancelled) {
+				t.Errorf("cancelled IDs = %v, want %v", cancelled, wantCancelled)
+			}
+		})
 	}
-	if total != len(items) {
-		t.Errorf("total output+error lines = %d, want %d (all requests accounted for)", total, len(items))
-	}
-
-	// Verify Cancel was called with the uncollected request IDs.
-	client.mu.Lock()
-	cancelled := client.cancelledIDs
-	client.mu.Unlock()
-
-	// We delivered 3 results out of 10, so ~7 should have been cancelled.
-	if len(cancelled) == 0 {
-		t.Error("expected Cancel to be called with pending IDs, but no IDs were cancelled")
-	}
-	t.Logf("cancelled %d IDs", len(cancelled))
 }

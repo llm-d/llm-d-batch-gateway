@@ -85,6 +85,7 @@ func TestMergeHeaders(t *testing.T) {
 
 	t.Run("per-model inference objective set", func(t *testing.T) {
 		cfg := config.NewConfig()
+		cfg.DispatchMode = config.DispatchModeSync
 		cfg.ModelGateways = map[string]config.ModelGatewayConfig{
 			"m1": {
 				URL:                "http://gw:8000",
@@ -103,6 +104,7 @@ func TestMergeHeaders(t *testing.T) {
 
 	t.Run("no per-model objective omits header", func(t *testing.T) {
 		cfg := config.NewConfig()
+		cfg.DispatchMode = config.DispatchModeSync
 		cfg.ModelGateways = map[string]config.ModelGatewayConfig{
 			"m1": {URL: "http://gw:8000"},
 		}
@@ -180,6 +182,7 @@ func TestMergeHeaders(t *testing.T) {
 
 	t.Run("all three headers together", func(t *testing.T) {
 		cfg := config.NewConfig()
+		cfg.DispatchMode = config.DispatchModeSync
 		cfg.SendFairnessHeader = true
 		cfg.ModelGateways = map[string]config.ModelGatewayConfig{
 			"m1": {
@@ -383,6 +386,7 @@ func TestPlanFileSource_Produce_TenantScopedLookup(t *testing.T) {
 	defer func() { _ = resolver.Close() }()
 
 	cfg := config.NewConfig()
+	cfg.DispatchMode = config.DispatchModeSync
 	cfg.RouteKeyMethod = config.RouteKeyMethodTenant
 	cfg.ModelGateways = map[string]config.ModelGatewayConfig{
 		"inferset-a/m1": {
@@ -428,6 +432,7 @@ func TestPlanFileSource_Produce_TenantScopedLookup(t *testing.T) {
 	// With the default config (route_key_method empty), the same tenant must
 	// not affect the lookup key — guards the backward-compatible behavior.
 	cfgOff := config.NewConfig()
+	cfgOff.DispatchMode = config.DispatchModeSync
 	inputFile2, err := os.Open(inputPath)
 	if err != nil {
 		t.Fatal(err)

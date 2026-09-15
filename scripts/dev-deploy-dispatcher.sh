@@ -5,7 +5,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     set -euo pipefail
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-    source "${SCRIPT_DIR}/dev-common.sh"
+    # Reuse the sourceable dev configuration and early fixture/tool guards.
+    source "${SCRIPT_DIR}/dev-deploy.sh"
 fi
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -25,23 +26,12 @@ DISPATCHER_SOURCE="${DISPATCHER_SOURCE:-}"
 
 # ── Prerequisites (standalone only — dev-deploy.sh already checks these) ─────
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    for cmd in kubectl helm kind jq nc; do
-        command -v "$cmd" &>/dev/null || die "Missing required tool: $cmd"
-    done
-
-    if [[ -n "${CONTAINER_TOOL:-}" ]]; then
-        : # caller specified
-    elif command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
-        CONTAINER_TOOL="docker"
-    elif command -v podman &>/dev/null; then
-        CONTAINER_TOOL="podman"
-    else
-        die "Neither docker (running) nor podman found. Please install one."
-    fi
+    ENABLE_DISPATCHER=true check_prerequisites
 
     if ! kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"; then
         die "Kind cluster '${KIND_CLUSTER_NAME}' not found. Run 'make dev-deploy' first."
     fi
+    kubectl config use-context "kind-${KIND_CLUSTER_NAME}"
 fi
 
 # ── Build or pull dispatcher image ────────────────────────────────────────────
@@ -87,12 +77,12 @@ IMAGE_WITHOUT_DIGEST="${DISPATCHER_IMAGE%%@*}"
 if [[ "${IMAGE_WITHOUT_DIGEST##*/}" != *:* ]]; then
     die "DISPATCHER_IMAGE must include a tag so chart ${DISPATCHER_CHART_VERSION} can render it: ${DISPATCHER_IMAGE}"
 fi
-IMAGE_REPO="${IMAGE_WITHOUT_DIGEST%:*}"
-IMAGE_TAG="${IMAGE_WITHOUT_DIGEST##*:}"
+DISPATCHER_IMAGE_REPO="${IMAGE_WITHOUT_DIGEST%:*}"
+DISPATCHER_IMAGE_TAG="${IMAGE_WITHOUT_DIGEST##*:}"
 DISPATCHER_EXPECTED_DIGEST=""
 if [[ "${DISPATCHER_IMAGE}" == *@* ]]; then
     DISPATCHER_EXPECTED_DIGEST="${DISPATCHER_IMAGE#*@}"
-    IMAGE_TAG="${IMAGE_TAG}@${DISPATCHER_EXPECTED_DIGEST}"
+    DISPATCHER_IMAGE_TAG="${DISPATCHER_IMAGE_TAG}@${DISPATCHER_EXPECTED_DIGEST}"
 fi
 
 HELM_VERSION_FLAG=()
@@ -112,8 +102,8 @@ helm upgrade --install "${DISPATCHER_RELEASE}" "${DISPATCHER_CHART}" \
     "${HELM_VERSION_FLAG[@]}" \
     --namespace "${NAMESPACE}" \
     --values "${HELM_VALUES}" \
-    --set-string "ap.image.repository=${IMAGE_REPO}" \
-    --set-string "ap.image.tag=${IMAGE_TAG}" \
+    --set-string "ap.image.repository=${DISPATCHER_IMAGE_REPO}" \
+    --set-string "ap.image.tag=${DISPATCHER_IMAGE_TAG}" \
     --set-string "ap.imagePullPolicy=${DISPATCHER_IMAGE_PULL_POLICY}" \
     --timeout=120s
 
@@ -122,8 +112,8 @@ helm upgrade --install "${DISPATCHER_SCRAPE_RELEASE}" "${DISPATCHER_CHART}" \
     "${HELM_VERSION_FLAG[@]}" \
     --namespace "${NAMESPACE}" \
     --values "${HELM_VALUES_SCRAPE}" \
-    --set-string "ap.image.repository=${IMAGE_REPO}" \
-    --set-string "ap.image.tag=${IMAGE_TAG}" \
+    --set-string "ap.image.repository=${DISPATCHER_IMAGE_REPO}" \
+    --set-string "ap.image.tag=${DISPATCHER_IMAGE_TAG}" \
     --set-string "ap.imagePullPolicy=${DISPATCHER_IMAGE_PULL_POLICY}" \
     --timeout=120s
 
@@ -135,8 +125,8 @@ helm upgrade --install "${DISPATCHER_PROM_RELEASE}" "${DISPATCHER_CHART}" \
     "${HELM_VERSION_FLAG[@]}" \
     --namespace "${NAMESPACE}" \
     --values "${HELM_VALUES_PROM}" \
-    --set-string "ap.image.repository=${IMAGE_REPO}" \
-    --set-string "ap.image.tag=${IMAGE_TAG}" \
+    --set-string "ap.image.repository=${DISPATCHER_IMAGE_REPO}" \
+    --set-string "ap.image.tag=${DISPATCHER_IMAGE_TAG}" \
     --set-string "ap.imagePullPolicy=${DISPATCHER_IMAGE_PULL_POLICY}" \
     --timeout=120s
 
@@ -214,30 +204,31 @@ ${VLLM_SIM_SCRAPE}"
 fi
 
 # ── Reconfigure processor for async dispatch ─────────────────────────────────
-PROCESSOR_ASYNC_VALUES="${REPO_ROOT}/test/e2e/dispatcher/processor-async-values.yaml"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    PROCESSOR_ASYNC_VALUES="${REPO_ROOT}/test/e2e/dispatcher/processor-async-values.yaml"
 
-step "Reconfiguring batch-gateway processor for async dispatch..."
+    step "Reconfiguring batch-gateway processor for async dispatch..."
 
-# --reuse-values deep-merges maps, so stale sync-mode models from the initial
-# deploy would persist and crash the processor (missing inferencePoolName).
-# Instead, export current values, strip modelGateways, and pass as a file.
-REUSED_VALUES=$(mktemp)
-helm get values "${HELM_RELEASE}" -n "${NAMESPACE}" -o json | \
-    jq 'del(.processor.config.modelGateways)' > "${REUSED_VALUES}"
+    # Preserve the existing deployment settings, replacing its routing with the
+    # async fixture. The composed dev deploy supplies these values on first install.
+    REUSED_VALUES=$(mktemp)
+    helm get values "${HELM_RELEASE}" -n "${NAMESPACE}" -o json | \
+        jq 'del(.processor.config.modelGateways, .processor.config.globalInferenceGateway, .processor.config.asyncDispatch)' > "${REUSED_VALUES}"
 
-helm upgrade "${HELM_RELEASE}" "${REPO_ROOT}/charts/batch-gateway" \
-    --namespace "${NAMESPACE}" \
-    --reset-values \
-    --values "${REUSED_VALUES}" \
-    --values "${PROCESSOR_ASYNC_VALUES}" \
-    --wait --timeout=120s
-rm -f "${REUSED_VALUES}"
+    helm upgrade "${HELM_RELEASE}" "${REPO_ROOT}/charts/batch-gateway" \
+        --namespace "${NAMESPACE}" \
+        --reset-values \
+        --values "${REUSED_VALUES}" \
+        --values "${PROCESSOR_ASYNC_VALUES}" \
+        --wait --timeout=120s
+    rm -f "${REUSED_VALUES}"
 
-step "Restarting processor to pick up new config..."
-kubectl rollout restart statefulset/"${HELM_RELEASE}-processor" --namespace "${NAMESPACE}"
-kubectl rollout status statefulset/"${HELM_RELEASE}-processor" --namespace "${NAMESPACE}" --timeout=60s
+    step "Restarting processor to pick up new config..."
+    kubectl rollout restart statefulset/"${HELM_RELEASE}-processor" --namespace "${NAMESPACE}"
+    kubectl rollout status statefulset/"${HELM_RELEASE}-processor" --namespace "${NAMESPACE}" --timeout=60s
 
-log "Processor reconfigured for async dispatch."
+    log "Processor reconfigured for async dispatch."
+fi
 
 # ── Expose Redis to host ──────────────────────────────────────────────────────
 # dev-deploy.sh reserves this NodePort in Kind's extraPortMappings. Create the

@@ -65,10 +65,10 @@ USE_KIND="${USE_KIND:-true}"
 ENABLE_GIE="${ENABLE_GIE:-false}"
 
 # ── Async dispatcher (llm-d-async) support ──────────────────────────────────
-# Set ENABLE_DISPATCHER=true to deploy llm-d-async dispatcher instances
-# alongside the batch-gateway. The processor is reconfigured for async dispatch.
+# Deploy llm-d-async dispatchers by default. Set ENABLE_DISPATCHER=false for
+# explicit sync dispatch (required for GIE and custom dev fixture layouts).
 # Set DISPATCHER_SOURCE to a local llm-d-async checkout to build from source.
-ENABLE_DISPATCHER="${ENABLE_DISPATCHER:-false}"
+ENABLE_DISPATCHER="${ENABLE_DISPATCHER:-true}"
 GIE_REPO="${GIE_REPO:-}"
 GIE_UPSTREAM_REPO="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
 # Last GIE tag with standalone EPP + flow-control plugins. EPP then moved to llm-d-router.
@@ -96,14 +96,47 @@ detect_container_tool() {
 
 check_prerequisites() {
     step "Checking prerequisites..."
+    case "${ENABLE_DISPATCHER}" in
+        true|false) ;;
+        *) die "ENABLE_DISPATCHER must be true or false." ;;
+    esac
+    if [ "${ENABLE_DISPATCHER}" = "true" ]; then
+        if [ "${ENABLE_GIE}" = "true" ]; then
+            die "ENABLE_GIE=true cannot be combined with ENABLE_DISPATCHER=true. Use 'make dev-deploy-gie' or ENABLE_DISPATCHER=false ENABLE_GIE=true make dev-deploy for sync GIE."
+        fi
+        # These restrictions belong to the fixed dev/E2E fixtures, not the chart.
+        local setting
+        for setting in USE_KIND=true NAMESPACE=default EXCHANGE_CLIENT_TYPE=redis \
+            REDIS_RELEASE=redis VLLM_SIM_NAME=vllm-sim VLLM_SIM_B_NAME=vllm-sim-b \
+            VLLM_SIM_MODEL=sim-model VLLM_SIM_B_MODEL=sim-model-b \
+            JAEGER_NAME=jaeger PROMETHEUS_NAME=prometheus; do
+            local name="${setting%%=*}" expected="${setting#*=}"
+            if [ "${!name}" != "${expected}" ]; then
+                die "Async dev fixtures require ${setting} (got ${!name}). Set ENABLE_DISPATCHER=false for explicit sync deployment with custom settings."
+            fi
+        done
+        if [ "${KIND_EXPERIMENTAL_PROVIDER:-docker}" != "docker" ]; then
+            die "Async dev image loading requires Docker-backed kind. Set ENABLE_DISPATCHER=false for sync deployment with another provider."
+        fi
+        if [ -n "${DISPATCHER_SOURCE:-}" ] && [ ! -f "${DISPATCHER_SOURCE}/charts/llm-d-async/Chart.yaml" ]; then
+            die "DISPATCHER_SOURCE must contain charts/llm-d-async/Chart.yaml. Fix the checkout path or set ENABLE_DISPATCHER=false for sync deployment."
+        fi
+    fi
     local missing=()
-    for cmd in kubectl helm kind make; do
+    local required=(kubectl helm kind make)
+    if [ "${ENABLE_DISPATCHER}" = "true" ]; then
+        required+=(jq nc docker)
+    fi
+    for cmd in "${required[@]}"; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
     if [ ${#missing[@]} -gt 0 ]; then
-        die "Missing required tools: ${missing[*]}. Please install them first."
+        die "Missing required tools: ${missing[*]}. Please install them first. Async dev additionally checks jq, nc, and docker; opt out with ENABLE_DISPATCHER=false for sync."
     fi
     CONTAINER_TOOL="$(detect_container_tool)"
+    if [ "${ENABLE_DISPATCHER}" = "true" ] && [ "${CONTAINER_TOOL}" != "docker" ]; then
+        die "Async dev image loading requires running Docker. Start Docker or set ENABLE_DISPATCHER=false for sync deployment."
+    fi
     log "Container tool : ${CONTAINER_TOOL}"
     log "OS / Arch      : ${OS} / ${ARCH}"
 }
@@ -1087,18 +1120,6 @@ install_batch_gateway() {
         --set "processor.image.tag=${IMAGE_TAG}"
         --set "global.fileClient.type=${FILE_CLIENT_TYPE}"
         --set "global.secretName=${APP_SECRET_NAME}"
-        --set "processor.config.modelGateways.${VLLM_SIM_MODEL}.url=${vllm_sim_url}"
-        --set "processor.config.modelGateways.${VLLM_SIM_MODEL}.requestTimeout=5m"
-        --set "processor.config.modelGateways.${VLLM_SIM_MODEL}.maxRetries=3"
-        --set "processor.config.modelGateways.${VLLM_SIM_MODEL}.initialBackoff=1s"
-        --set "processor.config.modelGateways.${VLLM_SIM_MODEL}.maxBackoff=60s"
-        --set "processor.config.modelGateways.${VLLM_SIM_B_MODEL}.url=${vllm_sim_b_url}"
-        --set "processor.config.modelGateways.${VLLM_SIM_B_MODEL}.requestTimeout=5m"
-        --set "processor.config.modelGateways.${VLLM_SIM_B_MODEL}.maxRetries=3"
-        --set "processor.config.modelGateways.${VLLM_SIM_B_MODEL}.initialBackoff=1s"
-        --set "processor.config.modelGateways.${VLLM_SIM_B_MODEL}.maxBackoff=60s"
-        --set "processor.config.modelGateways.${VLLM_SIM_MODEL}.inferenceObjective=${GIE_OBJECTIVE_PREFIX}"
-        --set "processor.config.modelGateways.${VLLM_SIM_B_MODEL}.inferenceObjective=${GIE_OBJECTIVE_PREFIX}"
         --set "processor.logging.verbosity=${LOG_VERBOSITY}"
         --set "apiserver.logging.verbosity=${LOG_VERBOSITY}"
         --set "apiserver.config.batchAPI.passThroughHeaders={X-E2E-Pass-Through-1,X-E2E-Pass-Through-2}"
@@ -1121,6 +1142,27 @@ install_batch_gateway() {
         --set "gc.config.reconciler.interval=30s"
         --namespace "${NAMESPACE}"
     )
+
+    if [ "${ENABLE_DISPATCHER}" = "true" ]; then
+        helm_args+=(--values "${REPO_ROOT}/test/e2e/dispatcher/processor-async-values.yaml")
+    else
+        helm_args+=(
+            --set processor.config.dispatchMode=sync
+            --set processor.config.asyncDispatch=null
+            --set "processor.config.modelGateways.${VLLM_SIM_MODEL}.url=${vllm_sim_url}"
+            --set "processor.config.modelGateways.${VLLM_SIM_MODEL}.requestTimeout=5m"
+            --set "processor.config.modelGateways.${VLLM_SIM_MODEL}.maxRetries=3"
+            --set "processor.config.modelGateways.${VLLM_SIM_MODEL}.initialBackoff=1s"
+            --set "processor.config.modelGateways.${VLLM_SIM_MODEL}.maxBackoff=60s"
+            --set "processor.config.modelGateways.${VLLM_SIM_B_MODEL}.url=${vllm_sim_b_url}"
+            --set "processor.config.modelGateways.${VLLM_SIM_B_MODEL}.requestTimeout=5m"
+            --set "processor.config.modelGateways.${VLLM_SIM_B_MODEL}.maxRetries=3"
+            --set "processor.config.modelGateways.${VLLM_SIM_B_MODEL}.initialBackoff=1s"
+            --set "processor.config.modelGateways.${VLLM_SIM_B_MODEL}.maxBackoff=60s"
+            --set "processor.config.modelGateways.${VLLM_SIM_MODEL}.inferenceObjective=${GIE_OBJECTIVE_PREFIX}"
+            --set "processor.config.modelGateways.${VLLM_SIM_B_MODEL}.inferenceObjective=${GIE_OBJECTIVE_PREFIX}"
+        )
+    fi
 
     # Add file client specific helm args
     if [ "${FILE_CLIENT_TYPE}" = "s3" ]; then
@@ -1153,7 +1195,7 @@ install_batch_gateway() {
 
     if helm status "${HELM_RELEASE}" -n "${NAMESPACE}" &>/dev/null; then
         log "Release '${HELM_RELEASE}' already exists. Upgrading..."
-        helm upgrade "${HELM_RELEASE}" ./charts/batch-gateway "${helm_args[@]}"
+        helm upgrade "${HELM_RELEASE}" ./charts/batch-gateway --reset-values "${helm_args[@]}"
         # Force pod restart so the newly-loaded container images are picked up.
         # helm upgrade alone won't recreate pods when only the image contents
         # changed but the tag (e.g. 0.0.1) stayed the same.
@@ -1497,17 +1539,19 @@ main() {
             log "Cleaned up cloned GIE repo at ${GIE_REPO_TMPDIR}"
         fi
     fi
+    if [ "${ENABLE_DISPATCHER}" = "true" ]; then
+        source "${SCRIPT_DIR}/dev-deploy-dispatcher.sh"
+    fi
     install_batch_gateway
     verify_deployment
     if [ "${USE_KIND}" = true ]; then
         create_nodeport_services
-    fi
-    if [ "${ENABLE_DISPATCHER}" = "true" ]; then
-        source "${SCRIPT_DIR}/dev-deploy-dispatcher.sh"
     fi
     print_usage
 
     log "Deployment complete!"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

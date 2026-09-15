@@ -535,19 +535,23 @@ if [ -n "${VALUES_FILE}" ]; then
         )
     fi
 
-    # In sim mode, replace all model gateways with a single entry
-    if [ "${MODE}" = "sim" ]; then
+    if [ "${SCENARIO}" = "5" ]; then
+        # Match the async-processor queue in both sim and GPU modes.
+        ASYNC_POOL_NAME="${GUIDE_NAME}"
+        if [ "${MODE}" = "sim" ]; then
+            ASYNC_POOL_NAME="sim-pool"
+        fi
+        BG_EXTRA_ARGS+=(
+            --set-json "processor.config.asyncDispatch.models={\"${MODEL}\":{\"inferencePoolName\":\"${ASYNC_POOL_NAME}\"}}"
+        )
+    elif [ "${MODE}" = "sim" ]; then
+        # In sync sim scenarios, replace all model gateways with a single entry.
         if [ "${SCENARIO}" = "3" ] || [ "${SCENARIO}" = "4" ]; then
             # Scenarios 3/4: route through EPP for admission control / flow control;
             # null out globalInferenceGateway from values file
             BG_EXTRA_ARGS+=(
                 --set-json "processor.config.globalInferenceGateway=null"
                 --set-json "processor.config.modelGateways={\"${MODEL}\":{\"url\":\"http://epp-bench-epp.${NAMESPACE}.svc.cluster.local:8081\",\"requestTimeout\":\"5m\",\"maxRetries\":3,\"initialBackoff\":\"2s\",\"maxBackoff\":\"30s\",\"inferenceObjective\":\"batch-sheddable\"}}"
-            )
-        elif [ "${SCENARIO}" = "5" ]; then
-            # Scenario 5: async dispatch — use inferencePoolName to match async-processor queue name
-            BG_EXTRA_ARGS+=(
-                --set-json "processor.config.modelGateways={\"${MODEL}\":{\"inferencePoolName\":\"sim-pool\"}}"
             )
         else
             # Other scenarios: direct to inference-sim
@@ -626,13 +630,11 @@ fi
 if [ "${SCENARIO}" = "5" ]; then
     log "Deploying async-processor (scenario 5)"
 
-    # Determine pool name and URLs for queue coordination
+    # Pool name was set with the batch-gateway mapping above.
     if [ "${MODE}" = "sim" ]; then
-        ASYNC_POOL_NAME="sim-pool"
         ASYNC_IGW_URL="http://inference-sim.${NAMESPACE}.svc.cluster.local:8000"
         ASYNC_METRICS_URL="http://inference-sim.${NAMESPACE}.svc.cluster.local:8000/metrics"
     else
-        ASYNC_POOL_NAME="${GUIDE_NAME}"
         ASYNC_IGW_URL="http://vllm-metrics.${NAMESPACE}.svc.cluster.local:8000"
         ASYNC_METRICS_URL="http://vllm-metrics.${NAMESPACE}.svc.cluster.local:8000/metrics"
 

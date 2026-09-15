@@ -31,7 +31,8 @@ bash examples/deploy-demo/deploy-k8s.sh install
 | Internal Gateway | ClusterIP gateway for batch processor → LLM inference (bypasses rate limits, preserves AuthPolicy) |
 | InferenceObjective | GIE flow control CRDs — priority-based dispatch (interactive=100, batch=-1). Enabled by default (`ENABLE_FLOW_CONTROL=true`) |
 | batch-gateway | apiserver + processor + gc (Helm chart) |
-| async-processor | llm-d-async dispatcher for async dispatch mode (when `ENABLE_DISPATCHER=true`). Routes requests through Redis queues → Internal Gateway → EPP |
+| async-processor | llm-d-async dispatcher for async dispatch mode (enabled by default, `ENABLE_DISPATCHER=true`). Routes requests through Redis queues → Internal Gateway → EPP |
+| Prometheus | Scrapes EPP + vLLM metrics for the async dispatch budget (when `ENABLE_DISPATCHER=true`) |
 
 #### Routing & Policies
 
@@ -55,18 +56,24 @@ Batch-route has no authorization — model-level authz is enforced downstream wh
 | Mode | Command |
 |------|---------|
 | Local chart (default) | `bash examples/deploy-demo/deploy-k8s.sh install` |
-| Chart from a specific commit | `BATCH_DEV_VERSION=1f925ff bash examples/deploy-demo/deploy-k8s.sh install` |
-| Released OCI chart | `BATCH_RELEASE_VERSION=v0.1.0 bash examples/deploy-demo/deploy-k8s.sh install` |
-| Custom images | `BATCH_IMAGE_TAG=v0.2.0` <br> `BATCH_APISERVER_REPO=ghcr.io/llm-d/batch-gateway-apiserver` <br> `BATCH_PROCESSOR_REPO=ghcr.io/llm-d/batch-gateway-processor` <br> `BATCH_GC_REPO=ghcr.io/llm-d/batch-gateway-gc` <br> `bash examples/deploy-demo/deploy-k8s.sh install` |
-| With async dispatcher | `ENABLE_DISPATCHER=true bash examples/deploy-demo/deploy-k8s.sh install` |
+| Older commit chart (HTTP sync) | `BATCH_DEV_VERSION=1f925ff ENABLE_DISPATCHER=false ENABLE_FLOW_CONTROL=false bash examples/deploy-demo/deploy-k8s.sh install` |
+| Released OCI chart | `BATCH_RELEASE_VERSION=v0.5.0 bash examples/deploy-demo/deploy-k8s.sh install` |
+| Custom images (HTTP sync) | `BATCH_IMAGE_TAG=v0.2.0` <br> `ENABLE_DISPATCHER=false` <br> `BATCH_APISERVER_REPO=ghcr.io/llm-d/batch-gateway-apiserver` <br> `BATCH_PROCESSOR_REPO=ghcr.io/llm-d/batch-gateway-processor` <br> `BATCH_GC_REPO=ghcr.io/llm-d/batch-gateway-gc` <br> `bash examples/deploy-demo/deploy-k8s.sh install` |
+| Explicit HTTP sync (no dispatcher) | `ENABLE_DISPATCHER=false bash examples/deploy-demo/deploy-k8s.sh install` |
 
 > `BATCH_RELEASE_VERSION` and `BATCH_DEV_VERSION` cannot be used together. See [Environment Variables](#environment-variables) for common parameters.
+
+Async dispatch uses `processor.config.asyncDispatch.models` for model-to-pool mappings and flow-control objectives. Setting `ENABLE_DISPATCHER=false` explicitly sets `processor.config.dispatchMode=sync` and retains HTTP routing through `modelGateways`. API clients and the direct inference HTTP path are unchanged.
+
+Released charts `v0.3.0` and `v0.4.0` use the older async `modelGateways` layout; the script handles those exact versions. Charts `v0.1.0` and `v0.2.0` require `ENABLE_DISPATCHER=false` because they do not support async dispatch. For `v0.1.0`, also set `ENABLE_FLOW_CONTROL=false` because its objective configuration predates per-model objectives. Arbitrary older commit charts or mismatched image/chart versions are not auto-detected.
 
 ### test
 
 ```bash
 bash examples/deploy-demo/deploy-k8s.sh test
 ```
+
+Use the same environment overrides for `install` and `test`, including `ENABLE_DISPATCHER=false` for an HTTP sync deployment and `BATCH_RELEASE_VERSION` for a released chart.
 
 Creates temporary ServiceAccounts (authorized + unauthorized) with short-lived tokens and runs the following test groups:
 
@@ -152,6 +159,6 @@ Use that only on **ephemeral or dedicated** demo clusters. See [issue #309](http
 | `ISTIO_VERSION` | `1.29.2` | Istio Helm chart version |
 | `ENABLE_FLOW_CONTROL` | `true` | Enable GIE priority-based flow control |
 | `BATCH_FLOW_CONTROL_OBJECTIVE` | `batch-sheddable` | InferenceObjective name for batch requests (priority -1) |
-| `ENABLE_DISPATCHER` | `false` | Deploy llm-d-async dispatcher for async dispatch mode |
+| `ENABLE_DISPATCHER` | `true` | Deploy llm-d-async dispatcher and Prometheus; set `false` for explicit HTTP sync dispatch |
 | `DISPATCHER_VERSION` | `v0.7.3` | llm-d-async version (image tag and chart version) |
 | `UNINSTALL_ALL` | `0` | Set to `1` to remove Kuadrant, Istio, cert-manager, CRDs (ephemeral clusters only) |

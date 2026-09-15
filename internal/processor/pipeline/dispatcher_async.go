@@ -2,10 +2,12 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/go-logr/logr"
 
+	"github.com/llm-d/llm-d-batch-gateway/internal/processor/batchctx"
 	batch_types "github.com/llm-d/llm-d-batch-gateway/internal/shared/types"
 	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 )
@@ -78,8 +80,9 @@ func (d *AsyncDispatcher) Run(ctx context.Context, requestCh <-chan RequestItem,
 
 	// Drain submitted-but-uncollected requests as errors so that
 	// output_lines + error_lines == total_requests.
+	code, message := cancelCode(ctx)
 	d.pending.DrainUnresolved(func(msg RequestItem) {
-		resultCh <- *msg.Error("batch_expired", "result not collected before deadline")
+		resultCh <- *msg.Error(code, message)
 	})
 
 	// Unsubscribe removes resultCh from the broadcast list. A concurrent
@@ -92,7 +95,8 @@ func (d *AsyncDispatcher) Run(ctx context.Context, requestCh <-chan RequestItem,
 }
 
 func cancelCode(ctx context.Context) (string, string) {
-	if context.Cause(ctx) == context.DeadlineExceeded {
+	cause := context.Cause(ctx)
+	if errors.Is(cause, context.DeadlineExceeded) || errors.Is(cause, batchctx.ErrExpired) {
 		return string(batch_types.ErrCodeBatchExpired), batch_types.ErrCodeBatchExpired.Message()
 	}
 	return string(batch_types.ErrCodeBatchCancelled), batch_types.ErrCodeBatchCancelled.Message()

@@ -216,8 +216,8 @@ type ProcessorConfig struct {
 	FileClientCfg sharedcfg.FileClientConfig `yaml:"file_client"`
 
 	// DispatchMode selects the inference dispatch backend.
-	// "sync" (default): direct HTTP via InferenceClient.
-	// "async": submit via llm-d-async producer, collect from result queue.
+	// "async" (default): submit via llm-d-async producer, collect from result queue.
+	// "sync": direct HTTP via InferenceClient, explicitly opted into.
 	DispatchMode DispatchMode `yaml:"dispatch_mode"`
 
 	// AsyncDispatchConfig holds llm-d-async dispatch settings. Only used when DispatchMode == "async".
@@ -309,8 +309,8 @@ func (pc *ProcessorConfig) LoadFromYAML(filePath string) error {
 }
 
 // NewConfig returns a new ProcessorConfig with default values.
-// Gateway fields (GlobalInferenceGateway, ModelGateways) are intentionally
-// left nil — the user must configure exactly one via YAML or env.
+// Dispatch targets are intentionally left nil: configure async_dispatch.models
+// or explicitly select sync and configure a global or per-model gateway.
 // TaskWaitTime has to be shorter than poll interval.
 func NewConfig() *ProcessorConfig {
 	return &ProcessorConfig{
@@ -363,7 +363,7 @@ func NewConfig() *ProcessorConfig {
 		DefaultOutputExpirationSeconds: 90 * 24 * 60 * 60, // 90 days
 		ProgressTTLSeconds:             24 * 60 * 60,      // 24 hours
 
-		DispatchMode: DispatchModeSync,
+		DispatchMode: DispatchModeAsync,
 		AsyncDispatchConfig: AsyncDispatchConfig{
 			ResultPollTimeout: 5 * time.Second,
 		},
@@ -431,8 +431,7 @@ func (c *ProcessorConfig) Validate() error {
 
 func (c *ProcessorConfig) validateGateways() error {
 	switch c.DispatchMode {
-	case DispatchModeSync, DispatchMode(""):
-		c.DispatchMode = DispatchModeSync
+	case DispatchModeSync:
 		if c.GlobalInferenceGateway == nil && len(c.ModelGateways) == 0 {
 			return fmt.Errorf("either global_inference_gateway or model_gateways must be configured")
 		}
@@ -440,7 +439,8 @@ func (c *ProcessorConfig) validateGateways() error {
 			return fmt.Errorf("global_inference_gateway and model_gateways are mutually exclusive")
 		}
 		return c.validateSyncDispatchConfig()
-	case DispatchModeAsync:
+	case DispatchModeAsync, DispatchMode(""):
+		c.DispatchMode = DispatchModeAsync
 		return c.validateAsyncDispatchConfig()
 	default:
 		return fmt.Errorf("dispatch_mode must be %q or %q, got %q", DispatchModeSync, DispatchModeAsync, c.DispatchMode)
@@ -466,10 +466,10 @@ func (c *ProcessorConfig) validateAsyncDispatchConfig() error {
 		return fmt.Errorf("async_dispatch.result_poll_timeout must be > 0")
 	}
 	if c.GlobalInferenceGateway != nil {
-		return fmt.Errorf("global_inference_gateway is not supported with dispatch_mode %q; use async_dispatch.models", DispatchModeAsync)
+		return fmt.Errorf("global_inference_gateway is not supported with dispatch_mode %q; use async_dispatch.models instead or explicitly set dispatch_mode: sync", DispatchModeAsync)
 	}
 	if len(c.AsyncDispatchConfig.Models) == 0 {
-		return fmt.Errorf("async_dispatch.models must be configured when dispatch_mode is %q", DispatchModeAsync)
+		return fmt.Errorf("async_dispatch.models must be configured when dispatch_mode is %q (the default); configure async mappings or explicitly set dispatch_mode: sync to use global_inference_gateway or model_gateways", DispatchModeAsync)
 	}
 	for model, m := range c.AsyncDispatchConfig.Models {
 		if m.InferencePoolName == "" {
@@ -614,7 +614,7 @@ type ResolvedGateways struct {
 
 // ResolveModelGateways resolves API keys for all configured gateways and returns
 // a ResolvedGateways ready to pass to the inference client resolver.
-// Validate() ensures exactly one of GlobalInferenceGateway or ModelGateways is set.
+// Validate() ensures dispatch targets are configured for the selected mode.
 func ResolveModelGateways(cfg *ProcessorConfig) (*ResolvedGateways, error) {
 	result := &ResolvedGateways{}
 
