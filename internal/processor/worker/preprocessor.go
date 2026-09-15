@@ -315,9 +315,16 @@ func extractAndValidateLine(line []byte) (requestMeta, error) {
 
 	prefixHash := NoPrefixHash
 	for _, msg := range req.Body.Messages {
-		if msg.Role == "system" && msg.Content != "" {
+		if msg.Role != "system" {
+			continue
+		}
+		text, err := messageText(msg.Content)
+		if err != nil {
+			return requestMeta{}, fmt.Errorf("system message content: %w", err)
+		}
+		if text != "" {
 			h := fnv.New32a()
-			h.Write([]byte(msg.Content))
+			h.Write([]byte(text))
 			prefixHash = h.Sum32()
 			break
 		}

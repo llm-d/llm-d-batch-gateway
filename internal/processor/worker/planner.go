@@ -18,6 +18,7 @@ limitations under the License.
 package worker
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 )
 
 const modelMapFileName = "model_map.json"
@@ -38,10 +40,42 @@ type planRequestLine struct {
 		Model    string `json:"model"`
 		Stream   *bool  `json:"stream,omitempty"`
 		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 	} `json:"body"`
+}
+
+// messageText extracts only the system text needed for prefix grouping.
+// Other content stays encoded and the original input is used for forwarding.
+func messageText(content json.RawMessage) (string, error) {
+	content = bytes.TrimSpace(content)
+	if len(content) == 0 || bytes.Equal(content, []byte("null")) {
+		return "", nil
+	}
+	switch content[0] {
+	case '"':
+		var text string
+		err := json.Unmarshal(content, &text)
+		return text, err
+	case '[':
+		var parts []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(content, &parts); err != nil {
+			return "", err
+		}
+		var builder strings.Builder
+		for _, part := range parts {
+			if part.Type == "text" {
+				builder.WriteString(part.Text)
+			}
+		}
+		return builder.String(), nil
+	default:
+		return "", fmt.Errorf("must be a string or an array of content parts")
+	}
 }
 
 // NoPrefixHash is used when a request has no system prompt.
