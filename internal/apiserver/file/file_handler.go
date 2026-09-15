@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -45,6 +46,8 @@ import (
 const (
 	defaultListFilesLimit = 20
 	maxListFilesLimit     = 10000
+	maxUploadFormOverhead = 1 << 20
+	maxUploadFileSize     = math.MaxInt64 - maxUploadFormOverhead
 )
 
 // Compile-time check: FileAPIHandler implements common.ApiHandler.
@@ -168,11 +171,51 @@ func (c *FileAPIHandler) CreateFile(w http.ResponseWriter, r *http.Request) {
 	// Input file must be formatted as a JSONL file, and must be uploaded with the purpose batch.
 	// The file can contain up to 50,000 requests, and can be up to 200 MB in size.
 
-	// Check Content-Length header before reading the body
+	// Bound the whole request while allowing multipart framing and metadata.
 	maxFileSize := c.config.FileAPI.GetMaxSizeBytes()
-	if r.ContentLength > maxFileSize {
+	maxRequestSize := int64(math.MaxInt64)
+	if maxFileSize <= maxUploadFileSize {
+		maxRequestSize = maxFileSize + maxUploadFormOverhead
+	}
+	writeSizeError := func() {
+		logger.V(logging.DEBUG).Info("file upload request exceeds size limit",
+			"contentLength", r.ContentLength, "limit", maxRequestSize)
+		common.WriteAPIError(w, r, openai.NewAPIError(
+			http.StatusBadRequest, "",
+			fmt.Sprintf("File size exceeds the maximum allowed size of %d bytes or multipart overhead exceeds %d bytes", maxFileSize, maxUploadFormOverhead), nil,
+		))
+	}
+	if r.ContentLength > maxRequestSize {
+		writeSizeError()
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+	defer func() {
+		if r.MultipartForm != nil {
+			if err := r.MultipartForm.RemoveAll(); err != nil {
+				logger.Error(err, "failed to remove temporary multipart files")
+			}
+		}
+	}()
+
+	// Read form file from request
+	fileReader, fileHeader, err := r.FormFile("file")
+	if err != nil {
+		var sizeErr *http.MaxBytesError
+		if errors.As(err, &sizeErr) {
+			writeSizeError()
+			return
+		}
+		logger.Error(err, "failed to read form file from request")
+		common.WriteInternalServerError(w, r)
+		return
+	}
+	defer fileReader.Close()
+
+	// Limit file content, excluding multipart fields and framing.
+	if fileHeader.Size > maxFileSize {
 		logger.V(logging.DEBUG).Info("file size exceeds limit",
-			"contentLength", r.ContentLength, "limit", maxFileSize)
+			"fileSize", fileHeader.Size, "limit", maxFileSize)
 		apiErr := openai.NewAPIError(
 			http.StatusBadRequest,
 			"",
@@ -182,15 +225,6 @@ func (c *FileAPIHandler) CreateFile(w http.ResponseWriter, r *http.Request) {
 		common.WriteAPIError(w, r, apiErr)
 		return
 	}
-
-	// Read form file from request
-	fileReader, fileHeader, err := r.FormFile("file")
-	if err != nil {
-		logger.Error(err, "failed to read form file from request")
-		common.WriteInternalServerError(w, r)
-		return
-	}
-	defer fileReader.Close()
 
 	// Parse purpose parameter
 	purposeStr := r.FormValue("purpose")

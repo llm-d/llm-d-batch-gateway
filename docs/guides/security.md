@@ -62,7 +62,8 @@ The API server validates all inbound data before processing:
 
 | Check | Default |
 |-------|---------|
-| Max file upload size (Content-Length) | 200 MB |
+| Max file content size | 200 MB |
+| Max upload request body, including multipart framing and fields | File size limit + 1 MiB (also enforced for chunked uploads) |
 | Max lines per input file | 50,000 |
 | JSON decoding | Strict (`DisallowUnknownFields`) |
 | File purpose | Must be a known enum value |

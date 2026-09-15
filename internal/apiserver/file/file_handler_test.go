@@ -192,8 +192,7 @@ func doTestCreateFileStoreValidationErrors(t *testing.T) {
 		func(f *dbapi.FileItem) string { return f.ID },
 		func(q *dbapi.FileQuery) *dbapi.BaseQuery { return &q.BaseQuery },
 	)
-	// Use default max file size so the multipart request body is under the Content-Length
-	// pre-check; Store() errors are injected by errStoreFileClient.
+	// Keep the file below the size limit; Store() errors are injected by errStoreFileClient.
 	config := &common.ServerConfig{
 		FileAPI: common.FileAPIConfig{
 			MaxSizeBytes:             common.DefaultMaxFileSizeBytes,
@@ -1150,4 +1149,116 @@ func doTestDeleteFile(t *testing.T) {
 			t.Fatalf("expected metadata to be deleted after ErrNotExist, got %d items", len(items))
 		}
 	})
+}
+
+func TestCreateFileSizeBoundary(t *testing.T) {
+	const limit = 1024
+	for _, chunked := range []bool{false, true} {
+		for _, size := range []int{limit - 1, limit, limit + 1} {
+			t.Run(fmt.Sprintf("chunked=%t/size=%d", chunked, size), func(t *testing.T) {
+				handler := setupTestHandler(t)
+				handler.config.FileAPI.MaxSizeBytes = limit
+				server := httptest.NewServer(http.HandlerFunc(handler.CreateFile))
+				defer server.Close()
+
+				var body bytes.Buffer
+				writer := multipart.NewWriter(&body)
+				part, err := writer.CreateFormFile("file", "input.jsonl")
+				if err != nil {
+					t.Fatal(err)
+				}
+				content := `{"input":"` + strings.Repeat("x", size-len("{\"input\":\"\"}\n")) + "\"}\n"
+				if _, err := io.WriteString(part, content); err != nil {
+					t.Fatal(err)
+				}
+				if err := writer.WriteField("purpose", "batch"); err != nil {
+					t.Fatal(err)
+				}
+				if err := writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+				req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/files", &body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("Content-Type", writer.FormDataContentType())
+				if chunked {
+					req.ContentLength = -1
+				}
+				response, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer response.Body.Close()
+				wantStatus := http.StatusOK
+				if size > limit {
+					wantStatus = http.StatusBadRequest
+				}
+				if response.StatusCode != wantStatus {
+					data, _ := io.ReadAll(response.Body)
+					t.Fatalf("status = %d, want %d: %s", response.StatusCode, wantStatus, data)
+				}
+				if wantStatus == http.StatusOK {
+					var file openai.FileObject
+					if err := json.NewDecoder(response.Body).Decode(&file); err != nil {
+						t.Fatal(err)
+					}
+					if file.Bytes != int64(size) {
+						t.Errorf("file bytes = %d, want %d", file.Bytes, size)
+					}
+				}
+			})
+		}
+	}
+}
+
+type countedUploadReader struct {
+	io.Reader
+	bytesRead int64
+}
+
+func (r *countedUploadReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.bytesRead += int64(n)
+	return n, err
+}
+
+func TestCreateFileBoundsRequestBody(t *testing.T) {
+	const limit = 1024
+	for _, chunked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("chunked=%t", chunked), func(t *testing.T) {
+			handler := setupTestHandler(t)
+			handler.config.FileAPI.MaxSizeBytes = limit
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			part, err := writer.CreateFormFile("file", "large.jsonl")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(part, strings.Repeat("x", 2*maxUploadFormOverhead)); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reader := &countedUploadReader{Reader: &body}
+			req := httptest.NewRequest(http.MethodPost, "/v1/files", reader)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			req.ContentLength = int64(body.Len())
+			if chunked {
+				req.ContentLength = -1
+			}
+			response := httptest.NewRecorder()
+			handler.CreateFile(response, req)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", response.Code, response.Body)
+			}
+			if !chunked && reader.bytesRead != 0 {
+				t.Errorf("read %d bytes from oversized known-length request", reader.bytesRead)
+			}
+			if reader.bytesRead > limit+maxUploadFormOverhead+1 {
+				t.Errorf("read %d bytes, exceeding request bound", reader.bytesRead)
+			}
+		})
+	}
 }
