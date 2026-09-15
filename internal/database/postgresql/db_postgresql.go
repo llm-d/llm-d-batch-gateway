@@ -109,7 +109,6 @@ func newPool(ctx context.Context, config *PostgreSQLConfig) (pgxPool, error) {
 	}
 	if config.EnableTracing {
 		poolConfig.ConnConfig.Tracer = otelpgx.NewTracer(
-			otelpgx.WithTrimSQLInSpanName(),
 			otelpgx.WithSpanNameFunc(shortSpanName),
 		)
 	}
