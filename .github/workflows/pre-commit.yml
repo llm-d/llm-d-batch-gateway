@@ -57,11 +57,10 @@ jobs:
         uses: pre-commit/action@v3.0.1
 
       - name: Run integration tests
-        run: make test-integration
+        run: make test-integration GOFLAGS=-p=1
         env:
           # The PostgreSQL-backed tests share one schema and perform destructive
           # setup, so keep package execution serial until they use isolated DBs.
-          GOFLAGS: -p=1
           TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/batch_gateway_test?sslmode=disable
 
       - name: Lint Helm chart
