@@ -47,6 +47,7 @@ const (
 	defaultListFilesLimit = 20
 	maxListFilesLimit     = 10000
 	maxUploadFormOverhead = 1 << 20
+	maxUploadFileSize     = math.MaxInt64 - maxUploadFormOverhead
 )
 
 // Compile-time check: FileAPIHandler implements common.ApiHandler.
@@ -173,10 +174,12 @@ func (c *FileAPIHandler) CreateFile(w http.ResponseWriter, r *http.Request) {
 	// Bound the whole request while allowing multipart framing and metadata.
 	maxFileSize := c.config.FileAPI.GetMaxSizeBytes()
 	maxRequestSize := int64(math.MaxInt64)
-	if maxFileSize <= math.MaxInt64-maxUploadFormOverhead {
+	if maxFileSize <= maxUploadFileSize {
 		maxRequestSize = maxFileSize + maxUploadFormOverhead
 	}
 	writeSizeError := func() {
+		logger.V(logging.DEBUG).Info("file upload request exceeds size limit",
+			"contentLength", r.ContentLength, "limit", maxRequestSize)
 		common.WriteAPIError(w, r, openai.NewAPIError(
 			http.StatusBadRequest, "",
 			fmt.Sprintf("File size exceeds the maximum allowed size of %d bytes or multipart overhead exceeds %d bytes", maxFileSize, maxUploadFormOverhead), nil,
@@ -189,7 +192,9 @@ func (c *FileAPIHandler) CreateFile(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	defer func() {
 		if r.MultipartForm != nil {
-			_ = r.MultipartForm.RemoveAll()
+			if err := r.MultipartForm.RemoveAll(); err != nil {
+				logger.Error(err, "failed to remove temporary multipart files")
+			}
 		}
 	}()
 
