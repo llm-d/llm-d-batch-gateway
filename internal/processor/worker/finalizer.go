@@ -33,6 +33,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 	batch_types "github.com/llm-d/llm-d-batch-gateway/internal/shared/types"
 	ucom "github.com/llm-d/llm-d-batch-gateway/internal/util/com"
+	"github.com/llm-d/llm-d-batch-gateway/internal/util/failpoint"
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
@@ -72,6 +73,8 @@ func (p *Processor) uploadFileAndStoreFileRecord(
 	if fileSize == 0 {
 		return "", nil
 	}
+
+	failpoint.Inject("processor/after-blob-store")
 
 	uotel.SetAttr(ctx, attribute.String(attrKey, fileID))
 	if err := p.storeFileRecord(ctx, fileID, fileName, jobInfo.TenantID, fileSize, dbJob.Tags); err != nil {
@@ -155,6 +158,8 @@ func (p *Processor) finalizeJob(
 		}
 		return fmt.Errorf("upload failure during finalization: %w", errFinalizeFailedOver)
 	}
+
+	failpoint.Inject("processor/after-file-records")
 
 	// Best-effort: honour a user cancel that arrived during finalization.
 	// Only an explicit user cancel routes here — context.Cause is batchctx.ErrCancelled

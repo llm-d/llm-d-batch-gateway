@@ -6,6 +6,8 @@ TARGETARCH ?= $(shell go env GOARCH)
 
 # Variables
 IMAGE_TAG ?= 0.0.1
+# Extra args for image builds (e.g. --load for buildx container drivers)
+IMAGE_BUILD_EXTRA_ARGS ?=
 APISERVER_BINARY=batch-gateway-apiserver
 PROCESSOR_BINARY=batch-gateway-processor
 GC_BINARY=batch-gateway-gc
@@ -282,6 +284,8 @@ image-build-apiserver: check-container-tool
 		--platform linux/$(TARGETARCH) \
 		--build-arg TARGETOS=linux \
 		--build-arg TARGETARCH=$(TARGETARCH) \
+		--build-arg GO_BUILD_TAGS=$(GO_BUILD_TAGS) \
+		$(IMAGE_BUILD_EXTRA_ARGS) \
 		-f docker/Dockerfile.apiserver \
 		-t $(APISERVER_IMG) .
 
@@ -292,6 +296,8 @@ image-build-processor: check-container-tool
 		--platform linux/$(TARGETARCH) \
 		--build-arg TARGETOS=linux \
 		--build-arg TARGETARCH=$(TARGETARCH) \
+		--build-arg GO_BUILD_TAGS=$(GO_BUILD_TAGS) \
+		$(IMAGE_BUILD_EXTRA_ARGS) \
 		-f docker/Dockerfile.processor \
 		-t $(PROCESSOR_IMG) .
 
@@ -302,6 +308,8 @@ image-build-gc: check-container-tool
 		--platform linux/$(TARGETARCH) \
 		--build-arg TARGETOS=linux \
 		--build-arg TARGETARCH=$(TARGETARCH) \
+		--build-arg GO_BUILD_TAGS=$(GO_BUILD_TAGS) \
+		$(IMAGE_BUILD_EXTRA_ARGS) \
 		-f docker/Dockerfile.gc \
 		-t $(GC_IMG) .
 
@@ -331,6 +339,17 @@ test-integration:
 	@$(GO) test -v -tags=integration ./... || \
 		(echo "\n❌ Integration tests failed" && exit 1)
 	@echo "\n✅ Integration tests passed!"
+
+## test-simulation: Run the consistency simulation harness (docker compose topology with fault injection; see docs/design/consistency-harness.md)
+test-simulation:
+	@echo "Running consistency simulation harness..."
+	@$(GO) test -v -tags=simulation -count=1 -timeout=30m ./test/simulation/... || \
+		(echo "\n❌ Simulation scenarios failed" && exit 1)
+	@echo "\n✅ Simulation scenarios passed!"
+
+## sim-kind-deploy: Deploy a Kind cluster with failpoint-built images for the simulation harness (add ENABLE_GIE=true for EPP)
+sim-kind-deploy:
+	@GO_BUILD_TAGS=failpoints $(MAKE) dev-deploy
 
 ## test-all: Run all tests (unit + regression + integration + scripts)
 test-all: test test-regression test-integration test-scripts

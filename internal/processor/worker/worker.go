@@ -31,6 +31,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/batch_utils"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/clientset"
+	"github.com/llm-d/llm-d-batch-gateway/internal/util/failpoint"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
 	uotel "github.com/llm-d/llm-d-batch-gateway/internal/util/otel"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/semaphore"
@@ -268,6 +269,8 @@ func (p *Processor) runPollingLoop(pollingCtx, jobBaseCtx context.Context) error
 			}
 			continue
 		}
+
+		failpoint.Inject("processor/after-dequeue")
 
 		// Pre-launch: use pollingCtx so guard cancel / SIGTERM interrupts
 		// DB fetch and validation promptly. jobBaseCtx is only used once
