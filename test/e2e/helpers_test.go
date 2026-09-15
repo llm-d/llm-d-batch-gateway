@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -432,19 +433,65 @@ type batchResultLine struct {
 	} `json:"error"`
 }
 
+// isRetryableStatus returns true for transient proxy/infrastructure errors
+// where retrying is likely to succeed. Matches llm-d-router's classification:
+// 502 (BadGateway), 503 (ServiceUnavailable), 504 (GatewayTimeout).
+// 500/501 indicate bugs and should fail fast.
+func isRetryableStatus(code int) bool {
+	return code == http.StatusBadGateway ||
+		code == http.StatusServiceUnavailable ||
+		code == http.StatusGatewayTimeout
+}
+
+// downloadFileContent retrieves the content of a file by ID with retries for
+// transient proxy errors (502/503/504). Matches llm-d-router's retry policy.
+func downloadFileContent(t *testing.T, fileID string) *http.Response {
+	t.Helper()
+
+	const (
+		maxRetries = 5
+		baseDelay  = 500 * time.Millisecond
+	)
+	client := newClient()
+
+	var lastErr error
+	for attempt := range maxRetries {
+		resp, err := client.Files.Content(context.Background(), fileID)
+		if err == nil && resp != nil {
+			return resp
+		}
+		// Extract HTTP status from the OpenAI API error.
+		var apiErr *openai.Error
+		if errors.As(err, &apiErr) {
+			if apiErr.StatusCode == http.StatusNotFound {
+				t.Fatalf("file %s not found (404)", fileID)
+			}
+			if !isRetryableStatus(apiErr.StatusCode) {
+				t.Fatalf("download file %s failed with non-retryable HTTP %d: %v", fileID, apiErr.StatusCode, err)
+			}
+			lastErr = fmt.Errorf("HTTP %d", apiErr.StatusCode)
+		} else {
+			lastErr = err
+		}
+		if attempt < maxRetries-1 {
+			delay := baseDelay * time.Duration(1<<attempt)
+			t.Logf("file download attempt %d/%d failed (%v), retrying in %v...", attempt+1, maxRetries, lastErr, delay)
+			time.Sleep(delay)
+		}
+	}
+	t.Fatalf("download file %s failed after %d attempts: %v", fileID, maxRetries, lastErr)
+	return nil // unreachable
+}
+
 // fetchBatchResults downloads the output and error files for a batch
 // and returns their contents. It also verifies Content-Disposition headers.
 func fetchBatchResults(t *testing.T, batch *openai.Batch) batchResults {
 	t.Helper()
 
 	var result batchResults
-	client := newClient()
 
 	if batch.OutputFileID != "" {
-		resp, err := client.Files.Content(context.Background(), batch.OutputFileID)
-		if err != nil {
-			t.Fatalf("download output file failed: %v", err)
-		}
+		resp := downloadFileContent(t, batch.OutputFileID)
 		wantCD := fmt.Sprintf(`attachment; filename=%q`, fmt.Sprintf("batch_output_%s.jsonl", batch.ID))
 		if cd := resp.Header.Get("Content-Disposition"); cd != wantCD {
 			t.Errorf("output file Content-Disposition mismatch\ngot:  %s\nwant: %s", cd, wantCD)
@@ -458,10 +505,7 @@ func fetchBatchResults(t *testing.T, batch *openai.Batch) batchResults {
 	}
 
 	if batch.ErrorFileID != "" {
-		resp, err := client.Files.Content(context.Background(), batch.ErrorFileID)
-		if err != nil {
-			t.Fatalf("download error file failed: %v", err)
-		}
+		resp := downloadFileContent(t, batch.ErrorFileID)
 		wantCD := fmt.Sprintf(`attachment; filename=%q`, fmt.Sprintf("batch_error_%s.jsonl", batch.ID))
 		if cd := resp.Header.Get("Content-Disposition"); cd != wantCD {
 			t.Errorf("error file Content-Disposition mismatch\ngot:  %s\nwant: %s", cd, wantCD)
@@ -872,11 +916,7 @@ func skipIf(t *testing.T, cond bool, reason, name string, fn func(*testing.T)) {
 func fetchOutputFile(t *testing.T, batch *openai.Batch) string {
 	t.Helper()
 
-	client := newClient()
-	resp, err := client.Files.Content(t.Context(), batch.OutputFileID)
-	if err != nil {
-		t.Fatalf("download output file failed: %v", err)
-	}
+	resp := downloadFileContent(t, batch.OutputFileID)
 	body, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if err != nil {
