@@ -2,9 +2,12 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
+	mockdb "github.com/llm-d/llm-d-batch-gateway/internal/database/mock"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/clientset"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/semaphore"
@@ -89,6 +92,25 @@ func TestProcessorRun_ContextCanceled_ReturnsNil(t *testing.T) {
 	cancel()
 	if err := p.Run(ctx, nil); err != nil {
 		t.Fatalf("expected nil on canceled context run, got %v", err)
+	}
+}
+
+func TestProcessorRun_RecoveryFailureReturnsBeforeReady(t *testing.T) {
+	clients := validProcessorClients(t)
+	claimErr := errors.New("claim failed")
+	queue := clients.Queue.(*mockdb.MockBatchPriorityQueueClient)
+	queue.OnClaimOwned = func(context.Context) ([]*db.BatchJobPriority, error) {
+		return nil, claimErr
+	}
+	p := mustNewProcessor(t, config.NewConfig(), clients)
+	ready := false
+
+	err := p.Run(context.Background(), func() { ready = true })
+	if !errors.Is(err, claimErr) {
+		t.Fatalf("expected recovery error, got %v", err)
+	}
+	if ready {
+		t.Fatal("processor became ready after startup recovery failed")
 	}
 }
 

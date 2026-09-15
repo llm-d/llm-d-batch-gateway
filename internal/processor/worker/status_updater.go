@@ -87,6 +87,18 @@ func (s *StatusUpdater) UpdatePersistentStatus(
 	slo *time.Time,
 	modifiers ...func(*openai.BatchStatusInfo),
 ) error {
+	return s.updatePersistentStatus(ctx, dbJob, newStatus, counts, slo, nil, modifiers...)
+}
+
+func (s *StatusUpdater) updatePersistentStatus(
+	ctx context.Context,
+	dbJob *db.BatchItem,
+	newStatus openai.BatchStatus,
+	counts *openai.BatchRequestCounts,
+	slo *time.Time,
+	expectedStatus []byte,
+	modifiers ...func(*openai.BatchStatusInfo),
+) error {
 	if dbJob == nil {
 		return fmt.Errorf("dbJob is nil")
 	}
@@ -123,7 +135,7 @@ func (s *StatusUpdater) UpdatePersistentStatus(
 			Status: statusBytes,
 		},
 		Epoch: dbJob.Epoch,
-	}, nil); err != nil {
+	}, expectedStatus); err != nil {
 		return err
 	}
 
@@ -173,7 +185,10 @@ func (s *StatusUpdater) UpdateFailedStatus(
 	outputFileID string,
 	errorFileID string,
 ) error {
-	return s.UpdatePersistentStatus(ctx, dbJob, openai.BatchStatusFailed, counts, nil,
+	if dbJob == nil {
+		return fmt.Errorf("dbJob is nil")
+	}
+	return s.updatePersistentStatus(ctx, dbJob, openai.BatchStatusFailed, counts, nil, dbJob.Status,
 		withFileIDs(outputFileID, errorFileID),
 	)
 }
