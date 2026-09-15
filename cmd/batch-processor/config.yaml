@@ -2,6 +2,12 @@
 task_wait_time: "1s"
 poll_interval: "5s"
 num_workers: 20
+
+# Additional deployment-specific inference paths. Standard OpenAI endpoints
+# are always allowed. This list must match batch_api.extra_endpoints on the API server.
+# extra_endpoints:
+#   - "/v1/classify"
+#   - "/v1/pooling"
 queue_time_bucket:
   start: 0.1
   factor: 2

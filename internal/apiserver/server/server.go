@@ -89,7 +89,10 @@ func New(ctx context.Context, config *common.ServerConfig) (*Server, error) {
 	//   Unmatched: Client → ServeMux → Recovery → RequestMiddleware → SecurityHeaders → NotFoundHandler
 	apiMux := http.NewServeMux()
 	fileHandler := file.NewFileAPIHandler(config, clients)
-	batchHandler := batch.NewBatchAPIHandler(config, clients)
+	batchHandler, err := batch.NewBatchAPIHandler(config, clients)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create batch API handler: %w", err)
+	}
 	apiMiddlewares := []common.RouteMiddleware{
 		middleware.Recovery,                     // outermost: catches panics from all inner layers
 		middleware.NewRequestMiddleware(config), // request ID, tenant, logging, metrics, OTel tracing

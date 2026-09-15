@@ -48,10 +48,11 @@ type endpointLimit struct {
 }
 
 type Processor struct {
-	cfg         *config.ProcessorConfig
-	processorID string
-	tokens      semaphore.Semaphore
-	wg          sync.WaitGroup
+	cfg               *config.ProcessorConfig
+	endpointAllowlist openai.EndpointAllowlist
+	processorID       string
+	tokens            semaphore.Semaphore
+	wg                sync.WaitGroup
 
 	// globalSem limits total in-flight inference requests across all workers.
 	// Fixed capacity — serves as a ceiling only.
@@ -89,18 +90,24 @@ func NewProcessor(
 	if cfg.Concurrency.Global <= 0 {
 		return nil, fmt.Errorf("global semaphore (concurrency.global=%d): %w", cfg.Concurrency.Global, semaphore.ErrCap)
 	}
+	endpointAllowlist, err := openai.NewEndpointAllowlist(cfg.ExtraEndpoints)
+	if err != nil {
+		return nil, fmt.Errorf("extra endpoints: %w", err)
+	}
 	poller := NewPoller(clients.Queue, clients.BatchDB)
 	updater := NewStatusUpdater(clients.BatchDB, clients.Status, cfg.ProgressTTLSeconds)
 	return &Processor{
-		cfg:            cfg,
-		processorID:    processorID,
-		poller:         poller,
-		updater:        updater,
-		batchDB:        clients.BatchDB,
-		event:          clients.Event,
-		inference:      clients.Inference,
-		asyncInference: clients.AsyncInference,
-		files:          newFileManager(clients.File, clients.FileDB),
+		cfg:               cfg,
+		endpointAllowlist: endpointAllowlist,
+		processorID:       processorID,
+		poller:            poller,
+		updater:           updater,
+		batchDB:           clients.BatchDB,
+		event:             clients.Event,
+		inflight:          clients.InFlight,
+		inference:         clients.Inference,
+		asyncInference:    clients.AsyncInference,
+		files:             newFileManager(clients.File, clients.FileDB),
 	}, nil
 }
 

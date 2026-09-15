@@ -72,7 +72,31 @@ helm upgrade my-release ./charts/batch-gateway \
 ```
 
 ## Configuration
+
 For a complete list of parameters, see [values.yaml](./values.yaml).
+
+### Additional inference endpoints
+
+Batch Gateway accepts the standard OpenAI Batch API endpoints by default. To use an endpoint supplied by an OpenAI-compatible backend, add it explicitly to the shared allowlist:
+
+```yaml
+global:
+  extraEndpoints:
+    - /v1/classify
+    - /v1/pooling
+```
+
+The chart renders this list into both the API server and processor configurations. Each value must be an absolute path beginning with exactly one slash and cannot contain a host, query string, fragment, or escaped path. Invalid values cause startup validation to fail.
+
+For a rolling upgrade, enable new endpoints on processors before API servers can accept batches that use them:
+
+1. Set `processor.config.extraEndpoints` and wait for the processor rollout to complete.
+2. Set `global.extraEndpoints`, which enables the endpoints for the API server as well.
+3. Reset `processor.config.extraEndpoints` to `null` so it inherits the global value.
+
+Both `processor.config.extraEndpoints` and `apiserver.config.batchAPI.extraEndpoints` default to `null`, meaning they inherit `global.extraEndpoints`. Setting either override to a list replaces the global value for that component; an explicit `[]` disables configured extensions for that component.
+
+The endpoint remains batch-scoped: every request URL in the input JSONL must exactly match the endpoint declared when creating the batch. The configured path is forwarded unchanged in synchronous and asynchronous dispatch modes. Omitting `global.extraEndpoints` preserves the default OpenAI-only behavior.
 
 ## Usage
 

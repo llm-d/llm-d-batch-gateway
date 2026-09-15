@@ -20,6 +20,9 @@ package openai
 import (
 	"errors"
 	"fmt"
+	"net/url"
+	"path"
+	"strings"
 	"time"
 )
 
@@ -37,14 +40,45 @@ const (
 	EndpointModerations     Endpoint = "/v1/moderations"
 )
 
-func (e Endpoint) String() string {
-	return string(e)
+// EndpointAllowlist reports which batch endpoints are accepted. The zero value accepts
+// exactly the OpenAI Batch API endpoints.
+type EndpointAllowlist struct {
+	extra map[Endpoint]struct{}
 }
 
-// IsValidEndpoint reports whether the given endpoint is one of the supported
-// Batch API endpoints.
-func IsValidEndpoint(endpoint string) bool {
-	switch Endpoint(endpoint) {
+// NewEndpointAllowlist returns an allowlist covering the OpenAI endpoints plus extra.
+// Entries duplicating a default are ignored. Malformed entries are rejected so a
+// bad deployment config fails at startup, not per request.
+func NewEndpointAllowlist(extra []string) (EndpointAllowlist, error) {
+	var a EndpointAllowlist
+	for _, e := range extra {
+		if err := validateEndpointPath(e); err != nil {
+			return EndpointAllowlist{}, fmt.Errorf("endpoint %q: %w", e, err)
+		}
+		ep := Endpoint(e)
+		if isDefaultEndpoint(ep) {
+			continue
+		}
+		if a.extra == nil {
+			a.extra = make(map[Endpoint]struct{}, len(extra))
+		}
+		a.extra[ep] = struct{}{}
+	}
+	return a, nil
+}
+
+// IsValid reports whether endpoint is accepted by this allowlist
+func (a EndpointAllowlist) IsValid(endpoint string) bool {
+	ep := Endpoint(endpoint)
+	if isDefaultEndpoint(ep) {
+		return true
+	}
+	_, ok := a.extra[ep]
+	return ok
+}
+
+func isDefaultEndpoint(endpoint Endpoint) bool {
+	switch endpoint {
 	case EndpointResponses,
 		EndpointChatCompletions,
 		EndpointEmbeddings,
@@ -54,6 +88,39 @@ func IsValidEndpoint(endpoint string) bool {
 	default:
 		return false
 	}
+}
+
+func validateEndpointPath(endpoint string) error {
+	if endpoint == "" {
+		return errors.New("path cannot be empty")
+	}
+	if endpoint[0] != '/' || len(endpoint) > 1 && endpoint[1] == '/' {
+		return errors.New("must be an absolute path beginning with exactly one slash")
+	}
+	if strings.ContainsAny(endpoint, "?#") {
+		return errors.New("must not contain a query string or fragment")
+	}
+	if path.Clean(endpoint) != endpoint {
+		return errors.New("must be a canonical path without dot segments or repeated slashes")
+	}
+	parsed, err := url.ParseRequestURI(endpoint)
+	if err != nil {
+		return fmt.Errorf("must be a valid URL path: %w", err)
+	}
+	if parsed.Path != endpoint || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("must not contain a query string, fragment, or escaped path")
+	}
+	return nil
+}
+
+func (e Endpoint) String() string {
+	return string(e)
+}
+
+// IsValidEndpoint reports whether the given endpoint is one of the supported
+// Batch API endpoints.
+func IsValidEndpoint(endpoint string) bool {
+	return (EndpointAllowlist{}).IsValid(endpoint)
 }
 
 type BatchStatus string
@@ -293,6 +360,11 @@ type OutputExpiresAfter struct {
 }
 
 func (r *CreateBatchRequest) Validate() error {
+	return r.ValidateWithEndpointAllowlist(EndpointAllowlist{})
+}
+
+// ValidateWithEndpointAllowlist validates the request using the supplied endpoint allowlist.
+func (r *CreateBatchRequest) ValidateWithEndpointAllowlist(allowlist EndpointAllowlist) error {
 	if r.CompletionWindow == "" {
 		return errors.New("completion_window is required")
 	}
@@ -305,7 +377,7 @@ func (r *CreateBatchRequest) Validate() error {
 		return errors.New("endpoint is required")
 	}
 
-	if !IsValidEndpoint(r.Endpoint.String()) {
+	if !allowlist.IsValid(r.Endpoint.String()) {
 		return errors.New("invalid endpoint: " + string(r.Endpoint))
 	}
 

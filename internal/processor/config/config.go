@@ -25,6 +25,7 @@ import (
 	"time"
 
 	sharedcfg "github.com/llm-d/llm-d-batch-gateway/internal/shared/config"
+	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 	ucom "github.com/llm-d/llm-d-batch-gateway/internal/util/com"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/ptr"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/retry"
@@ -135,6 +136,9 @@ type AsyncDispatchConfig struct {
 }
 
 type ProcessorConfig struct {
+	// ExtraEndpoints adds deployment-specific inference paths to the default OpenAI endpoint allowlist.
+	ExtraEndpoints []string `yaml:"extra_endpoints"`
+
 	// TaskWaitTime is the timeout parameter used when dequeueing from the priority queue
 	// This should be shorter than PollInterval
 	TaskWaitTime time.Duration `yaml:"task_wait_time"`
@@ -410,6 +414,9 @@ func (c *ProcessorConfig) Validate() error {
 
 	if err := c.FileClientCfg.Retry.Validate(); err != nil {
 		return fmt.Errorf("file_client.retry: %w", err)
+	}
+	if _, err := openai.NewEndpointAllowlist(c.ExtraEndpoints); err != nil {
+		return fmt.Errorf("extra_endpoints: %w", err)
 	}
 
 	if c.ProgressTTLSeconds <= 0 {

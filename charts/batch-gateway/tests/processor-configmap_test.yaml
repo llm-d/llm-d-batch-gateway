@@ -13,6 +13,46 @@ tests:
           path: data["config.yaml"]
           pattern: 'model_gateways:'
 
+  - it: should render shared extra endpoints
+    set:
+      global.extraEndpoints:
+        - /v1/classify
+        - /v1/pooling
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'extra_endpoints:\n\s+- "/v1/classify"\n\s+- "/v1/pooling"'
+
+  - it: should prefer processor extra endpoints over the global value
+    set:
+      global.extraEndpoints:
+        - /v1/global
+      processor.config.extraEndpoints:
+        - /v1/processor
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'extra_endpoints:\n\s+- "/v1/processor"'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: '/v1/global'
+
+  - it: should allow processor extra endpoints to explicitly override global with empty
+    set:
+      global.extraEndpoints:
+        - /v1/global
+      processor.config.extraEndpoints: []
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "extra_endpoints:"
+
+  - it: should omit extra endpoints by default
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "extra_endpoints:"
+
   - it: should default tls_insecure_skip_verify to false when omitted from global_inference_gateway
     set:
       processor.config.globalInferenceGateway:

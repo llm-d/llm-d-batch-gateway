@@ -108,6 +108,20 @@ func TestNewConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestProcessorConfig_Validate_ExtraEndpoints(t *testing.T) {
+	c := NewConfig()
+	c.ModelGateways = validPerModelConfig()
+	c.ExtraEndpoints = []string{"/v1/classify", "/v1/pooling"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() unexpected error: %v", err)
+	}
+
+	c.ExtraEndpoints = []string{"/v1/classify?mode=test"}
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate() expected error for invalid extra endpoint")
+	}
+}
+
 func TestProcessorConfig_Validate_WorkDirEmpty(t *testing.T) {
 	c := NewConfig()
 	c.ModelGateways = validPerModelConfig()
