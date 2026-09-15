@@ -97,9 +97,6 @@ func TestNewConfig_Defaults(t *testing.T) {
 	if c.DefaultOutputExpirationSeconds != want90Days {
 		t.Fatalf("DefaultOutputExpirationSeconds = %d, want %d", c.DefaultOutputExpirationSeconds, want90Days)
 	}
-	if c.ProgressTTLSeconds != 86400 {
-		t.Fatalf("ProgressTTLSeconds = %d, want %d", c.ProgressTTLSeconds, 86400)
-	}
 	if c.DispatchMode != DispatchModeSync {
 		t.Fatalf("DispatchMode = %q, want %q", c.DispatchMode, DispatchModeSync)
 	}
@@ -179,7 +176,6 @@ model_gateways:
     max_retries: 0
     initial_backoff: 1s
     max_backoff: 60s
-progress_ttl_seconds: 86400
 `)
 
 	if err := os.WriteFile(path, yamlData, 0o600); err != nil {
@@ -563,7 +559,6 @@ model_gateways:
     max_backoff: 10s
     tls_insecure_skip_verify: true
 default_output_expiration_seconds: 86400
-progress_ttl_seconds: 3600
 send_fairness_header: true
 route_key_method: tenant
 `)
@@ -636,9 +631,6 @@ route_key_method: tenant
 
 	if c.DefaultOutputExpirationSeconds != 86400 {
 		t.Fatalf("DefaultOutputExpirationSeconds = %d, want %d", c.DefaultOutputExpirationSeconds, 86400)
-	}
-	if c.ProgressTTLSeconds != 3600 {
-		t.Fatalf("ProgressTTLSeconds = %d, want %d", c.ProgressTTLSeconds, 3600)
 	}
 	if !c.SendFairnessHeader {
 		t.Fatalf("SendFairnessHeader = false, want true")

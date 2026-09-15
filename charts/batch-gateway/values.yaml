@@ -19,32 +19,17 @@ global:
   # Name of the Kubernetes Secret containing sensitive values (e.g. database URLs, API keys).
   # Shared by all components; mounted read-only at /etc/.secrets/ in each container.
   # The secret must use these exact key names (hardcoded in the application):
-  #   redis-url             — Redis/Valkey connection URL (e.g. redis://host:6379/0)
   #   postgresql-url        — PostgreSQL connection URL (e.g. postgresql://[user]:[pass]@[host]/[db])
+  #   redis-url             — Redis URL for llm-d-async queues (used only when async dispatch is enabled)
   #   inference-api-key     — API key for the inference gateway (optional; omit if not required)
   #   s3-secret-access-key  — S3 secret access key (required when file_client.type is "s3")
-  # Create with: kubectl create secret generic <name> --from-literal=redis-url=redis://...
+  # Create with: kubectl create secret generic <name> --from-literal=postgresql-url=postgresql://...
   secretName: "batch-gateway-secrets"
 
   # Database client configuration (shared by apiserver, processor, and gc).
   dbClient:
-    # Database backend type: "redis", "valkey", or "postgresql".
-    # Valkey is wire-protocol compatible with Redis; both use the go-redis client.
+    # Database backend type: "postgresql".
     type: "postgresql"
-    # Redis/Valkey client settings.
-    # The connection URL is read from the app secret (redis-url key), not from here.
-    # 0 (or "0s") means go-redis library default.
-    redis:
-      db: 0
-      enableTLS: false
-      insecure: false
-      timeout: "0s"
-      maxRetries: 0
-      minRetryBackoff: "0s"
-      maxRetryBackoff: "0s"
-      poolTimeout: "0s"
-      connMaxIdleTime: "0s"
-      connMaxLifetime: "0s"
 
   # OpenTelemetry configuration
   otel:
@@ -64,9 +49,6 @@ global:
     # Sampling ratio (0.0 to 1.0), used when sampler is "*traceidratio".
     # 1.0 = 100% (dev), 0.1 = 10% (production).
     samplerArg: "1.0"
-    # Enable per-command Redis tracing spans. Can produce high span volume
-    # for batch workloads — leave disabled unless actively debugging Redis.
-    redisTracing: false
     # Enable per-query PostgreSQL tracing spans via otelpgx.
     postgresqlTracing: false
 
@@ -420,7 +402,7 @@ processor:
     #       requestQueueName: "llm-d-async:requests:pool-b"
     #       resultQueueName: "llm-d-async:results:pool-b"    # optional: explicit result queue base
     defaultOutputExpirationSeconds: 7776000  # 90 days
-    progressTTLSeconds: 86400  # 24 hours
+    progressUpdateInterval: "15s"  # Throttle interval for DB progress updates
     # Whether to send x-gateway-inference-fairness-id on inference requests.
     # false (default) omits the header entirely.
     sendFairnessHeader: false

@@ -230,7 +230,6 @@ func TestFinalizeJob_CancelRequested_FinalizesCancelled(t *testing.T) {
 	cfg.WorkDir = t.TempDir()
 
 	dbClient := newSpyBatchDB(newMockBatchDBClient())
-	statusClient := mockdb.NewMockBatchStatusClient()
 
 	jobID := "job-late-cancel"
 	tenantID := "tenant-1"
@@ -256,13 +255,12 @@ func TestFinalizeJob_CancelRequested_FinalizesCancelled(t *testing.T) {
 		BatchDB: dbClient,
 		FileDB:  newMockFileDBClient(),
 		File:    &failNTimesFilesClient{failCount: 0},
-		Status:  statusClient,
 		Queue:   mockdb.NewMockBatchPriorityQueueClient(),
 	}
 	p := mustNewProcessor(t, cfg, clients)
 	p.poller = NewPoller(clients.Queue, dbClient)
 
-	updater := NewStatusUpdater(dbClient, statusClient, 86400)
+	updater := NewStatusUpdater(dbClient)
 
 	// Setup job dir manually to reuse the pre-seeded DB client
 	jobDir, _ := p.jobRootDir(jobID, tenantID)
@@ -319,7 +317,6 @@ func TestFinalizeJob_ShutdownDuringFinalization_CompletesNotCancelled(t *testing
 	cfg.WorkDir = t.TempDir()
 
 	dbClient := newSpyBatchDB(newMockBatchDBClient())
-	statusClient := mockdb.NewMockBatchStatusClient()
 
 	jobID := "job-shutdown-during-final"
 	tenantID := "tenant-1"
@@ -336,13 +333,12 @@ func TestFinalizeJob_ShutdownDuringFinalization_CompletesNotCancelled(t *testing
 		BatchDB: dbClient,
 		FileDB:  newMockFileDBClient(),
 		File:    &failNTimesFilesClient{failCount: 0},
-		Status:  statusClient,
 		Queue:   mockdb.NewMockBatchPriorityQueueClient(),
 	}
 	p := mustNewProcessor(t, cfg, clients)
 	p.poller = NewPoller(clients.Queue, dbClient)
 
-	updater := NewStatusUpdater(dbClient, statusClient, 86400)
+	updater := NewStatusUpdater(dbClient)
 
 	jobDir, _ := p.jobRootDir(jobID, tenantID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
@@ -400,7 +396,6 @@ func TestFinalizeJob_CompletedWriteFails_FallsBackToFailedWithFileIDs(t *testing
 		failStatus: openai.BatchStatusCompleted,
 		failErr:    errors.New("injected: completed write failed"),
 	}
-	statusClient := mockdb.NewMockBatchStatusClient()
 
 	jobID := "job-failover-completed"
 	tenantID := "tenant-1"
@@ -412,12 +407,11 @@ func TestFinalizeJob_CompletedWriteFails_FallsBackToFailedWithFileIDs(t *testing
 		BatchDB: failDB,
 		FileDB:  newMockFileDBClient(),
 		File:    &failNTimesFilesClient{failCount: 0},
-		Status:  statusClient,
 		Queue:   mockdb.NewMockBatchPriorityQueueClient(),
 	}
 	p := mustNewProcessor(t, cfg, clients)
 	p.poller = NewPoller(clients.Queue, failDB)
-	updater := NewStatusUpdater(failDB, statusClient, 86400)
+	updater := NewStatusUpdater(failDB)
 
 	jobDir, _ := p.jobRootDir(jobID, tenantID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
@@ -477,7 +471,6 @@ func TestFinalizeJob_CancelledWriteFails_FallsBackToFailedWithFileIDs(t *testing
 		failStatus: openai.BatchStatusCancelled,
 		failErr:    errors.New("injected: cancelled write failed"),
 	}
-	statusClient := mockdb.NewMockBatchStatusClient()
 
 	jobID := "job-failover-cancelled"
 	tenantID := "tenant-1"
@@ -489,12 +482,11 @@ func TestFinalizeJob_CancelledWriteFails_FallsBackToFailedWithFileIDs(t *testing
 		BatchDB: failDB,
 		FileDB:  newMockFileDBClient(),
 		File:    &failNTimesFilesClient{failCount: 0},
-		Status:  statusClient,
 		Queue:   mockdb.NewMockBatchPriorityQueueClient(),
 	}
 	p := mustNewProcessor(t, cfg, clients)
 	p.poller = NewPoller(clients.Queue, failDB)
-	updater := NewStatusUpdater(failDB, statusClient, 86400)
+	updater := NewStatusUpdater(failDB)
 
 	jobDir, _ := p.jobRootDir(jobID, tenantID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
@@ -552,7 +544,6 @@ func TestFinalizeJob_OneUploadFails_FailedWithSurvivingFileID(t *testing.T) {
 	cfg.WorkDir = t.TempDir()
 
 	innerDB := newMockBatchDBClient()
-	statusClient := mockdb.NewMockBatchStatusClient()
 	filesClient := &failOnNthCallClient{
 		failN:   1,
 		failErr: errors.New("injected: one upload fails"),
@@ -568,12 +559,11 @@ func TestFinalizeJob_OneUploadFails_FailedWithSurvivingFileID(t *testing.T) {
 		BatchDB: innerDB,
 		FileDB:  newMockFileDBClient(),
 		File:    filesClient,
-		Status:  statusClient,
 		Queue:   mockdb.NewMockBatchPriorityQueueClient(),
 	}
 	p := mustNewProcessor(t, cfg, clients)
 	p.poller = NewPoller(clients.Queue, innerDB)
-	updater := NewStatusUpdater(innerDB, statusClient, 86400)
+	updater := NewStatusUpdater(innerDB)
 
 	jobDir, _ := p.jobRootDir(jobID, tenantID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
@@ -686,19 +676,17 @@ func TestFinalizeJob_UploadsFilesInParallel(t *testing.T) {
 	mock := &concurrentFilesClient{delay: 50 * time.Millisecond}
 	dbClient := newMockBatchDBClient()
 	fileDB := newMockFileDBClient()
-	statusClient := mockdb.NewMockBatchStatusClient()
 
 	clients := &clientset.Clientset{
 		BatchDB: dbClient,
 		FileDB:  fileDB,
 		File:    mock,
-		Status:  statusClient,
 		Queue:   mockdb.NewMockBatchPriorityQueueClient(),
 	}
 	p := mustNewProcessor(t, cfg, clients)
 	p.poller = NewPoller(clients.Queue, dbClient)
 
-	updater := NewStatusUpdater(dbClient, statusClient, 86400)
+	updater := NewStatusUpdater(dbClient)
 
 	jobID := "job-parallel-upload"
 	tenantID := "tenant-1"
@@ -749,7 +737,6 @@ func TestUploadPartialResults_UploadsFilesInParallel(t *testing.T) {
 		BatchDB: dbClient,
 		FileDB:  fileDB,
 		File:    mock,
-		Status:  mockdb.NewMockBatchStatusClient(),
 		Queue:   mockdb.NewMockBatchPriorityQueueClient(),
 	}
 	p := mustNewProcessor(t, cfg, clients)

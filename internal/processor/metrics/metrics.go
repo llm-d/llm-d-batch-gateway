@@ -33,11 +33,12 @@ const (
 	// ResultExpired: Job exceeded SLO deadline (either at dequeue time or mid-execution)
 
 	// Result labels
-	ResultSuccess    = "success"
-	ResultFailed     = "failed"
-	ResultSkipped    = "skipped"
-	ResultReEnqueued = "re_enqueued"
-	ResultExpired    = "expired" // job exceeded SLO deadline (dequeue-time or mid-execution)
+	ResultSuccess       = "success"
+	ResultFailed        = "failed"
+	ResultSkipped       = "skipped"
+	ResultReEnqueued    = "re_enqueued"
+	ResultExpired       = "expired"        // job exceeded SLO deadline (dequeue-time or mid-execution)
+	ResultLostOwnership = "lost_ownership" // job aborted mid-execution after losing ownership (epoch fenced out)
 
 	// -- Reason --
 	// - If expired at dequeue time, use ReasonExpiredDequeue

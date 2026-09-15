@@ -13,7 +13,7 @@ import (
 
 func TestClientsetFields_Assigned(t *testing.T) {
 	cs := validProcessorClients(t)
-	if cs.BatchDB == nil || cs.FileDB == nil || cs.File == nil || cs.Queue == nil || cs.Status == nil || cs.Event == nil || cs.Inference == nil {
+	if cs.BatchDB == nil || cs.FileDB == nil || cs.File == nil || cs.Queue == nil || cs.Event == nil || cs.Inference == nil {
 		t.Fatalf("expected all clients to be assigned")
 	}
 }

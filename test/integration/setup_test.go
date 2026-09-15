@@ -52,7 +52,6 @@ type testServer struct {
 	fileDB  *dbmock.MockDBClient[dbapi.FileItem, dbapi.FileQuery]
 	queue   *dbmock.MockBatchPriorityQueueClient
 	event   *dbmock.MockBatchEventChannelClient
-	status  *dbmock.MockBatchStatusClient
 }
 
 func newTestServer(t *testing.T) *testServer {
@@ -68,7 +67,6 @@ func newTestServer(t *testing.T) *testServer {
 	)
 	queue := dbmock.NewMockBatchPriorityQueueClient()
 	event := dbmock.NewMockBatchEventChannelClient()
-	statusClient := dbmock.NewMockBatchStatusClient()
 
 	// Mirror Postgres PQDelete: atomically transition cancelled jobs in the DB.
 	queue.OnDelete = func(ctx context.Context, id string) error {
@@ -104,7 +102,6 @@ func newTestServer(t *testing.T) *testServer {
 		FileDB:  fileDB,
 		Queue:   queue,
 		Event:   event,
-		Status:  statusClient,
 	}
 
 	config := &common.ServerConfig{
@@ -147,7 +144,6 @@ func newTestServer(t *testing.T) *testServer {
 		fileDB:  fileDB,
 		queue:   queue,
 		event:   event,
-		status:  statusClient,
 	}
 }
 

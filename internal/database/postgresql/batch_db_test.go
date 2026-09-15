@@ -438,3 +438,74 @@ func TestBatchDelete(t *testing.T) {
 		}
 	})
 }
+
+func TestBatchUpdateProgress(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("updates progress counts using jsonb_set", func(t *testing.T) {
+		client, mock := newTestBatchClient(t)
+		defer mock.Close()
+
+		mock.ExpectExec("UPDATE "+testTable+" SET status = jsonb_set").
+			WithArgs(`{"total":10,"completed":7,"failed":3}`, "batch-1", int64(5)).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		err := client.DBUpdateProgress(ctx, "batch-1", 5, api.BatchRequestCounts{
+			Total:     10,
+			Completed: 7,
+			Failed:    3,
+		})
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("SQL carries the epoch fence", func(t *testing.T) {
+		client, mock := newTestBatchClient(t)
+		defer mock.Close()
+
+		mock.ExpectExec("UPDATE "+testTable+".*epoch = \\$3").
+			WithArgs(pgxmock.AnyArg(), "batch-1", int64(7)).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		err := client.DBUpdateProgress(ctx, "batch-1", 7, api.BatchRequestCounts{Total: 1})
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("stale epoch write surfaces ErrConflict", func(t *testing.T) {
+		client, mock := newTestBatchClient(t)
+		defer mock.Close()
+
+		// Fence mismatch: the UPDATE matches no rows. The fenced-out writer must
+		// learn it lost ownership, so the write surfaces ErrConflict.
+		mock.ExpectExec("UPDATE "+testTable+".*epoch = \\$3").
+			WithArgs(pgxmock.AnyArg(), "batch-1", int64(4)).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		err := client.DBUpdateProgress(ctx, "batch-1", 4, api.BatchRequestCounts{Total: 1})
+		if !errors.Is(err, api.ErrConflict) {
+			t.Fatalf("stale-epoch write must surface ErrConflict, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("returns error for empty ID", func(t *testing.T) {
+		client, mock := newTestBatchClient(t)
+		defer mock.Close()
+
+		err := client.DBUpdateProgress(ctx, "", 1, api.BatchRequestCounts{Total: 1})
+		if err == nil {
+			t.Fatal("expected error for empty ID")
+		}
+	})
+}

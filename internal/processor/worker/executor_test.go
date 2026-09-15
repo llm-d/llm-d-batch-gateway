@@ -1248,8 +1248,6 @@ func TestHandleCancelled_CancelledWriteFails_FallsBackToFailed(t *testing.T) {
 		failStatus: openai.BatchStatusCancelled,
 		failErr:    errors.New("injected: cancelled write failed"),
 	}
-	statusClient := mockdb.NewMockBatchStatusClient()
-
 	jobID := "job-cancel-failover"
 	tenantID := "tenant__tenantA"
 
@@ -1260,14 +1258,13 @@ func TestHandleCancelled_CancelledWriteFails_FallsBackToFailed(t *testing.T) {
 		BatchDB:   failDB,
 		FileDB:    newMockFileDBClient(),
 		File:      mockfiles.NewMockBatchFilesClient(t.TempDir()),
-		Status:    statusClient,
 		Queue:     mockdb.NewMockBatchPriorityQueueClient(),
 		Event:     mockdb.NewMockBatchEventChannelClient(),
 		Inference: inference.NewSingleClientResolver(&mockInferenceClient{}),
 	}
 	p := mustNewProcessor(t, cfg, clients)
 	p.poller = NewPoller(clients.Queue, failDB)
-	updater := NewStatusUpdater(failDB, statusClient, 86400)
+	updater := NewStatusUpdater(failDB)
 
 	createPartialOutputFiles(t, p, jobID, tenantID)
 
@@ -1529,7 +1526,6 @@ func TestUploadPartialResults_OneUploadFails_OtherSurvives(t *testing.T) {
 	cfg.WorkDir = t.TempDir()
 
 	dbClient := newMockBatchDBClient()
-	statusClient := mockdb.NewMockBatchStatusClient()
 	filesClient := &failOnNthCallClient{
 		failN:   1,
 		failErr: errors.New("injected: one-side upload failure"),
@@ -1539,7 +1535,6 @@ func TestUploadPartialResults_OneUploadFails_OtherSurvives(t *testing.T) {
 		BatchDB:   dbClient,
 		FileDB:    newMockFileDBClient(),
 		File:      filesClient,
-		Status:    statusClient,
 		Queue:     mockdb.NewMockBatchPriorityQueueClient(),
 		Inference: inference.NewSingleClientResolver(&fakeInferenceClient{}),
 	}

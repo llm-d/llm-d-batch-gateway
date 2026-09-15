@@ -32,16 +32,12 @@ import (
 )
 
 type StatusUpdater struct {
-	db             db.BatchDBClient
-	status         db.BatchStatusClient
-	progressTTLSec int
+	db db.BatchProgressDBClient
 }
 
-func NewStatusUpdater(db db.BatchDBClient, status db.BatchStatusClient, progressTTLSec int) *StatusUpdater {
+func NewStatusUpdater(db db.BatchProgressDBClient) *StatusUpdater {
 	return &StatusUpdater{
-		db:             db,
-		status:         status,
-		progressTTLSec: progressTTLSec,
+		db: db,
 	}
 }
 
@@ -49,31 +45,27 @@ func (s *StatusUpdater) validate() error {
 	if s.db == nil {
 		return fmt.Errorf("database client is missing")
 	}
-	if s.status == nil {
-		return fmt.Errorf("status client is missing")
-	}
 	return nil
 }
 
-// UpdateProgressCounts pushes request counts to the volatile status store (e.g. Redis).
-// This is NOT a persistent DB update — it is a lightweight, frequent update used to power
-// real-time progress polling. The data expires after progressTTLSec.
+// UpdateProgressCounts updates the in-flight request counts directly in the
+// database, fenced by the job's epoch so a fenced-out processor incarnation
+// cannot overwrite the current owner's counts.
 func (s *StatusUpdater) UpdateProgressCounts(
 	ctx context.Context,
 	jobID string,
+	epoch int64,
 	requestCounts *openai.BatchRequestCounts,
 ) error {
 	if requestCounts == nil {
 		return fmt.Errorf("requestCounts is nil")
 	}
 
-	// light payload for frequent updates
-	payload := []byte(fmt.Sprintf(`{"total": %d, "completed": %d, "failed": %d}`, requestCounts.Total, requestCounts.Completed, requestCounts.Failed))
-
-	if err := s.status.StatusSet(ctx, jobID, s.progressTTLSec, payload); err != nil {
-		return err
-	}
-	return nil
+	return s.db.DBUpdateProgress(ctx, jobID, epoch, db.BatchRequestCounts{
+		Total:     requestCounts.Total,
+		Completed: requestCounts.Completed,
+		Failed:    requestCounts.Failed,
+	})
 }
 
 // UpdatePersistentStatus writes the job status to the persistent database (e.g. PostgreSQL).

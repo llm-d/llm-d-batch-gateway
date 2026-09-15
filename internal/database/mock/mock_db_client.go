@@ -20,6 +20,7 @@ package mock
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sync"
@@ -170,6 +171,48 @@ func (m *MockDBClient[T, Q]) DBDelete(ctx context.Context, ids []string) (delete
 		}
 	}
 	return
+}
+
+func (m *MockDBClient[T, Q]) DBUpdateProgress(ctx context.Context, id string, epoch int64, counts api.BatchRequestCounts) error {
+	if id == "" {
+		return fmt.Errorf("DBUpdateProgress: empty ID")
+	}
+	existing, ok := m.items.Load(id)
+	if !ok {
+		return fmt.Errorf("cannot update progress for ID '%s': item doesn't exist", id)
+	}
+
+	if existingItem, ok := existing.(*T); ok {
+		val := reflect.ValueOf(existingItem).Elem()
+		// Mirror the Postgres epoch fence: items with an Epoch field are only
+		// updated when the caller carries the current epoch; a stale-epoch write
+		// matches no rows, so surface ErrConflict to the caller.
+		if epochField := val.FieldByName("Epoch"); epochField.IsValid() && epochField.Kind() == reflect.Int64 && epochField.Int() != epoch {
+			return fmt.Errorf("DBUpdateProgress: %w", api.ErrConflict)
+		}
+		statusField := val.FieldByName("Status")
+		if statusField.IsValid() && statusField.CanSet() && statusField.Kind() == reflect.Slice {
+			currentStatus, _ := statusField.Interface().([]byte)
+			var statusMap map[string]any
+			if len(currentStatus) > 0 {
+				_ = json.Unmarshal(currentStatus, &statusMap)
+			}
+			if statusMap == nil {
+				statusMap = make(map[string]any)
+			}
+			statusMap["request_counts"] = map[string]any{
+				"total":     counts.Total,
+				"completed": counts.Completed,
+				"failed":    counts.Failed,
+			}
+			newStatus, err := json.Marshal(statusMap)
+			if err != nil {
+				return fmt.Errorf("DBUpdateProgress: marshal status: %w", err)
+			}
+			statusField.SetBytes(newStatus)
+		}
+	}
+	return nil
 }
 
 func (m *MockDBClient[T, Q]) GetContext(parentCtx context.Context, timeLimit time.Duration) (context.Context, context.CancelFunc) {

@@ -97,18 +97,6 @@ tests:
           path: data["config.yaml"]
           pattern: 'max_line_count: 50000'
 
-  - it: should render redis config
-    asserts:
-      - matchRegex:
-          path: data["config.yaml"]
-          pattern: 'redis:'
-      - matchRegex:
-          path: data["config.yaml"]
-          pattern: 'db: 0'
-      - matchRegex:
-          path: data["config.yaml"]
-          pattern: 'enable_tls: false'
-
   - it: should not render ConfigMap when apiserver is disabled
     set:
       apiserver.enabled: false

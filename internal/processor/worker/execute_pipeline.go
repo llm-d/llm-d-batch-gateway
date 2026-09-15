@@ -10,12 +10,48 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 
+	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/batchctx"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/pipeline"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
 )
+
+// epochProgressUpdater fences progress writes by an explicit epoch.
+// *StatusUpdater satisfies it.
+type epochProgressUpdater interface {
+	UpdateProgressCounts(ctx context.Context, jobID string, epoch int64, counts *openai.BatchRequestCounts) error
+}
+
+// jobProgressUpdater scopes a shared updater to one job's epoch so every
+// progress write for that job is fenced by its ownership epoch.
+type jobProgressUpdater struct {
+	inner epochProgressUpdater
+	jobID string
+	epoch int64
+	// onFencedOut, when non-nil, is invoked when a progress write is fenced out
+	// by an epoch bump (this processor lost ownership). runJob uses it to abort
+	// without a terminal write.
+	onFencedOut func()
+}
+
+func (u jobProgressUpdater) UpdateProgressCounts(ctx context.Context, jobID string, counts *openai.BatchRequestCounts) error {
+	err := u.inner.UpdateProgressCounts(ctx, u.jobID, u.epoch, counts)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, db.ErrConflict) {
+		// The write was fenced out by an epoch bump: a reclaimer took ownership.
+		// Signal runJob to abort (neutral cause) without a terminal write. Return
+		// nil so the progress tracker does not log a spurious update failure.
+		if u.onFencedOut != nil {
+			u.onFencedOut()
+		}
+		return nil
+	}
+	return err
+}
 
 func (p *Processor) executeJobAsync(ctx context.Context, params *jobExecutionParams) (*openai.BatchRequestCounts, error) {
 	logger := logr.FromContextOrDiscard(ctx)
@@ -49,12 +85,23 @@ func (p *Processor) executeJobAsync(ctx context.Context, params *jobExecutionPar
 	}
 
 	// Setup pipeline.
+	progressInterval := p.cfg.ProgressUpdateInterval
+	if progressInterval <= 0 {
+		progressInterval = 15 * time.Second
+	}
+
+	// jobItem is always set on the production path (the polling loop skips
+	// jobs with no DB item); the guard only covers test constructions.
+	jobEpoch := int64(0)
+	if params.jobItem != nil {
+		jobEpoch = params.jobItem.Epoch
+	}
 
 	tracker := pipeline.NewProgressTracker(
 		modelMap.LineCount,
-		params.updater,
+		jobProgressUpdater{inner: params.updater, jobID: params.jobInfo.JobID, epoch: jobEpoch, onFencedOut: params.onOwnershipLost},
 		params.jobInfo.JobID,
-		time.Second,
+		progressInterval,
 		logger,
 	)
 	tracker.AddFailed(modelMap.RejectedCount)

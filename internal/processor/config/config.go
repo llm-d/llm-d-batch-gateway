@@ -198,8 +198,8 @@ type ProcessorConfig struct {
 	// 0 means no expiration (keep until explicitly deleted).
 	DefaultOutputExpirationSeconds int64 `yaml:"default_output_expiration_seconds"`
 
-	// ProgressTTLSeconds is the TTL for temporary progress updates in the status store (Redis).
-	ProgressTTLSeconds int `yaml:"progress_ttl_seconds"`
+	// ProgressUpdateInterval is the throttling interval between intermediate progress updates to the DB.
+	ProgressUpdateInterval time.Duration `yaml:"progress_update_interval"`
 
 	// SendFairnessHeader controls whether the processor sends
 	// x-gateway-inference-fairness-id on inference requests.
@@ -361,7 +361,7 @@ func NewConfig() *ProcessorConfig {
 			},
 		},
 		DefaultOutputExpirationSeconds: 90 * 24 * 60 * 60, // 90 days
-		ProgressTTLSeconds:             24 * 60 * 60,      // 24 hours
+		ProgressUpdateInterval:         15 * time.Second,  // 15 seconds
 
 		DispatchMode: DispatchModeSync,
 		AsyncDispatchConfig: AsyncDispatchConfig{
@@ -410,10 +410,6 @@ func (c *ProcessorConfig) Validate() error {
 
 	if err := c.FileClientCfg.Retry.Validate(); err != nil {
 		return fmt.Errorf("file_client.retry: %w", err)
-	}
-
-	if c.ProgressTTLSeconds <= 0 {
-		return fmt.Errorf("progress_ttl_seconds must be > 0")
 	}
 
 	switch c.RouteKeyMethod {

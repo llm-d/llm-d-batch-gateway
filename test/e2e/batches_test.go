@@ -48,6 +48,7 @@ func testBatches(t *testing.T) {
 	t.Run("PassThroughHeaders", doTestPassThroughHeaders)
 	skipIf(t, testDispatcherDeployed, "requires sync dispatch slot saturation", "Expiration", doTestBatchExpiration)
 	skipIf(t, testDispatcherDeployed, "sim-model-b not available in async dispatch", "MultiModel", doTestMultiModelBatch)
+	skipIf(t, testDispatcherDeployed, "progress tracking differs in async dispatch", "ProgressEpochFence", doTestProgressEpochFence)
 	t.Run("ProgressPolling", doTestProgressPolling)
 	t.Run("Ingestion", func(t *testing.T) {
 		t.Run("DuplicateCustomID", doTestDuplicateCustomID)
@@ -197,6 +198,111 @@ func doTestBatchCancelBeforeProcessing(t *testing.T) {
 	if finalBatch.OutputFileID != "" {
 		t.Errorf("expected empty output_file_id for batch cancelled before processing, got %q", finalBatch.OutputFileID)
 	}
+}
+
+// psqlExec runs a SQL statement in the deployed PostgreSQL pod and returns the
+// trimmed output (no headers).
+func psqlExec(t *testing.T, sql string) string {
+	t.Helper()
+
+	podName := testDBPod
+	if podName == "" {
+		podName = fmt.Sprintf("%s-0", testPostgresqlRelease)
+	}
+	ns := testDBNamespace
+	if ns == "" {
+		ns = testNamespace
+	}
+	cmd := fmt.Sprintf(
+		`PGPASSWORD="${POSTGRESQL_PASSWORD:-$(cat "$POSTGRES_PASSWORD_FILE" 2>/dev/null)}" psql -U '%s' -d '%s' -t -A -c %q`,
+		testDBUser, testDBName, sql,
+	)
+	out, err := exec.Command("kubectl", "exec",
+		podName,
+		"-n", ns,
+		"--", "bash", "-c", cmd,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("kubectl exec psql failed: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// doTestProgressEpochFence verifies that a processor holding a stale epoch
+// cannot write to its job's row. While a slow batch is in_progress, the row's
+// epoch is bumped (simulating a new owner's PQClaimOwned claim). Every write
+// the live processor issues afterwards — throttled progress flushes and the
+// terminal status write — carries the pre-bump epoch, so all of them must be
+// fenced out: the batch must stay in_progress with pre-bump counts even after
+// every request has completed.
+func doTestProgressEpochFence(t *testing.T) {
+	t.Helper()
+
+	if !testKubectlAvailable {
+		t.Skip("kubectl not available, skipping epoch fence test")
+	}
+	if testDBClientType != "postgresql" {
+		t.Skip("epoch fencing is a PostgreSQL queue feature")
+	}
+
+	// 10 slow requests (~60s each at dev-deploy sim defaults, 10 concurrent =>
+	// a single ~60s wave) so the job is guaranteed to still be in-flight when
+	// the epoch is bumped.
+	var lines []string
+	for i := 1; i <= 10; i++ {
+		lines = append(lines, fmt.Sprintf(
+			`{"custom_id":"fence-%d","method":"POST","url":"/v1/chat/completions","body":{"model":"%s","max_tokens":600,"messages":[{"role":"user","content":"Fence story %d"}]}}`, i, testSimModel, i))
+	}
+	fileID := mustCreateFile(t, fmt.Sprintf("test-epoch-fence-%s.jsonl", testRunID), strings.Join(lines, "\n"))
+	batchID := mustCreateBatch(t, fileID)
+
+	_, _ = waitForBatchStatus(t, batchID, 2*time.Minute, openai.BatchStatusInProgress)
+	b, err := newClient().Batches.Get(context.Background(), batchID)
+	if err != nil || b.Status != openai.BatchStatusInProgress {
+		t.Fatalf("batch %s did not reach in_progress: status=%v err=%v", batchID, b, err)
+	}
+	t.Logf("batch %s in_progress; letting the job settle", batchID)
+	time.Sleep(5 * time.Second)
+
+	epoch := psqlExec(t, fmt.Sprintf("SELECT epoch FROM batch_items WHERE id = '%s'", batchID))
+	psqlExec(t, fmt.Sprintf("UPDATE batch_items SET epoch = epoch + 1 WHERE id = '%s'", batchID))
+	t.Logf("bumped batch %s epoch from %s to %s (simulating a new owner's claim)", batchID, epoch, "epoch+1")
+
+	// The job must still be running for the fence to be observable.
+	if b, err := newClient().Batches.Get(context.Background(), batchID); err == nil && terminalBatchStatuses[b.Status] {
+		t.Skipf("batch %s reached %s before the epoch bump (sim too fast); fence not observable", batchID, b.Status)
+	}
+
+	// The slow wave completes ~60s after dispatch; poll well past that. If the
+	// fence were not working, the progress flushes or the terminal write would
+	// land and the batch would leave in_progress.
+	deadline := time.Now().Add(150 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := newClient().Batches.Get(context.Background(), batchID); err == nil && terminalBatchStatuses[b.Status] {
+			t.Fatalf("batch %s reached terminal state %s after the epoch bump — a stale-epoch write landed (fence broken)", batchID, b.Status)
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	b, err = newClient().Batches.Get(context.Background(), batchID)
+	if err != nil {
+		t.Fatalf("get batch: %v", err)
+	}
+	if b.Status != openai.BatchStatusInProgress {
+		t.Fatalf("expected batch to remain in_progress while its owner holds a stale epoch, got %s", b.Status)
+	}
+	if b.RequestCounts.Completed != 0 {
+		t.Errorf("expected completed=0 (progress writes fenced), got %d", b.RequestCounts.Completed)
+	}
+	t.Logf("epoch fence held: batch %s still %s (completed=%d) after all requests completed", batchID, b.Status, b.RequestCounts.Completed)
+
+	// Cleanup: the processor can no longer write a terminal state for this job
+	// (its epoch is stale), so mark it terminal directly and let GC collect it.
+	now := time.Now().UTC().Unix()
+	psqlExec(t, fmt.Sprintf(
+		"UPDATE batch_items SET status = '{\"status\":\"failed\",\"failed_at\":%d,\"request_counts\":{\"total\":10,\"completed\":0,\"failed\":10}}', expiry = %d WHERE id = '%s'",
+		now, now, batchID))
+	t.Log("marked batch terminal in DB for GC collection")
 }
 
 // doTestBatchLifecycle creates a fresh batch, verifies list and retrieve operations,
@@ -730,12 +836,9 @@ func doTestProgressPolling(t *testing.T) {
 	t.Helper()
 
 	// 5 fast requests (max_tokens=1, ~150ms each) complete almost immediately.
-	// 15 slow requests (max_tokens=60, ~6s each at the simulator's 100ms
-	// inter-token latency) keep the batch in_progress for at least one slow
-	// request's duration when they all run in parallel, and still finish
-	// inside the wait below when a single-worker dispatcher runs them one at
-	// a time. Polling starts as soon as the batch is in_progress and runs
-	// every 500ms so the window is observed in both layouts.
+	// 15 slow requests (max_tokens=200, ~20s each at the simulator's 100ms
+	// inter-token latency) keep the batch in_progress long enough for the
+	// 15-second progress ticker to fire and persist intermediate counts to the DB.
 	var lines []string
 	for i := 1; i <= 5; i++ {
 		lines = append(lines, fmt.Sprintf(
@@ -743,7 +846,7 @@ func doTestProgressPolling(t *testing.T) {
 	}
 	for i := 1; i <= 15; i++ {
 		lines = append(lines, fmt.Sprintf(
-			`{"custom_id":"slow-%d","method":"POST","url":"/v1/chat/completions","body":{"model":"%s","max_tokens":60,"messages":[{"role":"user","content":"slow %d"}]}}`, i, testSimModel, i))
+			`{"custom_id":"slow-%d","method":"POST","url":"/v1/chat/completions","body":{"model":"%s","max_tokens":200,"messages":[{"role":"user","content":"slow %d"}]}}`, i, testSimModel, i))
 	}
 	fileID := mustCreateFile(t, fmt.Sprintf("test-progress-%s.jsonl", testRunID), strings.Join(lines, "\n"))
 	batchID := mustCreateBatch(t, fileID)

@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/exaring/otelpgx"
+	"github.com/go-logr/logr"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -95,7 +96,7 @@ func tokenAfter(tokens []string, keyword string) string {
 }
 
 // newPool creates a new pgxpool.Pool from a PostgreSQLConfig.
-func newPool(ctx context.Context, config *PostgreSQLConfig) (pgxPool, error) {
+func newPool(ctx context.Context, config *PostgreSQLConfig) (*pgxpool.Pool, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is nil")
 	}
@@ -106,6 +107,10 @@ func newPool(ctx context.Context, config *PostgreSQLConfig) (pgxPool, error) {
 	poolConfig, err := pgxpool.ParseConfig(config.Url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse connection string: %w", err)
+	}
+	if poolConfig.MaxConns < 2 {
+		logr.FromContextOrDiscard(ctx).Info("Increasing pool max connections to minimum required for LISTEN", "original", poolConfig.MaxConns, "new", 2)
+		poolConfig.MaxConns = 2
 	}
 	if config.EnableTracing {
 		poolConfig.ConnConfig.Tracer = otelpgx.NewTracer(

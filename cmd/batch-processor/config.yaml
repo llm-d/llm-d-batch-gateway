@@ -82,9 +82,6 @@ global_inference_gateway:
 # Used as fallback when the user does not provide output_expires_after in POST /v1/batches.
 default_output_expiration_seconds: 7776000  # 90 days
 
-# TTL for temporary progress updates in the status store (Redis), in seconds.
-progress_ttl_seconds: 86400  # 24 hours
-
 # Whether to send x-gateway-inference-fairness-id on inference requests.
 # false (default) omits the fairness header entirely.
 send_fairness_header: false

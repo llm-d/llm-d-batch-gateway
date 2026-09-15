@@ -19,8 +19,6 @@ limitations under the License.
 package batch
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -299,37 +297,6 @@ func (c *BatchAPIHandler) ListBatches(w http.ResponseWriter, r *http.Request) {
 	common.WriteJSONResponse(w, r, http.StatusOK, resp)
 }
 
-// mergeProgressCounts retrieves real-time progress counts from Redis and merges them
-// into the batch object. This is only done for batches in the "in_progress" state.
-func (c *BatchAPIHandler) mergeProgressCounts(ctx context.Context, batch *openai.Batch) error {
-	// Only merge progress for in-progress batches
-	if batch.Status != openai.BatchStatusInProgress {
-		return nil
-	}
-
-	// Try to get progress counts from Redis
-	data, err := c.clients.Status.StatusGet(ctx, batch.ID)
-	if err != nil {
-		return fmt.Errorf("failed to get status from Redis: %w", err)
-	}
-
-	// If no data in Redis, keep the DB values
-	if data == nil {
-		return nil
-	}
-
-	// Parse the progress counts from Redis
-	var progressCounts openai.BatchRequestCounts
-	if err := json.Unmarshal(data, &progressCounts); err != nil {
-		return fmt.Errorf("failed to unmarshal progress counts: %w", err)
-	}
-
-	// Merge the counts - use Redis values as they are more up-to-date
-	batch.RequestCounts = progressCounts
-
-	return nil
-}
-
 func (c *BatchAPIHandler) getBatchItemFromDB(r *http.Request, operation string) (*api.BatchItem, *openai.APIError) {
 	ctx := r.Context()
 	logger := logging.FromRequest(r)
@@ -405,12 +372,6 @@ func (c *BatchAPIHandler) RetrieveBatch(w http.ResponseWriter, r *http.Request) 
 		logger.Error(err, "failed to convert database item to batch")
 		common.WriteInternalServerError(w, r)
 		return
-	}
-
-	// Merge real-time progress counts from Redis for in-progress batches
-	if err := c.mergeProgressCounts(ctx, batch); err != nil {
-		logger.Error(err, "failed to merge progress counts", "batch_id", batch.ID, "status", batch.Status)
-		// Log error but don't fail the request - return what we have from DB
 	}
 
 	spanAttrs := []attribute.KeyValue{attribute.String(uotel.AttrInputFileID, batch.InputFileID)}

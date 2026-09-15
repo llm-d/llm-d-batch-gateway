@@ -85,6 +85,25 @@ type DBClient[T any, Q any] interface {
 	DBDelete(ctx context.Context, IDs []string) (deletedIDs []string, err error)
 }
 
+// BatchRequestCounts holds the request progress counts for a batch job.
+type BatchRequestCounts struct {
+	Total     int64 `json:"total"`
+	Completed int64 `json:"completed"`
+	Failed    int64 `json:"failed"`
+}
+
+// BatchProgressDBClient is a BatchDBClient that additionally supports
+// in-flight progress updates.
+type BatchProgressDBClient interface {
+	BatchDBClient
+
+	// DBUpdateProgress updates the in-flight request counts in the item's status
+	// column, fenced by the item's current epoch. A write carrying a stale epoch
+	// (e.g. from a fenced-out processor incarnation) matches no rows and returns
+	// ErrConflict, so the caller knows it is no longer the owner and can abort.
+	DBUpdateProgress(ctx context.Context, id string, epoch int64, counts BatchRequestCounts) error
+}
+
 // Tags are key-value pairs for filtering items.
 type Tags map[string]string
 
@@ -205,21 +224,4 @@ type BatchEventChannelClient interface {
 	// ECProducerSendEvents sends the specified events via associated event channels.
 	// The events are sent and consumed in FIFO order.
 	ECProducerSendEvents(ctx context.Context, events []BatchEvent) (sentIDs []string, err error)
-}
-
-// -- Batch jobs temporary status store --
-
-// BatchStatusClient enables to manage temporary job status.
-type BatchStatusClient interface {
-	store.BatchClientAdmin
-
-	// StatusSet stores or updates status data for a job.
-	StatusSet(ctx context.Context, ID string, TTL int, data []byte) (err error)
-
-	// StatusGet retrieves the status data of a job.
-	// If no data exists (nil, nil) is returned.
-	StatusGet(ctx context.Context, ID string) (data []byte, err error)
-
-	// StatusDelete deletes the status data for a job.
-	StatusDelete(ctx context.Context, ID string) (nDeleted int, err error)
 }
