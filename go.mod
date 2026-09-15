@@ -16,7 +16,7 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/llm-d/llm-d-async/api v0.9.1
 	github.com/llm-d/llm-d-async/producer v0.9.1
-	github.com/pashagolub/pgxmock/v4 v4.9.0
+	github.com/pashagolub/pgxmock/v5 v5.2.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/quasilyte/go-ruleguard/dsl v0.3.23
 	github.com/redis/go-redis/extra/redisotel/v9 v9.22.0
@@ -62,6 +62,7 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
