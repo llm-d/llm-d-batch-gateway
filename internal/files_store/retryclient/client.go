@@ -115,6 +115,33 @@ func (c *Client) Retrieve(ctx context.Context, fileName, folderName string) (io.
 	return rc, meta, err
 }
 
+func (c *Client) RetrieveRange(ctx context.Context, fileName, folderName string, offset int64, length int64) (io.ReadCloser, error) {
+	var rc io.ReadCloser
+	attempts, err := retry.Do(ctx, &c.cfg, func(attempt int) error {
+		if attempt > 1 {
+			if rc != nil {
+				_ = rc.Close()
+			}
+			recordRetry("retrieve_range", c.component)
+			logr.FromContextOrDiscard(ctx).Info("Retrying file retrieve range",
+				"file", fileName, "offset", offset, "length", length,
+				"attempt", attempt, "maxRetries", c.cfg.MaxRetries)
+		}
+
+		var retrieveErr error
+		rc, retrieveErr = c.inner.RetrieveRange(ctx, fileName, folderName, offset, length)
+		return retrieveErr
+	})
+	if err != nil {
+		if attempts > c.cfg.MaxRetries {
+			recordExhausted("retrieve_range", c.component)
+		}
+	} else {
+		recordSuccess("retrieve_range", c.component)
+	}
+	return rc, err
+}
+
 func (c *Client) Delete(ctx context.Context, fileName, folderName string) error {
 	attempts, err := retry.Do(ctx, &c.cfg, func(attempt int) error {
 		if attempt > 1 {

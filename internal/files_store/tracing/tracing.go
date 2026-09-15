@@ -105,6 +105,26 @@ func (r *tracedReadCloser) Close() error {
 	return err
 }
 
+func (c *Client) RetrieveRange(ctx context.Context, fileName, folderName string, offset int64, length int64) (io.ReadCloser, error) {
+	_, span := uotel.StartSpan(ctx, "storage.RetrieveRange")
+	span.SetAttributes(
+		c.backend,
+		attribute.String("storage.file_name", fileName),
+		attribute.String("storage.folder", folderName),
+		attribute.Int64("storage.offset", offset),
+		attribute.Int64("storage.length", length),
+	)
+
+	reader, err := c.inner.RetrieveRange(ctx, fileName, folderName, offset, length)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "retrieve range failed")
+		span.End()
+		return nil, err
+	}
+	return &tracedReadCloser{ReadCloser: reader, span: span}, nil
+}
+
 func (c *Client) Delete(ctx context.Context, fileName, folderName string) error {
 	ctx, span := uotel.StartSpan(ctx, "storage.Delete")
 	defer span.End()
