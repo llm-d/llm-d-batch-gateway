@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 	"time"
+
 	"github.com/go-logr/logr"
 	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	mockdb "github.com/llm-d/llm-d-batch-gateway/internal/database/mock"
