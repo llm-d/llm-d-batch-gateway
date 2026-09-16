@@ -139,12 +139,22 @@ func (p *Processor) recoverExhausted(ctx context.Context, jobID string) error {
 	return p.recoverWithFailed(ctx, dbItem, fmt.Errorf("recovery attempts exhausted after %d", maxRecoveryAttempts), nil, jobInfo)
 }
 
-// recoverJob is the single routing point for startup recovery. Each recover*
-// function returns (*recoveryResult, nil) on success, or (*recoveryResult, error)
-// on failure — where the result may be non-nil (carrying partial file IDs for
-// fallback) or nil when no partial state was created. recoverJob handles
-// fallback, cleanup, and metrics recording uniformly.
 func (p *Processor) recoverJob(ctx context.Context, jobID string) error {
+	err := p.recoverJobOnce(ctx, jobID)
+	if !errors.Is(err, db.ErrConflict) {
+		return err
+	}
+
+	logr.FromContextOrDiscard(ctx).Info("Startup recovery: state changed during recovery, retrying", "jobId", jobID)
+	return p.recoverJobOnce(ctx, jobID)
+}
+
+// recoverJobOnce is the single routing point for one startup recovery attempt.
+// Each recover* function returns (*recoveryResult, nil) on success, or
+// (*recoveryResult, error) on failure — where the result may be non-nil
+// (carrying partial file IDs for fallback) or nil when no partial state was
+// created. It handles fallback, cleanup, and metrics recording uniformly.
+func (p *Processor) recoverJobOnce(ctx context.Context, jobID string) error {
 	logger := logr.FromContextOrDiscard(ctx)
 
 	dbItem, err := p.poller.fetchJobItemByID(ctx, jobID)
