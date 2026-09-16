@@ -60,6 +60,16 @@ data:
         - {{ . | quote }}
         {{- end }}
       {{- end }}
+      {{- $extraEndpoints := .Values.global.extraEndpoints }}
+      {{- if ne .Values.apiserver.config.batchAPI.extraEndpoints nil }}
+      {{- $extraEndpoints = .Values.apiserver.config.batchAPI.extraEndpoints }}
+      {{- end }}
+      {{- if $extraEndpoints }}
+      extra_endpoints:
+        {{- range $extraEndpoints }}
+        - {{ . | quote }}
+        {{- end }}
+      {{- end }}
     file_api:
       default_expiration_seconds: {{ .Values.apiserver.config.fileAPI.defaultExpirationSeconds }}
       max_size_bytes: {{ .Values.apiserver.config.fileAPI.maxSizeBytes }}

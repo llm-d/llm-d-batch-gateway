@@ -23,6 +23,7 @@ import (
 	"os"
 
 	sharedcfg "github.com/llm-d/llm-d-batch-gateway/internal/shared/config"
+	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 	"gopkg.in/yaml.v3"
 	"k8s.io/klog/v2"
 )
@@ -62,6 +63,7 @@ const (
 type BatchAPIConfig struct {
 	BatchEventTTLSeconds int      `yaml:"batch_event_ttl_seconds"`
 	PassThroughHeaders   []string `yaml:"pass_through_headers"`
+	ExtraEndpoints       []string `yaml:"extra_endpoints"`
 }
 
 func (b *BatchAPIConfig) applyDefaults() {
@@ -195,6 +197,9 @@ func (c *ServerConfig) Validate() error {
 
 	if err := c.FileClientCfg.Retry.Validate(); err != nil {
 		return fmt.Errorf("file_client.retry: %w", err)
+	}
+	if _, err := openai.NewEndpointAllowlist(c.BatchAPI.ExtraEndpoints); err != nil {
+		return fmt.Errorf("batch_api.extra_endpoints: %w", err)
 	}
 
 	return nil

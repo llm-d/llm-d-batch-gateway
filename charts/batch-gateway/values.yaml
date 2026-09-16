@@ -2,6 +2,13 @@
 global:
   imagePullSecrets: []
 
+  # Additional inference API paths accepted by both the API server and processor.
+  # Standard OpenAI Batch API endpoints are always allowed. Component-specific
+  # values override this default and can be used for a processor-first rollout:
+  # first set processor.config.extraEndpoints, wait for the processor rollout,
+  # then set this value, and finally reset the processor override to null.
+  extraEndpoints: []
+
   # Shared pod security context for all components.
   # All three components (apiserver, processor, gc) must run with the same UID/GID
   # when sharing files on a PVC. Per-component overrides are possible via
@@ -199,6 +206,8 @@ apiserver:
       eventTTLSeconds: 2592000
       passThroughHeaders:
         - Authorization
+      # null inherits global.extraEndpoints. A list, including [], overrides it.
+      extraEndpoints: null
     fileAPI:
       defaultExpirationSeconds: 7776000
       maxSizeBytes: 209715200
@@ -310,6 +319,10 @@ processor:
     taskWaitTime: "1s"
     pollInterval: "5s"
     numWorkers: 20
+    # null inherits global.extraEndpoints. Set this first for a processor-first
+    # rollout, then reset it to null after global.extraEndpoints is enabled.
+    # An explicit [] disables extensions for this component.
+    extraEndpoints: null
     concurrency:
       # Fixed ceiling for total in-flight requests across all endpoints.
       # When AIMD is enabled, per-endpoint limits self-regulate via backpressure,

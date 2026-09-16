@@ -123,7 +123,10 @@ func newTestServer(t *testing.T) *testServer {
 
 	mux := http.NewServeMux()
 	fileHandler := file.NewFileAPIHandler(config, clients)
-	batchHandler := batch.NewBatchAPIHandler(config, clients)
+	batchHandler, err := batch.NewBatchAPIHandler(config, clients)
+	if err != nil {
+		t.Fatalf("NewBatchAPIHandler: %v", err)
+	}
 	middlewares := []common.RouteMiddleware{
 		middleware.Recovery,
 		middleware.NewRequestMiddleware(config),

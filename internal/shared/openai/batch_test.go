@@ -29,6 +29,66 @@ func validRequest() CreateBatchRequest {
 	}
 }
 
+func TestEndpointAllowlist(t *testing.T) {
+	t.Run("defaults and extensions", func(t *testing.T) {
+		defaults := EndpointAllowlist{}
+		for _, endpoint := range []Endpoint{
+			EndpointResponses,
+			EndpointChatCompletions,
+			EndpointEmbeddings,
+			EndpointCompletions,
+			EndpointModerations,
+		} {
+			if !defaults.IsValid(endpoint.String()) {
+				t.Errorf("zero-value allowlist rejected default endpoint %q", endpoint)
+			}
+		}
+		if defaults.IsValid("/v1/classify") {
+			t.Error("zero-value allowlist accepted an unconfigured extension")
+		}
+
+		allowlist, err := NewEndpointAllowlist([]string{"/v1/classify", "/v1/pooling", "/v1/classify", EndpointChatCompletions.String()})
+		if err != nil {
+			t.Fatalf("NewEndpointAllowlist() unexpected error: %v", err)
+		}
+		for _, endpoint := range []string{EndpointChatCompletions.String(), "/v1/classify", "/v1/pooling"} {
+			if !allowlist.IsValid(endpoint) {
+				t.Errorf("configured allowlist rejected endpoint %q", endpoint)
+			}
+		}
+		if allowlist.IsValid("/v1/unconfigured") {
+			t.Error("configured allowlist accepted an unconfigured extension")
+		}
+	})
+
+	t.Run("invalid paths", func(t *testing.T) {
+		for _, endpoint := range []string{"", "v1/classify", "//example.com/v1/classify", "/v1/classify?mode=test", "/v1/classify#fragment", "/v1/%63lassify", "/v1/allowed/../admin", "/v1/./classify"} {
+			if _, err := NewEndpointAllowlist([]string{endpoint}); err == nil {
+				t.Errorf("NewEndpointAllowlist(%q) expected error", endpoint)
+			}
+		}
+	})
+}
+
+func TestValidateWithEndpointAllowlist(t *testing.T) {
+	req := validRequest()
+	req.Endpoint = "/v1/classify"
+	if err := req.Validate(); err == nil {
+		t.Error("Validate() accepted an extension without an allowlist")
+	}
+	allowlist, err := NewEndpointAllowlist([]string{"/v1/classify"})
+	if err != nil {
+		t.Fatalf("NewEndpointAllowlist() unexpected error: %v", err)
+	}
+	if err := req.ValidateWithEndpointAllowlist(allowlist); err != nil {
+		t.Errorf("ValidateWithEndpointAllowlist() rejected configured extension: %v", err)
+	}
+	req.Endpoint = "/v1/pooling"
+	if err := req.ValidateWithEndpointAllowlist(allowlist); err == nil {
+		t.Error("ValidateWithEndpointAllowlist() accepted unconfigured extension")
+	}
+}
+
 func TestValidate_MetadataTooManyKeys(t *testing.T) {
 	req := validRequest()
 	req.Metadata = make(map[string]string, 17)
