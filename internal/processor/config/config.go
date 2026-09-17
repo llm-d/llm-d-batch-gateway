@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/retry"
 	inference "github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 	"gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // ConcurrencyConfig groups all dispatch-rate and concurrency control knobs.
@@ -79,6 +80,19 @@ type DispatchMode string
 const (
 	DispatchModeSync  DispatchMode = "sync"
 	DispatchModeAsync DispatchMode = "async"
+
+	// DefaultWorkDirSizeLimit matches the default Kubernetes emptyDir sizeLimit
+	// in the Helm chart. Deployments which override that chart value must pass
+	// the same value through work_dir_size_limit.
+	DefaultWorkDirSizeLimit = "10Gi"
+
+	// DefaultInputFileDiskBudgetPercent reserves at most this proportion of the
+	// work directory for concurrently staged input files.
+	DefaultInputFileDiskBudgetPercent = 10
+
+	// DefaultMaxInputFileSizeBytes is the files API's default maximum input-file
+	// size. It is used unless input_file_max_size_bytes is explicitly configured.
+	DefaultMaxInputFileSizeBytes int64 = 200 << 20
 )
 
 // RouteKeyMethod selects how model_gateways lookup keys are derived from a
@@ -139,8 +153,23 @@ type ProcessorConfig struct {
 	// This should be shorter than PollInterval
 	TaskWaitTime time.Duration `yaml:"task_wait_time"`
 
-	// NumWorkers is the fixed number of worker goroutines spawned to process jobs
+	// NumWorkers is the configured upper bound on worker goroutines processing jobs.
 	NumWorkers int `yaml:"num_workers"`
+
+	// WorkDirSizeLimit is the capacity allocated to the processor work directory.
+	// In Kubernetes it must match processor.workDirVolume.sizeLimit. The runtime
+	// cannot derive an emptyDir quota from the mounted filesystem.
+	WorkDirSizeLimit string `yaml:"work_dir_size_limit"`
+
+	// InputFileDiskBudgetPercent is the maximum percentage of WorkDirSizeLimit
+	// available for concurrently staged input files. The effective worker count
+	// is capped by this budget and MaxInputFileSizeBytes.
+	InputFileDiskBudgetPercent int `yaml:"input_file_disk_budget_percent"`
+
+	// MaxInputFileSizeBytes must match the maximum input-file size accepted by
+	// the files API. It keeps the worker cap conservative when that API limit is
+	// overridden from its default.
+	MaxInputFileSizeBytes int64 `yaml:"input_file_max_size_bytes"`
 
 	// Concurrency groups all dispatch-rate and concurrency control settings.
 	Concurrency ConcurrencyConfig `yaml:"concurrency"`
@@ -343,8 +372,11 @@ func NewConfig() *ProcessorConfig {
 				AdditiveIncrease: 1,
 			},
 		},
-		NumWorkers: 1,
-		Addr:       ":9090",
+		NumWorkers:                 1,
+		WorkDirSizeLimit:           DefaultWorkDirSizeLimit,
+		InputFileDiskBudgetPercent: DefaultInputFileDiskBudgetPercent,
+		MaxInputFileSizeBytes:      DefaultMaxInputFileSizeBytes,
+		Addr:                       ":9090",
 		// Keep observability as best-effort by default.
 		TerminateOnObservabilityFailure: false,
 		ShutdownTimeout:                 30 * time.Second,
@@ -382,6 +414,9 @@ func (c *ProcessorConfig) Validate() error {
 	}
 	if c.NumWorkers <= 0 {
 		return fmt.Errorf("num_workers must be > 0")
+	}
+	if _, err := c.EffectiveNumWorkers(); err != nil {
+		return err
 	}
 
 	if err := c.Concurrency.validate(); err != nil {
@@ -427,6 +462,48 @@ func (c *ProcessorConfig) Validate() error {
 	}
 
 	return nil
+}
+
+// EffectiveNumWorkers returns the number of jobs which can safely stage their
+// maximum-size input files concurrently. It caps the configured worker count by
+// the work-directory budget reserved for input files.
+func (c *ProcessorConfig) EffectiveNumWorkers() (int, error) {
+	if c.NumWorkers <= 0 {
+		return 0, fmt.Errorf("num_workers must be > 0")
+	}
+	if c.InputFileDiskBudgetPercent <= 0 || c.InputFileDiskBudgetPercent > 100 {
+		return 0, fmt.Errorf("input_file_disk_budget_percent must be in [1, 100]")
+	}
+	if c.MaxInputFileSizeBytes <= 0 {
+		return 0, fmt.Errorf("input_file_max_size_bytes must be > 0")
+	}
+	if c.WorkDirSizeLimit == "" {
+		return 0, fmt.Errorf("work_dir_size_limit cannot be empty")
+	}
+
+	quantity, err := resource.ParseQuantity(c.WorkDirSizeLimit)
+	if err != nil {
+		return 0, fmt.Errorf("parse work_dir_size_limit %q: %w", c.WorkDirSizeLimit, err)
+	}
+	workDirBytes := quantity.Value()
+	if workDirBytes <= 0 {
+		return 0, fmt.Errorf("work_dir_size_limit must be > 0")
+	}
+
+	// Calculate without multiplying workDirBytes by the percentage, which could
+	// overflow for an otherwise valid Kubernetes quantity.
+	inputBudgetBytes := (workDirBytes/100)*int64(c.InputFileDiskBudgetPercent) +
+		(workDirBytes%100)*int64(c.InputFileDiskBudgetPercent)/100
+	maxWorkersByDisk := inputBudgetBytes / c.MaxInputFileSizeBytes
+	if maxWorkersByDisk < 1 {
+		return 0, fmt.Errorf("input file disk budget (%d bytes) must fit one maximum-size input file (%d bytes)", inputBudgetBytes, c.MaxInputFileSizeBytes)
+	}
+	if int64(c.NumWorkers) <= maxWorkersByDisk {
+		return c.NumWorkers, nil
+	}
+	// This conversion is safe: this branch guarantees maxWorkersByDisk is less
+	// than NumWorkers, which is already an int.
+	return int(maxWorkersByDisk), nil
 }
 
 func (c *ProcessorConfig) validateGateways() error {

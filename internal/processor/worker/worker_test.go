@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/clientset"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/semaphore"
@@ -67,6 +68,27 @@ func TestNewProcessor_InvalidGlobalConcurrency(t *testing.T) {
 	_, err := NewProcessor(cfg, &clientset.Clientset{}, "test-pod", testLogger(t))
 	if err == nil {
 		t.Fatalf("expected error for concurrency.global=-1")
+	}
+}
+
+func TestInitConcurrencyControls_CapsWorkersByInputDiskBudget(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.NumWorkers = 20
+	cfg.WorkDirSizeLimit = "10Gi"
+	cfg.InputFileDiskBudgetPercent = 10
+
+	p := mustNewProcessor(t, cfg, validProcessorClients(t))
+	if err := p.initConcurrencyControls(logr.Discard(), func() {}); err != nil {
+		t.Fatalf("initConcurrencyControls() error = %v", err)
+	}
+
+	for range 5 {
+		if !p.tokens.TryAcquire() {
+			t.Fatal("worker token unavailable before the input-disk cap")
+		}
+	}
+	if p.tokens.TryAcquire() {
+		t.Fatal("worker token available beyond the input-disk cap")
 	}
 }
 

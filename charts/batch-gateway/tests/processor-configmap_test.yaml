@@ -118,6 +118,18 @@ tests:
           path: data["config.yaml"]
           pattern: 'aimd:\n\s+enabled: true\n\s+min: 5\n\s+backoff_factor: 0.5\n\s+additive_increase: 1'
 
+  - it: should render the input-file disk budget configuration
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'work_dir_size_limit: "10Gi"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'input_file_disk_budget_percent: 10'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'input_file_max_size_bytes: 209715200'
+
   - it: should render custom concurrency values
     set:
       processor.config.concurrency:

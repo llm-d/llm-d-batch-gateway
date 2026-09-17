@@ -309,7 +309,11 @@ processor:
     addr: ":9090"
     taskWaitTime: "1s"
     pollInterval: "5s"
-    numWorkers: 20
+    numWorkers: 5
+    # Maximum percentage of the work directory reserved for local input copies.
+    # The processor derives its effective worker count at startup from this,
+    # workDirVolume.sizeLimit, and the maximum input-file size.
+    inputFileDiskBudgetPercent: 10
     concurrency:
       # Fixed ceiling for total in-flight requests across all endpoints.
       # When AIMD is enabled, per-endpoint limits self-regulate via backpressure,

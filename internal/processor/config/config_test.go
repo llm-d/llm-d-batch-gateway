@@ -66,6 +66,15 @@ func TestNewConfig_Defaults(t *testing.T) {
 	if c.NumWorkers != 1 {
 		t.Fatalf("NumWorkers = %d, want %d", c.NumWorkers, 1)
 	}
+	if c.WorkDirSizeLimit != DefaultWorkDirSizeLimit {
+		t.Fatalf("WorkDirSizeLimit = %q, want %q", c.WorkDirSizeLimit, DefaultWorkDirSizeLimit)
+	}
+	if c.InputFileDiskBudgetPercent != DefaultInputFileDiskBudgetPercent {
+		t.Fatalf("InputFileDiskBudgetPercent = %d, want %d", c.InputFileDiskBudgetPercent, DefaultInputFileDiskBudgetPercent)
+	}
+	if c.MaxInputFileSizeBytes != DefaultMaxInputFileSizeBytes {
+		t.Fatalf("MaxInputFileSizeBytes = %d, want %d", c.MaxInputFileSizeBytes, DefaultMaxInputFileSizeBytes)
+	}
 	if c.Concurrency.Global != 100 {
 		t.Fatalf("Concurrency.Global = %d, want %d", c.Concurrency.Global, 100)
 	}
@@ -106,6 +115,52 @@ func TestNewConfig_Defaults(t *testing.T) {
 	}
 	if c.AsyncDispatchConfig.ResultPollTimeout != 5*time.Second {
 		t.Fatalf("AsyncDispatchConfig.ResultPollTimeout = %v, want %v", c.AsyncDispatchConfig.ResultPollTimeout, 5*time.Second)
+	}
+}
+
+func TestProcessorConfig_EffectiveNumWorkers(t *testing.T) {
+	tests := []struct {
+		name      string
+		workers   int
+		sizeLimit string
+		percent   int
+		fileSize  int64
+		want      int
+		wantErr   bool
+	}{
+		{name: "default chart capacity caps twenty workers at five", workers: 20, sizeLimit: "10Gi", percent: 10, want: 5},
+		{name: "configured workers remain the lower cap", workers: 4, sizeLimit: "10Gi", percent: 10, want: 4},
+		{name: "larger input budget allows all configured workers", workers: 20, sizeLimit: "10Gi", percent: 50, want: 20},
+		{name: "larger allowed input reduces the cap", workers: 20, sizeLimit: "10Gi", percent: 10, fileSize: 512 << 20, want: 2},
+		{name: "budget too small for one file is rejected", workers: 20, sizeLimit: "1Gi", percent: 10, wantErr: true},
+		{name: "invalid percentage is rejected", workers: 20, sizeLimit: "10Gi", percent: 0, wantErr: true},
+		{name: "invalid size is rejected", workers: 20, sizeLimit: "not-a-size", percent: 10, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := NewConfig()
+			cfg.NumWorkers = tt.workers
+			cfg.WorkDirSizeLimit = tt.sizeLimit
+			cfg.InputFileDiskBudgetPercent = tt.percent
+			if tt.fileSize != 0 {
+				cfg.MaxInputFileSizeBytes = tt.fileSize
+			}
+
+			got, err := cfg.EffectiveNumWorkers()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("EffectiveNumWorkers() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EffectiveNumWorkers() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("EffectiveNumWorkers() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 

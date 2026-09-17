@@ -75,6 +75,7 @@ func (c *ExchangeDBClientRedis) PQEnqueue(ctx context.Context, item *db_api.Batc
 	})
 	if lerr != nil {
 		err = lerr
+		return
 	}
 	if cmdRes == nil {
 		err = fmt.Errorf("redis command result is nil")
