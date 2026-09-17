@@ -147,7 +147,7 @@ func TestGetSizeBucket(t *testing.T) {
 func TestInitMetrics_AndRecorders(t *testing.T) {
 	withIsolatedPromRegistry(t, func(reg *prometheus.Registry) {
 		cfg := *config.NewConfig()
-		cfg.NumWorkers = 7
+		cfg.NumWorkers = 20
 
 		if err := InitMetrics(cfg); err != nil {
 			t.Fatalf("InitMetrics: %v", err)
@@ -173,8 +173,8 @@ func TestInitMetrics_AndRecorders(t *testing.T) {
 
 		f := collectFamilies(t, reg)
 
-		if v := gaugeValue(f["total_workers"]); v != float64(cfg.NumWorkers) {
-			t.Fatalf("total_workers=%v, want %v", v, cfg.NumWorkers)
+		if v := gaugeValue(f["total_workers"]); v != 5 {
+			t.Fatalf("total_workers=%v, want effective worker count 5", v)
 		}
 		if v := gaugeValue(f["active_workers"]); v != 1 {
 			t.Fatalf("active_workers=%v, want 1", v)

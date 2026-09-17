@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
@@ -112,6 +113,11 @@ const (
 )
 
 func InitMetrics(cfg config.ProcessorConfig) error {
+	effectiveWorkers, err := cfg.EffectiveNumWorkers()
+	if err != nil {
+		return fmt.Errorf("calculate effective worker count: %w", err)
+	}
+
 	// number of jobs processed
 	jobsProcessed = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -125,10 +131,10 @@ func InitMetrics(cfg config.ProcessorConfig) error {
 	totalWorkers = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "total_workers",
-			Help: "Total number of configured workers",
+			Help: "Total number of effective workers",
 		},
 	)
-	totalWorkers.Set(float64(cfg.NumWorkers))
+	totalWorkers.Set(float64(effectiveWorkers))
 
 	// current number of active workers
 	activeWorkers = prometheus.NewGauge(
