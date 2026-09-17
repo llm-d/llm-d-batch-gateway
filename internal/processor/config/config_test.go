@@ -63,8 +63,8 @@ func TestNewConfig_Defaults(t *testing.T) {
 	if c.TaskWaitTime != 1*time.Second {
 		t.Fatalf("TaskWaitTime = %v, want %v", c.TaskWaitTime, 1*time.Second)
 	}
-	if c.NumWorkers != 1 {
-		t.Fatalf("NumWorkers = %d, want %d", c.NumWorkers, 1)
+	if c.NumWorkers != DefaultNumWorkers {
+		t.Fatalf("NumWorkers = %d, want %d", c.NumWorkers, DefaultNumWorkers)
 	}
 	if c.WorkDirSizeLimit != DefaultWorkDirSizeLimit {
 		t.Fatalf("WorkDirSizeLimit = %q, want %q", c.WorkDirSizeLimit, DefaultWorkDirSizeLimit)

@@ -90,6 +90,11 @@ const (
 	// work directory for concurrently staged input files.
 	DefaultInputFileDiskBudgetPercent = 10
 
+	// DefaultNumWorkers matches the bundled processor configuration and Helm
+	// chart default. The effective count may be lower due to the input-file
+	// disk budget.
+	DefaultNumWorkers = 5
+
 	// DefaultMaxInputFileSizeBytes is the files API's default maximum input-file
 	// size. It is used unless input_file_max_size_bytes is explicitly configured.
 	DefaultMaxInputFileSizeBytes int64 = 200 << 20
@@ -372,7 +377,7 @@ func NewConfig() *ProcessorConfig {
 				AdditiveIncrease: 1,
 			},
 		},
-		NumWorkers:                 1,
+		NumWorkers:                 DefaultNumWorkers,
 		WorkDirSizeLimit:           DefaultWorkDirSizeLimit,
 		InputFileDiskBudgetPercent: DefaultInputFileDiskBudgetPercent,
 		MaxInputFileSizeBytes:      DefaultMaxInputFileSizeBytes,
