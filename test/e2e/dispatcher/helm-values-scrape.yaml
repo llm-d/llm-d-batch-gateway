@@ -12,7 +12,6 @@ ap:
     enabled: true
     port: 9091
     secure: false
-  transport: "redis-sortedset"
   transportConfig:
     urlSecret:
       url: "redis://redis-master.default.svc.cluster.local:6379"
