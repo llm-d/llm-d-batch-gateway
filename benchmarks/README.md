@@ -244,9 +244,9 @@ Compare TTFT p99 during burst phases across scenarios:
 | `GUIDE_NAME` | No | `optimized-baseline` | Inference pool name |
 | `BG_IMAGE_REPO` | No | — | Batch-gateway image repo override |
 | `BG_IMAGE_TAG` | No | — | Batch-gateway image tag override |
-| `DISPATCHER_VERSION` | No | `v0.7.3` | Async-processor image version (scenario 5) |
+| `DISPATCHER_VERSION` | No | `v0.9.1` | llm-d-async image version (scenario 5) |
 | `DISPATCHER_CHART` | No | OCI chart | Async-processor Helm chart reference |
-| `DISPATCHER_CHART_VERSION` | No | `0.7.3` | Async-processor chart version |
+| `DISPATCHER_CHART_VERSION` | No | `v0.9.1` | llm-d-async chart version |
 
 ## Directory Structure
 
