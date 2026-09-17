@@ -32,9 +32,9 @@ set -euo pipefail
 #   BENCH_DB_PASSWORD  — PostgreSQL password (default: random 24-char string)
 #   PROMETHEUS_RELEASE — Prometheus Operator release label for ServiceMonitor discovery (default: llmd-kube-prometheus-stack)
 #   PROMETHEUS_NAMESPACE — Namespace where Prometheus is deployed (default: llm-d-monitoring)
-#   DISPATCHER_VERSION — async-processor image version for scenario 5 (default: v0.7.3)
+#   DISPATCHER_VERSION — llm-d-async image version for scenario 5 (default: v0.9.1)
 #   DISPATCHER_CHART   — async-processor Helm chart reference (default: OCI chart)
-#   DISPATCHER_CHART_VERSION — async-processor chart version (default: 0.7.3)
+#   DISPATCHER_CHART_VERSION — llm-d-async chart version (default: v0.9.1)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -179,10 +179,10 @@ GIE_REPO="${GIE_REPO:-}"
 GIE_UPSTREAM_REPO="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
 
 # Async-processor settings for scenario 5
-DISPATCHER_VERSION="${DISPATCHER_VERSION:-v0.7.3}"
+DISPATCHER_VERSION="${DISPATCHER_VERSION:-v0.9.1}"
 DISPATCHER_IMAGE="${DISPATCHER_IMAGE:-ghcr.io/llm-d/llm-d-async:${DISPATCHER_VERSION}}"
 DISPATCHER_CHART="${DISPATCHER_CHART:-oci://ghcr.io/llm-d/charts/llm-d-async}"
-DISPATCHER_CHART_VERSION="${DISPATCHER_CHART_VERSION:-0.7.3}"
+DISPATCHER_CHART_VERSION="${DISPATCHER_CHART_VERSION:-v0.9.1}"
 
 # --- Inference backend ---
 if [ "${MODE}" = "sim" ]; then

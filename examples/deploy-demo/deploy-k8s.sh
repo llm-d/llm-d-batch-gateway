@@ -62,10 +62,10 @@ BATCH_FLOW_CONTROL_OBJECTIVE="${BATCH_FLOW_CONTROL_OBJECTIVE:-batch-sheddable}"
 
 # Async dispatcher (llm-d-async) — ENABLE_DISPATCHER is set in common.sh
 DISPATCHER_RELEASE="${DISPATCHER_RELEASE:-dispatcher}"
-DISPATCHER_VERSION="${DISPATCHER_VERSION:-v0.7.3}"
+DISPATCHER_VERSION="${DISPATCHER_VERSION:-v0.9.1}"
 DISPATCHER_IMAGE="${DISPATCHER_IMAGE:-ghcr.io/llm-d/llm-d-async:${DISPATCHER_VERSION}}"
 DISPATCHER_CHART="${DISPATCHER_CHART:-oci://ghcr.io/llm-d/charts/llm-d-async}"
-DISPATCHER_CHART_VERSION="${DISPATCHER_CHART_VERSION:-0.7.3}"
+DISPATCHER_CHART_VERSION="${DISPATCHER_CHART_VERSION:-v0.9.1}"
 
 # ── Infrastructure ────────────────────────────────────────────────────────────
 
@@ -1391,7 +1391,7 @@ usage() {
     echo "  ENABLE_FLOW_CONTROL   Enable GIE flow control (default: true)"
     echo "  BATCH_FLOW_CONTROL_OBJECTIVE InferenceObjective name for batch (default: batch-sheddable)"
     echo "  ENABLE_DISPATCHER      Use normal HTTP sync by default (false); true opts into async dispatch"
-    echo "  DISPATCHER_VERSION     llm-d-async version (default: v0.7.3)"
+    echo "  DISPATCHER_VERSION     llm-d-async version (default: v0.9.1)"
     echo "  UNINSTALL_ALL          Set to 1 to also remove Kuadrant/Istio/cert-manager and CRDs (ephemeral clusters only)"
     echo ""
     echo "Examples:"
