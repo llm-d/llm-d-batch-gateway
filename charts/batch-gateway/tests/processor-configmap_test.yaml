@@ -130,6 +130,14 @@ tests:
           path: data["config.yaml"]
           pattern: 'input_file_max_size_bytes: 209715200'
 
+  - it: should use the global maximum input-file size
+    set:
+      global.maxInputFileSizeBytes: 524288000
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'input_file_max_size_bytes: 524288000'
+
   - it: should render custom concurrency values
     set:
       processor.config.concurrency:

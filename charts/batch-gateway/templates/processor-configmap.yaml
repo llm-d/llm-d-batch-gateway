@@ -19,7 +19,7 @@ data:
     num_workers: {{ .Values.processor.config.numWorkers }}
     work_dir_size_limit: {{ .Values.processor.workDirVolume.sizeLimit | quote }}
     input_file_disk_budget_percent: {{ .Values.processor.config.inputFileDiskBudgetPercent }}
-    input_file_max_size_bytes: {{ .Values.apiserver.config.fileAPI.maxSizeBytes | int64 }}
+    input_file_max_size_bytes: {{ .Values.global.maxInputFileSizeBytes | int64 }}
     concurrency:
       global: {{ .Values.processor.config.concurrency.global }}
       per_endpoint: {{ .Values.processor.config.concurrency.perEndpoint }}

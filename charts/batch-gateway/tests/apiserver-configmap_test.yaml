@@ -97,6 +97,14 @@ tests:
           path: data["config.yaml"]
           pattern: 'max_line_count: 50000'
 
+  - it: should render the global maximum input-file size
+    set:
+      global.maxInputFileSizeBytes: 524288000
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'max_size_bytes: 524288000'
+
   - it: should render redis config
     asserts:
       - matchRegex:

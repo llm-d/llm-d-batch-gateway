@@ -70,6 +70,10 @@ global:
     # Enable per-query PostgreSQL tracing spans via otelpgx.
     postgresqlTracing: false
 
+  # Maximum input-file size accepted by the API server and used by the processor
+  # to calculate its local input-file disk budget (200 MiB).
+  maxInputFileSizeBytes: 209715200
+
   # File client configuration
   fileClient:
     type: "fs"  # Options: "fs", "s3"
@@ -201,7 +205,6 @@ apiserver:
         - Authorization
     fileAPI:
       defaultExpirationSeconds: 7776000
-      maxSizeBytes: 209715200
       maxLineCount: 50000
     # Enable pprof profiling endpoints on the observability server (/debug/pprof/)
     enablePprof: false

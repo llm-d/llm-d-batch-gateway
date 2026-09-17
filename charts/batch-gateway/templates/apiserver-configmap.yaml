@@ -62,7 +62,7 @@ data:
       {{- end }}
     file_api:
       default_expiration_seconds: {{ .Values.apiserver.config.fileAPI.defaultExpirationSeconds }}
-      max_size_bytes: {{ .Values.apiserver.config.fileAPI.maxSizeBytes }}
+      max_size_bytes: {{ .Values.global.maxInputFileSizeBytes | int64 }}
       max_line_count: {{ .Values.apiserver.config.fileAPI.maxLineCount }}
     enable_pprof: {{ .Values.apiserver.config.enablePprof }}
     otel:
