@@ -45,6 +45,7 @@ import (
 	ucom "github.com/llm-d/llm-d-batch-gateway/internal/util/com"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/interrupt"
 	uotel "github.com/llm-d/llm-d-batch-gateway/internal/util/otel"
+	"github.com/llm-d/llm-d-batch-gateway/internal/util/shutdown"
 )
 
 func main() {
@@ -76,13 +77,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize tracer: %w", err)
 	}
-	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := shutdownTracer(shutdownCtx); err != nil {
-			logger.Error(err, "Failed to shutdown tracer")
-		}
-	}()
+	// Safety net: flushes the tracer on any early return before the
+	// coordinator below takes ownership (mirrors closeClients below).
+	tracerGuard := shutdown.NewGuard(logger, "flush tracer", 5*time.Second, shutdownTracer)
+	defer tracerGuard.Cleanup()
 
 	if err := gcmetrics.InitMetrics(); err != nil {
 		return fmt.Errorf("failed to initialize metrics: %w", err)
@@ -107,13 +105,51 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("failed to create clients: %w", err)
 	}
-	defer func() { _ = clients.Close() }()
+	// Safety net: closes clients on any early return before the coordinator
+	// below takes ownership. Once the coordinator is built, the guard is
+	// disarmed and the coordinator closes them exactly once, in order.
+	// clients.Close() takes no context, so it can't be bounded by a
+	// timeout; see the identical "close clients" phase below.
+	clientsGuard := shutdown.NewGuard(logger, "close clients", 0, func(context.Context) error { return clients.Close() })
+	defer clientsGuard.Cleanup()
 
 	var ready atomic.Bool
-	metricsErrCh, err := startMetricsServer(ctx, cfg.MetricsAddr, logger, &ready)
+	metricsErrCh, shutdownMetrics, err := startMetricsServer(ctx, cfg.MetricsAddr, logger, &ready)
 	if err != nil {
 		return err
 	}
+
+	// Stop intake as soon as the shutdown signal arrives, ahead of the drain
+	// that follows from g.Wait() below.
+	shutdown.WatchIntake(ctx, func() { ready.Store(false) })
+
+	const flushObservabilityTimeout = 5 * time.Second
+	const flushTracerTimeout = 5 * time.Second
+	coordinator := shutdown.New(logger, flushObservabilityTimeout+flushTracerTimeout+shutdown.DefaultSlack)
+	coordinator.Add(shutdown.Phase{
+		// clients.Close() takes no context, so it cannot be bounded by a
+		// per-phase timeout; omit one rather than imply a budget that isn't
+		// enforced.
+		Name: "close clients",
+		Run:  func(context.Context) error { return clients.Close() },
+	})
+	coordinator.Add(shutdown.Phase{
+		Name:    "flush observability",
+		Timeout: flushObservabilityTimeout,
+		Run:     shutdownMetrics,
+	})
+	coordinator.Add(shutdown.Phase{
+		Name:    "flush tracer",
+		Timeout: flushTracerTimeout,
+		Run:     shutdownTracer,
+	})
+	clientsGuard.Disarm()
+	tracerGuard.Disarm()
+	defer func() {
+		if shutdownErr := coordinator.Run(context.Background()); shutdownErr != nil {
+			logger.Error(shutdownErr, "Garbage collector graceful shutdown failed")
+		}
+	}()
 
 	gc := collector.NewGarbageCollector(clients.BatchDB, clients.FileDB, clients.File, cfg.DryRun, cfg.Collector.Interval, cfg.Collector.MaxConcurrency, nil)
 
@@ -155,8 +191,10 @@ func run() error {
 		g.Go(func() error { return rec.RunLoop(gCtx) })
 	}
 
-	ready.Store(true)
-	logger.Info("GC workers started, marking ready")
+	if ctx.Err() == nil {
+		ready.Store(true)
+		logger.Info("GC workers started, marking ready")
+	}
 
 	if err := g.Wait(); err != nil && ctx.Err() == nil {
 		return fmt.Errorf("gc/reconciler failed: %w", err)
@@ -166,7 +204,7 @@ func run() error {
 	return nil
 }
 
-func startMetricsServer(ctx context.Context, addr string, logger logr.Logger, ready *atomic.Bool) (<-chan error, error) {
+func startMetricsServer(ctx context.Context, addr string, logger logr.Logger, ready *atomic.Bool) (<-chan error, func(context.Context) error, error) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -181,22 +219,13 @@ func startMetricsServer(ctx context.Context, addr string, logger logr.Logger, re
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("metrics server listen on %s: %w", addr, err)
+		return nil, nil, fmt.Errorf("metrics server listen on %s: %w", addr, err)
 	}
 
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.Error(err, "Metrics server shutdown failed")
-		}
-	}()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -207,5 +236,7 @@ func startMetricsServer(ctx context.Context, addr string, logger logr.Logger, re
 		}
 	}()
 
-	return errCh, nil
+	return errCh, func(shutdownCtx context.Context) error {
+		return server.Shutdown(shutdownCtx)
+	}, nil
 }

@@ -38,6 +38,7 @@ import (
 	tlspkg "github.com/llm-d/llm-d-batch-gateway/internal/tls"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/clientset"
 	ucom "github.com/llm-d/llm-d-batch-gateway/internal/util/com"
+	"github.com/llm-d/llm-d-batch-gateway/internal/util/shutdown"
 )
 
 type Server struct {
@@ -132,6 +133,13 @@ func New(ctx context.Context, config *common.ServerConfig) (*Server, error) {
 func (s *Server) Start(ctx context.Context) error {
 	logger := s.logger
 
+	// Safety net: closes clients on any early return before the coordinator
+	// below takes ownership. s.clients.Close() takes no context, so it
+	// can't be bounded by a timeout; see the identical "close clients"
+	// phase below.
+	clientsGuard := shutdown.NewGuard(logger, "close clients", 0, func(context.Context) error { return s.clients.Close() })
+	defer clientsGuard.Cleanup()
+
 	// --- Observability server (always plain HTTP) ---
 	obsAddr := s.config.Host + ":" + s.config.ObservabilityPort
 	obsServer := &http.Server{
@@ -145,6 +153,7 @@ func (s *Server) Start(ctx context.Context) error {
 			logger.Error(err, "observability server failed")
 		}
 	}()
+	obsGuard := shutdown.NewGuard(logger, "flush observability", time.Duration(s.config.GetObservabilityShutdownTimeoutSeconds())*time.Second, obsServer.Shutdown)
 
 	// --- API server ---
 	ln, err := net.Listen("tcp", s.config.Host+":"+s.config.Port)
@@ -226,42 +235,59 @@ func (s *Server) Start(ctx context.Context) error {
 	// Continue waiting for shutdown or failure after marking ready
 	select {
 	case <-ctx.Done():
-		// Normal shutdown path
+		// Normal shutdown path. Stop intake first, ahead of the drain below.
 		s.serverReady.Store(false)
 		logger.Info("shutting down", "reason", ctx.Err())
 
-		// Gracefully shutdown both servers
 		apiSd := time.Duration(s.config.GetAPIShutdownTimeoutSeconds()) * time.Second
-		sdApiCtx, cancelApi := context.WithTimeout(context.Background(), apiSd)
-		defer cancelApi()
-
-		if err := httpserver.Shutdown(sdApiCtx); err != nil {
-			logger.Error(err, "failed to gracefully shutdown API server")
-		}
-
 		obsSd := time.Duration(s.config.GetObservabilityShutdownTimeoutSeconds()) * time.Second
-		sdObsCtx, cancelObs := context.WithTimeout(context.Background(), obsSd)
-		defer cancelObs()
 
-		if err := obsServer.Shutdown(sdObsCtx); err != nil {
-			logger.Error(err, "failed to gracefully shutdown observability server")
+		// waitErr is set only by the "wait for API server" phase below; unlike
+		// the other phases (best-effort cleanup, logged but non-fatal), a
+		// server goroutine that never exits indicates something is seriously
+		// wrong, so it alone is returned to the caller.
+		var waitErr error
+
+		coordinator := shutdown.New(logger, apiSd+obsSd+5*time.Second+shutdown.DefaultSlack)
+		coordinator.Add(shutdown.Phase{
+			Name:    "drain API server",
+			Timeout: apiSd,
+			Run:     httpserver.Shutdown,
+		})
+		coordinator.Add(shutdown.Phase{
+			Name:    "wait for API server",
+			Timeout: 5 * time.Second,
+			Run: func(shutdownCtx context.Context) error {
+				select {
+				case err := <-serveDone:
+					if err != nil && err != http.ErrServerClosed {
+						waitErr = fmt.Errorf("server exited with error after shutdown: %w", err)
+						return waitErr
+					}
+					return nil
+				case <-shutdownCtx.Done():
+					waitErr = fmt.Errorf("server goroutine did not exit after shutdown: %w", shutdownCtx.Err())
+					return waitErr
+				}
+			},
+		})
+		coordinator.Add(shutdown.Phase{
+			Name: "close clients",
+			Run:  func(context.Context) error { return s.clients.Close() },
+		})
+		coordinator.Add(shutdown.Phase{
+			Name:    "flush observability",
+			Timeout: obsSd,
+			Run:     obsServer.Shutdown,
+		})
+		obsGuard.Disarm()
+		clientsGuard.Disarm()
+
+		if shutdownErr := coordinator.Run(context.Background()); shutdownErr != nil {
+			logger.Error(shutdownErr, "API server graceful shutdown failed")
 		}
-
-		// Wait for server goroutine to finish with timeout
-		select {
-		case err = <-serveDone:
-			if err != nil && err != http.ErrServerClosed {
-				logger.Error(err, "server exited with error after shutdown")
-				return err
-			}
-		case <-time.After(5 * time.Second):
-			err := fmt.Errorf("server goroutine did not exit after shutdown")
-			logger.Error(err, "timeout waiting for server goroutine to exit")
-			return err
-		}
-
-		if err := s.clients.Close(); err != nil {
-			logger.Error(err, "failed to close clients")
+		if waitErr != nil {
+			return waitErr
 		}
 		logger.Info("shutdown complete")
 
