@@ -195,6 +195,46 @@ func TestUpdatePersistentStatus_Success(t *testing.T) {
 	}
 }
 
+func TestUpdatePersistentStatus_ConflictPreservesNewerStatus(t *testing.T) {
+	ctx := context.Background()
+	dbClient := newMockBatchDBClient()
+	updater := NewStatusUpdater(dbClient, mockdb.NewMockBatchStatusClient(), 86400)
+	jobID := "job-update-conflict"
+
+	seed := &db.BatchItem{
+		BaseIndexes: db.BaseIndexes{ID: jobID},
+		BaseContents: db.BaseContents{
+			Status: mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusInProgress}),
+		},
+	}
+	if err := dbClient.DBStore(ctx, seed); err != nil {
+		t.Fatalf("DBStore seed: %v", err)
+	}
+	stale := *seed
+	newer := *seed
+	newer.Status = mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusCancelling})
+	if err := dbClient.DBUpdate(ctx, &newer, nil); err != nil {
+		t.Fatalf("DBUpdate newer status: %v", err)
+	}
+
+	err := updater.UpdateFailedStatus(ctx, &stale, nil, "", "")
+	if !errors.Is(err, db.ErrConflict) {
+		t.Fatalf("expected ErrConflict, got %v", err)
+	}
+
+	items, _, _, err := dbClient.DBGet(ctx, &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{jobID}}}, true, 0, 1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("DBGet updated item: err=%v len=%d", err, len(items))
+	}
+	var got openai.BatchStatusInfo
+	if err := json.Unmarshal(items[0].Status, &got); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if got.Status != openai.BatchStatusCancelling {
+		t.Fatalf("expected status cancelling, got %s", got.Status)
+	}
+}
+
 func TestUpdatePersistentStatus_PreservesPriorTimestamps(t *testing.T) {
 	stamps := map[string]func(*openai.BatchStatusInfo) *int64{
 		"cancelled_at":   func(s *openai.BatchStatusInfo) *int64 { return s.CancelledAt },

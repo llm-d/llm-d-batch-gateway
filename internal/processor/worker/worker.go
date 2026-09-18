@@ -112,7 +112,9 @@ func (p *Processor) Run(ctx context.Context, onReady func()) error {
 		return err
 	}
 
-	p.recoverOwnedJobs(ctx)
+	if err := p.recoverOwnedJobs(ctx); err != nil {
+		return fmt.Errorf("startup recovery: %w", err)
+	}
 
 	if onReady != nil {
 		onReady()
