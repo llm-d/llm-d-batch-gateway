@@ -18,6 +18,7 @@ limitations under the License.
 package fs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -211,6 +212,32 @@ func (c *Client) Retrieve(ctx context.Context, fileName, folderName string) (io.
 		"path", relPath, "size", metadata.Size)
 
 	return file, metadata, nil
+}
+
+// RetrieveRange retrieves a byte range [offset, offset+length) from a file in the filesystem.
+func (c *Client) RetrieveRange(ctx context.Context, fileName, folderName string, offset int64, length int64) (io.ReadCloser, error) {
+	relPath, err := c.resolvePath(folderName, fileName)
+	if err != nil {
+		return nil, err
+	}
+
+	file, err := c.root.Open(relPath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	buf := make([]byte, length)
+	n, err := file.ReadAt(buf, offset)
+	if err != nil && (err != io.EOF || int64(n) != length) {
+		return nil, fmt.Errorf("read range at offset %d length %d: %w", offset, length, err)
+	}
+	buf = buf[:n]
+
+	logr.FromContextOrDiscard(ctx).V(logging.TRACE).Info("Range retrieved",
+		"path", relPath, "offset", offset, "length", length)
+
+	return io.NopCloser(bytes.NewReader(buf)), nil
 }
 
 // Delete deletes a file from the filesystem.

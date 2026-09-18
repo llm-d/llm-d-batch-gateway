@@ -19,6 +19,7 @@ package mock
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -141,6 +142,29 @@ func (m *MockBatchFilesClient) Retrieve(ctx context.Context, fileName, folderNam
 		Size:     fileInfo.Size(),
 		ModTime:  fileInfo.ModTime(),
 	}, nil
+}
+
+// RetrieveRange retrieves a byte range [offset, offset+length) from a file.
+func (m *MockBatchFilesClient) RetrieveRange(ctx context.Context, fileName, folderName string, offset int64, length int64) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	filePath := filepath.Join(m.rootDir, folderName, fileName)
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	buf := make([]byte, length)
+	n, err := file.ReadAt(buf, offset)
+	if err != nil && (err != io.EOF || int64(n) != length) {
+		return nil, fmt.Errorf("failed to read range at offset %d length %d: %w", offset, length, err)
+	}
+	buf = buf[:n]
+
+	return io.NopCloser(bytes.NewReader(buf)), nil
 }
 
 // List lists the files in the specified location.

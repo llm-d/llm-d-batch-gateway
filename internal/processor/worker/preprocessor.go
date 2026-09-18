@@ -91,15 +91,6 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 		logger.V(logging.INFO).Info("Input file metadata", "metadata", metadata)
 	}
 
-	// create local input file
-	localInputFile, localInputFilePath, err := p.createLocalInputFile(jobID, jobInfo.TenantID)
-	if err != nil {
-		return fmt.Errorf("create local input file: %w", err)
-	}
-	defer localInputFile.Close()
-
-	writer := bufio.NewWriterSize(localInputFile, 1024*1024)
-
 	acc := newPlanAccumulator(jobRootDir)
 
 	// model intern tables
@@ -151,7 +142,7 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 		}
 
 		// read a line from the input file
-		line, done, err := readNormalizedLine(inputFileReader)
+		line, streamBytes, done, err := readNormalizedLine(inputFileReader)
 		if err != nil {
 			return fmt.Errorf("read line %d from input file: %w", lineCount+1, err)
 		}
@@ -160,11 +151,6 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 		}
 
 		lineCount++
-
-		// write the line to the input file.
-		if _, err := writer.Write(line); err != nil {
-			return fmt.Errorf("write line %d to input file %q: %w", lineCount, localInputFilePath, err)
-		}
 
 		requestMeta, err := extractAndValidateLine(line)
 		if err != nil {
@@ -211,20 +197,15 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 				metrics.RecordRequestError(lookupID)
 				logger.V(logging.DEBUG).Info("Rejected request for unregistered model",
 					"customId", requestMeta.CustomID, "model", requestMeta.ModelID)
-				offset += int64(len(line))
+				offset += int64(streamBytes)
 				continue
 			}
 		}
 
 		nextOffset := accumulatePlanEntry(
-			acc, requestMeta.ModelID, modelToSafe, used, offset, uint32(len(line)), requestMeta.PrefixHash,
+			acc, requestMeta.ModelID, modelToSafe, used, offset, uint32(streamBytes), requestMeta.PrefixHash,
 		)
 		offset = nextOffset
-	}
-
-	// flush input.jsonl file
-	if err := writer.Flush(); err != nil {
-		return fmt.Errorf("flush input file %q: %w", localInputFilePath, err)
 	}
 
 	if err := finalizePlanFiles(acc, modelToSafe); err != nil {
@@ -251,27 +232,28 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 		modelCounts[model] = len(acc.entries[safe])
 	}
 	logger.V(logging.INFO).Info("Processor Pre-processing job completed",
-		"inputFilePath", localInputFilePath, "planFilePath", acc.plansDir(),
+		"planFilePath", acc.plansDir(),
 		"lineCount", lineCount, "rejected", rejectedCount, "models", modelCounts)
 
 	return nil
 }
 
 // readNormalizedLine reads the next line from the reader, ensuring it ends with '\n'.
-// Returns (line, eof, err): line is the normalized bytes, eof is true when input is exhausted.
-func readNormalizedLine(r *bufio.Reader) ([]byte, bool, error) {
-	line, err := r.ReadBytes('\n')
+// streamBytes is the number of bytes consumed from the underlying stream (may differ from
+// len(line) for the last line in a file that has no trailing newline).
+func readNormalizedLine(r *bufio.Reader) (line []byte, streamBytes int, done bool, err error) {
+	line, err = r.ReadBytes('\n')
 	if err != nil && err != io.EOF {
-		return nil, false, err
+		return nil, 0, false, err
 	}
 	if len(line) == 0 && err == io.EOF {
-		return nil, true, nil
+		return nil, 0, true, nil
 	}
-	// if last line is not terminated with '\n', append '\n' to the line
+	streamBytes = len(line)
 	if line[len(line)-1] != '\n' {
 		line = append(line, '\n')
 	}
-	return line, false, nil
+	return line, streamBytes, false, nil
 }
 
 type requestMeta struct {

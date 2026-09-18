@@ -63,6 +63,14 @@ func (m *mockFilesClient) Delete(_ context.Context, _, _ string) error {
 	return nil
 }
 
+func (m *mockFilesClient) RetrieveRange(_ context.Context, _, _ string, _ int64, _ int64) (io.ReadCloser, error) {
+	m.retrieveCalls++
+	if m.retrieveCalls <= m.failUntil {
+		return nil, errors.New("transient retrieve range error")
+	}
+	return io.NopCloser(bytes.NewReader([]byte("data"))), nil
+}
+
 func (m *mockFilesClient) Close() error { return nil }
 
 func retryCfg() retry.Config {
@@ -190,6 +198,24 @@ func TestRetrieve_SucceedsAfterRetry(t *testing.T) {
 	defer rc.Close()
 	if meta.Size != 4 {
 		t.Fatalf("expected size 4, got %d", meta.Size)
+	}
+	if mock.retrieveCalls != 2 {
+		t.Fatalf("expected 2 retrieve calls, got %d", mock.retrieveCalls)
+	}
+}
+
+func TestRetrieveRange_SucceedsAfterRetry(t *testing.T) {
+	mock := &mockFilesClient{failUntil: 1}
+	c := New(mock, retryCfg(), "test")
+
+	rc, err := c.RetrieveRange(context.Background(), "f.txt", "folder", 0, 4)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer rc.Close()
+	data, _ := io.ReadAll(rc)
+	if string(data) != "data" {
+		t.Fatalf("expected %q, got %q", "data", string(data))
 	}
 	if mock.retrieveCalls != 2 {
 		t.Fatalf("expected 2 retrieve calls, got %d", mock.retrieveCalls)

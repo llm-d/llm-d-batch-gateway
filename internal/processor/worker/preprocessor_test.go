@@ -26,8 +26,7 @@ import (
 
 // -------------------------
 // Test 1: Ingestion
-// - local input.jsonl exact copy (line-by-line)
-// - plan offsets/lengths are correct (ReadAt matches original line bytes)
+// - plan offsets/lengths are correct (match remote input bytes)
 // - model_map.json consistency
 // -------------------------
 
@@ -107,20 +106,7 @@ func TestPreProcess_BuildsPlansAndModelMap_OffsetsCorrect(t *testing.T) {
 		t.Fatalf("preProcessJob: %v", err)
 	}
 
-	// 1) local input exists and equals remoteBuf
-	localInput, err := p.jobInputFilePath(jobID, tenantID)
-	if err != nil {
-		t.Fatalf("jobInputFilePath: %v", err)
-	}
-	gotLocal, err := os.ReadFile(localInput)
-	if err != nil {
-		t.Fatalf("read local input: %v", err)
-	}
-	if !bytes.Equal(gotLocal, remoteBuf.Bytes()) {
-		t.Fatalf("local input != remote input (bytes differ)")
-	}
-
-	// 2) model_map.json exists and is consistent
+	// 1) model_map.json exists and is consistent
 	jobRootDir, err := p.jobRootDir(jobID, tenantID)
 	if err != nil {
 		t.Fatalf("jobRootDir: %v", err)
@@ -146,12 +132,8 @@ func TestPreProcess_BuildsPlansAndModelMap_OffsetsCorrect(t *testing.T) {
 		}
 	}
 
-	// 3) plan files exist and offsets/length map back to exact original line bytes (ReadAt)
-	f, err := os.Open(localInput)
-	if err != nil {
-		t.Fatalf("open local input for ReadAt: %v", err)
-	}
-	defer f.Close()
+	// 2) plan files exist and offsets/length map back to exact original line bytes
+	remoteInput := remoteBuf.Bytes()
 
 	plansDir := filepath.Join(jobRootDir, "plans")
 	for safeID := range mm.SafeToModel {
@@ -161,9 +143,13 @@ func TestPreProcess_BuildsPlansAndModelMap_OffsetsCorrect(t *testing.T) {
 		}
 		entries := testReadPlanEntries(t, planPath)
 
-		// For each entry, read input.jsonl slice and ensure it is a valid JSON line ending with '\n'
+		// For each entry, verify offset/length against the remote input buffer
 		for _, e := range entries {
-			chunk := readAtExact(t, f, e.Offset, e.Length)
+			end := int64(e.Offset) + int64(e.Length)
+			if end > int64(len(remoteInput)) {
+				t.Fatalf("entry out of bounds: safeID=%q off=%d len=%d remoteLen=%d", safeID, e.Offset, e.Length, len(remoteInput))
+			}
+			chunk := remoteInput[e.Offset:end]
 			if len(chunk) == 0 || chunk[len(chunk)-1] != '\n' {
 				t.Fatalf("entry does not end with newline: safeID=%q off=%d len=%d", safeID, e.Offset, e.Length)
 			}
@@ -274,20 +260,14 @@ func TestPreProcess_SystemPrompts_PrefixHashAndSortOrder(t *testing.T) {
 	}
 
 	// Collect hashes to verify properties
+	remoteInput := remoteBuf.Bytes()
 	hashBySpec := make([]uint32, len(specs))
 	for i, e := range entries {
-		// Read actual line from local input to identify which spec it corresponds to
-		localInput, err := p.jobInputFilePath(jobID, tenantID)
-		if err != nil {
-			t.Fatalf("jobInputFilePath: %v", err)
+		end := int64(e.Offset) + int64(e.Length)
+		if end > int64(len(remoteInput)) {
+			t.Fatalf("entry out of bounds: off=%d len=%d remoteLen=%d", e.Offset, e.Length, len(remoteInput))
 		}
-		f, err := os.Open(localInput)
-		if err != nil {
-			t.Fatalf("open local input: %v", err)
-		}
-		chunk := readAtExact(t, f, e.Offset, e.Length)
-		f.Close()
-		_ = chunk
+		_ = remoteInput[e.Offset:end]
 		hashBySpec[i] = e.PrefixHash
 	}
 
