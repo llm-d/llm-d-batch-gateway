@@ -161,5 +161,5 @@ Use that only on **ephemeral or dedicated** demo clusters. See [issue #309](http
 | `ENABLE_FLOW_CONTROL` | `true` | Enable GIE priority-based flow control |
 | `BATCH_FLOW_CONTROL_OBJECTIVE` | `batch-sheddable` | InferenceObjective name for batch requests (priority -1) |
 | `ENABLE_DISPATCHER` | `false` | Use normal HTTP sync dispatch by default; set `true` to deploy llm-d-async and Prometheus for async dispatch |
-| `DISPATCHER_VERSION` | `v0.7.3` | llm-d-async version (image tag and chart version) |
+| `DISPATCHER_VERSION` | `v0.9.1` | llm-d-async version (image tag and chart version) |
 | `UNINSTALL_ALL` | `0` | Set to `1` to remove Kuadrant, Istio, cert-manager, CRDs (ephemeral clusters only) |
