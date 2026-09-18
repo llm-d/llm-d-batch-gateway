@@ -1,6 +1,8 @@
 FROM quay.io/projectquay/golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
+# Extra Go build tags (e.g. "failpoints" for the consistency simulation harness).
+ARG GO_BUILD_TAGS=""
 
 WORKDIR /workspace
 COPY go.mod go.mod
@@ -11,7 +13,7 @@ COPY cmd/batch-gc/ cmd/batch-gc/
 COPY internal/ internal/
 COPY pkg/ pkg/
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o bin/batch-gateway-gc ./cmd/batch-gc
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -tags "${GO_BUILD_TAGS}" -o bin/batch-gateway-gc ./cmd/batch-gc
 
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
