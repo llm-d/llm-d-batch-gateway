@@ -36,12 +36,6 @@ jobs:
             db_client_type: postgresql
             exchange_client_type: valkey
           - file_client_type: s3
-            db_client_type: redis
-            exchange_client_type: redis
-          - file_client_type: s3
-            db_client_type: valkey
-            exchange_client_type: valkey
-          - file_client_type: s3
             db_client_type: postgresql
             exchange_client_type: redis
             enable_gie: "true"
