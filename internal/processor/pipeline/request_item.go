@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -33,6 +34,9 @@ type ResultItem struct {
 	Error            *OutputError
 	HadCapacityRetry bool
 	SubmittedAt      time.Time
+	// Ack is non-nil for a leased Async result. The collector invokes it only
+	// after the result is durably accepted.
+	Ack func(context.Context) error
 }
 
 func (r *RequestItem) Canceled() *ResultItem {

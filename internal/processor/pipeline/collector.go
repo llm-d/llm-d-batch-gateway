@@ -37,6 +37,7 @@ type ResultCollector struct {
 	tracker              *ProgressTracker
 	logger               logr.Logger
 	onPersistenceFailure func()
+	checkpoint           func(context.Context, string, []byte) error
 }
 
 func NewResultCollector(outputFile, errorFile *os.File, pending *PendingRequests, tracker *ProgressTracker, logger logr.Logger) *ResultCollector {
@@ -44,6 +45,12 @@ func NewResultCollector(outputFile, errorFile *os.File, pending *PendingRequests
 	errors := bufio.NewWriterSize(errorFile, fileBufferSize)
 
 	return &ResultCollector{output: output, errors: errors, pending: pending, tracker: tracker, logger: logger}
+}
+
+// SetCheckpoint installs the durable result checkpoint used by resumable
+// batches. It must return only after the result can survive processor loss.
+func (c *ResultCollector) SetCheckpoint(checkpoint func(context.Context, string, []byte) error) {
+	c.checkpoint = checkpoint
 }
 
 // Drain reads results until resultCh is closed, then flushes.
@@ -67,7 +74,7 @@ func (c *ResultCollector) Drain(ctx context.Context, resultCh <-chan ResultItem)
 		if firstErr != nil {
 			continue
 		}
-		if err := c.Receive(msg); err != nil {
+		if err := c.Receive(ctx, msg); err != nil {
 			firstErr = err
 			c.logger.Error(err, "Persistence failure, skipping further writes")
 			if c.onPersistenceFailure != nil {
@@ -87,7 +94,7 @@ func (c *ResultCollector) Drain(ctx context.Context, resultCh <-chan ResultItem)
 	return nil
 }
 
-func (c *ResultCollector) Receive(msg ResultItem) error {
+func (c *ResultCollector) Receive(ctx context.Context, msg ResultItem) error {
 	line := &outputLine{
 		ID:       msg.RequestID,
 		CustomID: msg.CustomID,
@@ -101,12 +108,28 @@ func (c *ResultCollector) Receive(msg ResultItem) error {
 	}
 	lineBytes = append(lineBytes, '\n')
 
+	if c.checkpoint != nil {
+		if err := c.checkpoint(ctx, msg.RequestID, lineBytes); err != nil {
+			return fmt.Errorf("checkpoint output for %s: %w", msg.RequestID, err)
+		}
+		if msg.Ack != nil {
+			if err := msg.Ack(ctx); err != nil {
+				return fmt.Errorf("ack output for %s: %w", msg.RequestID, err)
+			}
+		}
+	}
+
 	w := c.output
 	if line.Error != nil {
 		w = c.errors
 	}
 	if _, err := w.Write(lineBytes); err != nil {
 		return fmt.Errorf("write output for %s: %w", msg.RequestID, err)
+	}
+	if c.checkpoint == nil && msg.Ack != nil {
+		if err := msg.Ack(ctx); err != nil {
+			return fmt.Errorf("ack output for %s: %w", msg.RequestID, err)
+		}
 	}
 
 	if line.isSuccess() {

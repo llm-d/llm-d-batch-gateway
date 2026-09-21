@@ -158,6 +158,10 @@ type ProcessorConfig struct {
 	// ExtraEndpoints adds deployment-specific inference paths to the default OpenAI endpoint allowlist.
 	ExtraEndpoints []string `yaml:"extra_endpoints"`
 
+	// ResumableRecovery enables the PostgreSQL durable manifest/checkpoint path.
+	// Milestone 1 is intentionally limited to one worker and one Async model.
+	ResumableRecovery bool `yaml:"resumable_recovery"`
+
 	// TaskWaitTime is the timeout parameter used when dequeueing from the priority queue
 	// This should be shorter than PollInterval
 	TaskWaitTime time.Duration `yaml:"task_wait_time"`
@@ -467,6 +471,20 @@ func (c *ProcessorConfig) Validate() error {
 
 	if err := c.validateGateways(); err != nil {
 		return err
+	}
+	if c.ResumableRecovery {
+		if c.DBClientCfg.Type != sharedcfg.DBTypePostgreSQL {
+			return fmt.Errorf("resumable_recovery requires a PostgreSQL database")
+		}
+		if c.DispatchMode != DispatchModeAsync {
+			return fmt.Errorf("resumable_recovery requires dispatch_mode %q", DispatchModeAsync)
+		}
+		if c.NumWorkers != 1 {
+			return fmt.Errorf("resumable_recovery requires num_workers=1")
+		}
+		if len(c.AsyncDispatchConfig.Models) != 1 {
+			return fmt.Errorf("resumable_recovery requires exactly one async model queue")
+		}
 	}
 
 	return nil
