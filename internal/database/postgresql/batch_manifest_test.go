@@ -54,7 +54,7 @@ func TestActivateResumableBatch(t *testing.T) {
 		item.Epoch = 7
 		item.Status = newStatus
 
-		mock.ExpectQuery("(?s)WITH activated AS.*INSERT INTO batch_manifests").
+		mock.ExpectQuery("(?s)WITH candidate AS.*INSERT INTO batch_manifests.*UPDATE batch_items").
 			WithArgs(newStatus, item.ID, item.ProcessorID, item.Epoch, oldStatus, api.BatchManifestVersion, pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"batch_id"}).AddRow(item.ID))
 
@@ -75,7 +75,7 @@ func TestActivateResumableBatch(t *testing.T) {
 		item.Epoch = 7
 		item.Status = newStatus
 
-		mock.ExpectQuery("(?s)WITH activated AS.*INSERT INTO batch_manifests").
+		mock.ExpectQuery("(?s)WITH candidate AS.*INSERT INTO batch_manifests.*UPDATE batch_items").
 			WithArgs(newStatus, item.ID, item.ProcessorID, item.Epoch, oldStatus, api.BatchManifestVersion, pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"batch_id"}))
 

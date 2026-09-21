@@ -28,8 +28,8 @@ import (
 var _ api.ResumableBatchStore = (*PostgresBatchDBClient)(nil)
 
 // ActivateResumableBatch commits the immutable dispatch manifest and activates
-// recovery in one PostgreSQL statement. If any ownership precondition fails,
-// neither the manifest nor the status transition is persisted.
+// recovery in one PostgreSQL statement. The eligible row lock makes the manifest
+// insert and status transition indivisible from competing ownership mutations.
 func (c *PostgresBatchDBClient) ActivateResumableBatch(
 	ctx context.Context,
 	item *api.BatchItem,
@@ -60,22 +60,30 @@ func (c *PostgresBatchDBClient) ActivateResumableBatch(
 	}
 
 	const query = `
-WITH activated AS (
-    UPDATE batch_items
-       SET status = $1,
-           resumable = TRUE
-     WHERE id = $2
-       AND processor_id = $3
-       AND epoch = $4
-       AND status = $5
-       AND resumable = FALSE
- RETURNING id, epoch
+WITH candidate AS (
+		SELECT id, epoch
+			FROM batch_items
+		 WHERE id = $2
+			 AND processor_id = $3
+			 AND epoch = $4
+			 AND status = $5
+			 AND resumable = FALSE
+			 AND NOT EXISTS (SELECT 1 FROM batch_manifests WHERE batch_id = $2)
+		 FOR UPDATE
+), manifested AS (
+		INSERT INTO batch_manifests (batch_id, version, owner_epoch, entries)
+		SELECT id, $6, epoch, $7::jsonb
+			FROM candidate
+		RETURNING batch_id
+), activated AS (
+		UPDATE batch_items
+			 SET status = $1,
+					 resumable = TRUE
+			FROM manifested
+		 WHERE batch_items.id = manifested.batch_id
+		RETURNING batch_items.id
 )
-INSERT INTO batch_manifests (batch_id, version, owner_epoch, entries)
-SELECT id, $6, epoch, $7::jsonb
-  FROM activated
-ON CONFLICT (batch_id) DO NOTHING
-RETURNING batch_id`
+SELECT id FROM activated`
 
 	var activatedID string
 	if err := c.pool.QueryRow(ctx, query,
