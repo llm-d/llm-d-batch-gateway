@@ -56,3 +56,16 @@ func TestBuildBatchManifestRejectsDuplicateCustomID(t *testing.T) {
 		t.Fatal("expected duplicate custom_id error")
 	}
 }
+
+func TestStableBatchFileID(t *testing.T) {
+	output := stableBatchFileID("batch-1", "output")
+	if output != stableBatchFileID("batch-1", "output") {
+		t.Fatal("stable file ID changed across retries")
+	}
+	if output == stableBatchFileID("batch-1", "error") {
+		t.Fatal("output and error artifacts share an ID")
+	}
+	if !strings.HasPrefix(output, "file_") {
+		t.Fatalf("file ID %q does not use the Files API prefix", output)
+	}
+}
