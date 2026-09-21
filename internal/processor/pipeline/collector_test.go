@@ -99,6 +99,42 @@ func TestResultCollector_DrainSkipsUnknownPending(t *testing.T) {
 	}
 }
 
+func TestResultCollector_CheckpointsBeforeAck(t *testing.T) {
+	outputFile := tempFile(t)
+	errorFile := tempFile(t)
+	pending := NewPendingRequests(0)
+	tracker := NewProgressTracker(1, nil, "test-job", 0, logr.Discard())
+	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+
+	var order []string
+	collector.SetCheckpoint(func(_ context.Context, requestID string, result []byte) error {
+		order = append(order, "checkpoint")
+		if requestID != "req-1" || len(result) == 0 {
+			t.Fatalf("unexpected checkpoint: %q %q", requestID, result)
+		}
+		return nil
+	})
+	pending.Store(RequestItem{RequestID: "req-1", CustomID: "c-1"})
+	ch := make(chan ResultItem, 1)
+	ch <- ResultItem{
+		RequestID: "req-1",
+		CustomID:  "c-1",
+		Response:  &batch_types.ResponseData{StatusCode: 200, RequestID: "req-1", Body: map[string]any{"ok": true}},
+		Ack: func(context.Context) error {
+			order = append(order, "ack")
+			return nil
+		},
+	}
+	close(ch)
+
+	if err := collector.Drain(context.Background(), ch); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if fmt.Sprint(order) != "[checkpoint ack]" {
+		t.Fatalf("order=%v, want checkpoint before ack", order)
+	}
+}
+
 func TestResultCollector_DrainProcessesAllResultsAfterCancel(t *testing.T) {
 	outputFile := tempFile(t)
 	errorFile := tempFile(t)

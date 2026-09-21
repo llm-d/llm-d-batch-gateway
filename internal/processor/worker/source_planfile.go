@@ -22,6 +22,8 @@ import (
 
 // PlanFileSource reads plan files and input JSONL to produce RequestItems.
 type PlanFileSource struct {
+	batchID            string
+	stableRequestIDs   bool
 	inputFile          *os.File
 	plansDir           string
 	modelMap           *modelMapFile
@@ -31,11 +33,14 @@ type PlanFileSource struct {
 	sloDeadline        time.Time
 	tenantID           string
 	logger             logr.Logger
+	completedIDs       map[string]bool
 }
 
 var _ pipeline.RequestSource = (*PlanFileSource)(nil)
 
 type PlanFileSourceConfig struct {
+	BatchID            string
+	StableRequestIDs   bool
 	InputFile          *os.File
 	PlansDir           string
 	ModelMap           *modelMapFile
@@ -45,10 +50,13 @@ type PlanFileSourceConfig struct {
 	SLODeadline        time.Time
 	TenantID           string
 	Logger             logr.Logger
+	CompletedIDs       map[string]bool
 }
 
 func NewPlanFileSource(cfg PlanFileSourceConfig) *PlanFileSource {
 	return &PlanFileSource{
+		batchID:            cfg.BatchID,
+		stableRequestIDs:   cfg.StableRequestIDs,
 		inputFile:          cfg.InputFile,
 		plansDir:           cfg.PlansDir,
 		modelMap:           cfg.ModelMap,
@@ -58,6 +66,7 @@ func NewPlanFileSource(cfg PlanFileSourceConfig) *PlanFileSource {
 		sloDeadline:        cfg.SLODeadline,
 		tenantID:           cfg.TenantID,
 		logger:             cfg.Logger,
+		completedIDs:       cfg.CompletedIDs,
 	}
 }
 
@@ -80,7 +89,9 @@ func (s *PlanFileSource) Produce(_ context.Context, outgoingRequestCh chan<- pip
 			if err != nil {
 				return err
 			}
-			outgoingRequestCh <- *item
+			if item != nil {
+				outgoingRequestCh <- *item
+			}
 		}
 	}
 
@@ -117,8 +128,15 @@ func (s *PlanFileSource) readEntry(entry planEntry, modelID string) (*pipeline.R
 	headers := maps.Clone(s.passThroughHeaders)
 	headers = s.mergeHeaders(headers, lookupID)
 
+	requestID := fmt.Sprintf("batch_req_%s", uuid.NewString())
+	if s.stableRequestIDs {
+		requestID = stableBatchRequestID(s.batchID, req.CustomID)
+	}
+	if s.completedIDs[requestID] {
+		return nil, nil
+	}
 	return &pipeline.RequestItem{
-		RequestID: fmt.Sprintf("batch_req_%s", uuid.NewString()),
+		RequestID: requestID,
 		CustomID:  req.CustomID,
 		ModelID:   lookupID,
 		Endpoint:  req.URL,

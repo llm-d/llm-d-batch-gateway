@@ -34,6 +34,24 @@ CREATE TABLE IF NOT EXISTS batch_manifests (
     CHECK (jsonb_typeof(entries) = 'array')
 );
 
+CREATE TABLE IF NOT EXISTS batch_request_attempts (
+    batch_id      TEXT NOT NULL REFERENCES batch_items(id) ON DELETE CASCADE,
+    request_id    TEXT NOT NULL,
+    attempt       INTEGER NOT NULL,
+    owner_epoch   BIGINT NOT NULL,
+    submitted_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (batch_id, request_id, attempt)
+);
+
+CREATE TABLE IF NOT EXISTS batch_result_checkpoints (
+    batch_id       TEXT NOT NULL REFERENCES batch_items(id) ON DELETE CASCADE,
+    request_id     TEXT NOT NULL,
+    owner_epoch    BIGINT NOT NULL,
+    result         JSONB NOT NULL,
+    checkpointed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (batch_id, request_id)
+);
+
 -- Schema migration for existing tables from previous versions.
 ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS processor_id TEXT;
 ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS priority BIGINT;

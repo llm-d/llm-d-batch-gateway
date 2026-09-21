@@ -112,14 +112,6 @@ func (p *Processor) Run(ctx context.Context, onReady func()) error {
 		return err
 	}
 
-	if err := p.recoverOwnedJobs(ctx); err != nil {
-		return fmt.Errorf("startup recovery: %w", err)
-	}
-
-	if onReady != nil {
-		onReady()
-	}
-
 	// Two context branches:
 	//   pollingCtx — controls the polling loop; cancelled by semaphore guard or SIGTERM.
 	//   ctx (unchanged) — parent for job contexts; only cancelled by SIGTERM.
@@ -141,6 +133,14 @@ func (p *Processor) Run(ctx context.Context, onReady func()) error {
 		bs.Run(ctx)
 		defer bs.Wait()
 		p.broadcasters = bs
+	}
+
+	if err := p.recoverOwnedJobs(ctx); err != nil {
+		return fmt.Errorf("startup recovery: %w", err)
+	}
+
+	if onReady != nil {
+		onReady()
 	}
 
 	return p.runPollingLoop(pollingCtx, ctx)

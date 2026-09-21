@@ -175,10 +175,9 @@ func (p *Processor) recoverJobOnce(ctx context.Context, jobID string) error {
 		return nil
 	}
 	// The resumable writer and durable-manifest recovery path are introduced in
-	// later stages. Until then, fail closed rather than applying legacy recovery
-	// actions that may reset or terminalize resumable work.
+	// stages. Resumable rows never enter the legacy reset/fail paths.
 	if dbItem.Resumable {
-		return fmt.Errorf("%w for job %s", errResumableRecoveryUnavailable, jobID)
+		return p.recoverResumable(ctx, dbItem)
 	}
 
 	jobInfo, err := batch_utils.FromDBItemToJobInfoObject(dbItem)
@@ -230,6 +229,71 @@ func (p *Processor) recoverJobOnce(ctx context.Context, jobID string) error {
 		metrics.RecordCancellation(result.cancelPhase)
 	}
 	logger.V(logging.INFO).Info("Startup recovery: completed", "action", result.action)
+	return nil
+}
+
+func (p *Processor) recoverResumable(ctx context.Context, dbItem *db.BatchItem) error {
+	manifestStore, ok := p.batchDB.(db.ResumableBatchStore)
+	if !ok {
+		return fmt.Errorf("%w: manifest store unavailable", errResumableRecoveryUnavailable)
+	}
+	checkpointStore, ok := p.batchDB.(db.BatchCheckpointStore)
+	if !ok {
+		return fmt.Errorf("%w: checkpoint store unavailable", errResumableRecoveryUnavailable)
+	}
+	manifest, err := manifestStore.GetBatchManifest(ctx, dbItem.ID)
+	if err != nil {
+		return err
+	}
+	if manifest == nil {
+		return fmt.Errorf("%w: manifest missing for job %s", errResumableRecoveryUnavailable, dbItem.ID)
+	}
+	jobInfo, err := batch_utils.FromDBItemToJobInfoObject(dbItem)
+	if err != nil {
+		return err
+	}
+	if err := p.restoreManifestArtifacts(manifest, dbItem.TenantID); err != nil {
+		return fmt.Errorf("restore manifest: %w", err)
+	}
+
+	checkpoints, err := checkpointStore.BatchResultCheckpoints(ctx, dbItem.ID)
+	if err != nil {
+		return err
+	}
+	completed := make(map[string]bool, len(checkpoints))
+	var succeeded, failed int64
+	for _, checkpoint := range checkpoints {
+		completed[checkpoint.RequestID] = true
+		var line struct {
+			Response *struct {
+				StatusCode int `json:"status_code"`
+			} `json:"response"`
+			Error any `json:"error"`
+		}
+		if json.Unmarshal(checkpoint.Result, &line) == nil && line.Error == nil && line.Response != nil && line.Response.StatusCode == 200 {
+			succeeded++
+		} else {
+			failed++
+		}
+	}
+
+	params := &jobExecutionParams{
+		updater:       p.updater,
+		jobItem:       dbItem,
+		jobInfo:       jobInfo,
+		completedIDs:  completed,
+		recoveredOK:   succeeded,
+		recoveredFail: failed,
+	}
+	counts, err := p.executeJobAsync(ctx, params)
+	if err != nil {
+		return err
+	}
+	if err := p.finalizeJob(ctx, p.updater, dbItem, jobInfo, counts); err != nil {
+		return err
+	}
+	p.cleanupJobArtifacts(context.Background(), dbItem.ID, dbItem.TenantID)
+	metrics.RecordStartupRecovery(string(openai.BatchStatusInProgress), recoveryActionFinalized)
 	return nil
 }
 

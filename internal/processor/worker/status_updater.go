@@ -90,6 +90,48 @@ func (s *StatusUpdater) UpdatePersistentStatus(
 	return s.updatePersistentStatus(ctx, dbJob, newStatus, counts, slo, nil, modifiers...)
 }
 
+// ActivateResumable persists a complete manifest and the in_progress status in
+// one ownership-fenced PostgreSQL statement. No dispatch may occur before it
+// returns successfully.
+func (s *StatusUpdater) ActivateResumable(
+	ctx context.Context,
+	dbJob *db.BatchItem,
+	manifest *db.BatchManifest,
+) error {
+	store, ok := s.db.(db.ResumableBatchStore)
+	if !ok {
+		return fmt.Errorf("database does not support resumable manifests")
+	}
+	if dbJob == nil || len(dbJob.Status) == 0 {
+		return fmt.Errorf("dbJob with status is required")
+	}
+	var original openai.BatchStatusInfo
+	if err := json.Unmarshal(dbJob.Status, &original); err != nil {
+		return err
+	}
+	updated, err := batch_utils.BuildUpdatedStatusInfo(&original, openai.BatchStatusInProgress, nil, nil)
+	if err != nil {
+		return err
+	}
+	statusBytes, err := json.Marshal(updated)
+	if err != nil {
+		return err
+	}
+	expectedStatus := append([]byte(nil), dbJob.Status...)
+	activation := &db.BatchItem{
+		BaseIndexes:  db.BaseIndexes{ID: dbJob.ID},
+		BaseContents: db.BaseContents{Status: statusBytes},
+		ProcessorID:  dbJob.ProcessorID,
+		Epoch:        dbJob.Epoch,
+	}
+	if err := store.ActivateResumableBatch(ctx, activation, expectedStatus, manifest); err != nil {
+		return err
+	}
+	dbJob.Status = statusBytes
+	dbJob.Resumable = true
+	return nil
+}
+
 func (s *StatusUpdater) updatePersistentStatus(
 	ctx context.Context,
 	dbJob *db.BatchItem,
