@@ -12,3 +12,22 @@ type AsyncInferenceClient interface {
 	Cancel(ctx context.Context, ids []string) error
 	Close() error
 }
+
+// DurableGenerateResult keeps the Async lease opaque while allowing the
+// consumer to checkpoint the translated response before acknowledgement.
+type DurableGenerateResult struct {
+	Response *GenerateResponse
+	ack      func(context.Context) error
+}
+
+func (r *DurableGenerateResult) Ack(ctx context.Context) error {
+	return r.ack(ctx)
+}
+
+// DurableAsyncInferenceClient is an additive capability backed by
+// producer.DurableResultProducer in llm-d-async v0.10.0 and newer.
+type DurableAsyncInferenceClient interface {
+	AsyncInferenceClient
+	SupportsDurableResults() bool
+	ReceiveResult(ctx context.Context) (*DurableGenerateResult, error)
+}

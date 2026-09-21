@@ -66,14 +66,32 @@ func (b *ResultBroadcaster) Unsubscribe(dest chan<- ResultItem) {
 
 // Run reads results and broadcasts to all subscribers.
 func (b *ResultBroadcaster) Run(ctx context.Context) {
-	incomingCh := make(chan *inference.GenerateResponse)
+	type incomingResult struct {
+		response *inference.GenerateResponse
+		ack      func(context.Context) error
+	}
+	incomingCh := make(chan incomingResult)
 
 	go func() {
 		defer close(incomingCh)
 		backoff := 100 * time.Millisecond
 		const maxBackoff = 10 * time.Second
 		for ctx.Err() == nil {
-			resp, err := b.client.GetResult(ctx)
+			var (
+				resp *inference.GenerateResponse
+				ack  func(context.Context) error
+				err  error
+			)
+			if durable, ok := b.client.(inference.DurableAsyncInferenceClient); ok && durable.SupportsDurableResults() {
+				var delivery *inference.DurableGenerateResult
+				delivery, err = durable.ReceiveResult(ctx)
+				if err == nil {
+					resp = delivery.Response
+					ack = delivery.Ack
+				}
+			} else {
+				resp, err = b.client.GetResult(ctx)
+			}
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -89,7 +107,7 @@ func (b *ResultBroadcaster) Run(ctx context.Context) {
 			}
 			backoff = 100 * time.Millisecond
 			select {
-			case incomingCh <- resp:
+			case incomingCh <- incomingResult{response: resp, ack: ack}:
 			case <-ctx.Done():
 				return
 			}
@@ -101,11 +119,12 @@ func (b *ResultBroadcaster) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 
-		case resp, ok := <-incomingCh:
+		case incoming, ok := <-incomingCh:
 			if !ok {
 				return
 			}
-			result := asyncResult(resp, b.logger)
+			result := asyncResult(incoming.response, b.logger)
+			result.Ack = incoming.ack
 
 			for _, ch := range b.subscribers.Keys() {
 				b.safeChannelSend(result, ch)
