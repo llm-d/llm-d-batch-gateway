@@ -631,7 +631,7 @@ EOVLLMSVC
         --set "ap.image.tag=${DISPATCHER_IMAGE_TAG}" \
         --set ap.transport=redis-sortedset \
         --set ap.concurrency=1 \
-        --set-json "ap.transportConfig={\"urlSecret\":{\"url\":\"redis://redis-master.${NAMESPACE}.svc.cluster.local:6379\"},\"result_queue_name\":\"result-list\",\"poll_interval_ms\":500,\"batch_size\":10,\"queues\":[{\"queue_name\":\"llm-d-async:requests:${ASYNC_POOL_NAME}\",\"result_queue_name\":\"llm-d-async:results:${ASYNC_POOL_NAME}\",\"request_path_url\":\"/v1/chat/completions\",\"igw_base_url\":\"${ASYNC_IGW_URL}\",\"gate_type\":\"endpoint-scrape\",\"gate_params\":{\"url\":\"${ASYNC_METRICS_URL}\",\"metric\":\"vllm:num_requests_waiting\",\"max_count_per_pod\":\"5\",\"fallback\":\"1.0\"}}]}" \
+        --set-json "ap.transportConfig={\"urlSecret\":{\"url\":\"redis://redis-master.${NAMESPACE}.svc.cluster.local:6379\"},\"result_queue_name\":\"result-list\",\"poll_interval_ms\":500,\"batch_size\":10,\"queues\":[{\"queue_name\":\"llm-d-async:requests:${ASYNC_POOL_NAME}\",\"request_path_url\":\"/v1/chat/completions\",\"igw_base_url\":\"${ASYNC_IGW_URL}\",\"gate_type\":\"endpoint-scrape\",\"gate_params\":{\"url\":\"${ASYNC_METRICS_URL}\",\"metric\":\"vllm:num_requests_waiting\",\"max_count_per_pod\":\"5\",\"fallback\":\"1.0\"}}]}" \
         --set ap.modelServerMonitor.enabled=false \
         --set ap.metrics.enabled=true \
         --set ap.metrics.port=9091 \
