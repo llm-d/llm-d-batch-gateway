@@ -25,6 +25,15 @@ CREATE TABLE IF NOT EXISTS batch_items (
     resumable     BOOLEAN NOT NULL DEFAULT FALSE
 );
 
+CREATE TABLE IF NOT EXISTS batch_manifests (
+    batch_id      TEXT PRIMARY KEY REFERENCES batch_items(id) ON DELETE CASCADE,
+    version       INTEGER NOT NULL,
+    owner_epoch   BIGINT NOT NULL,
+    entries       JSONB NOT NULL,
+    completed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (jsonb_typeof(entries) = 'array')
+);
+
 -- Schema migration for existing tables from previous versions.
 ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS processor_id TEXT;
 ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS priority BIGINT;
