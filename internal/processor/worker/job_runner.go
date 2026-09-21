@@ -262,6 +262,11 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 			metrics.RecordJobProcessingDuration(time.Since(jobStart), metrics.GetSizeBucket(int(requestCounts.Total)))
 			recordE2ELatency(params.jobInfo, metrics.E2EStatusFailed)
 			metrics.RecordJobProcessed(metrics.ResultFailed, metrics.ReasonSystemError)
+		} else if params.jobItem.Resumable {
+			// Keep the fenced non-terminal row and durable checkpoints intact.
+			// Startup recovery can retry deterministic artifact publication; a
+			// terminal failure here would discard that recovery opportunity.
+			logger.Info("Leaving resumable job for startup finalization retry")
 		} else {
 			// Pre-upload failure (e.g. finalizing status write) — no file IDs exist yet.
 			if failErr := p.handleFailed(ctx, params.updater, params.jobItem, requestCounts, params.jobInfo); failErr != nil {

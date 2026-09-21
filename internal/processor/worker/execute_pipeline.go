@@ -216,7 +216,11 @@ func (p *Processor) openDataFiles(params *jobExecutionParams) (*dataFiles, error
 		inputFile.Close()
 		return nil, err
 	}
-	outputFile, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	outputFlags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	if params.resume {
+		outputFlags = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	}
+	outputFile, err := os.OpenFile(outputPath, outputFlags, 0o600)
 	if err != nil {
 		inputFile.Close()
 		return nil, fmt.Errorf("create output file: %w", err)

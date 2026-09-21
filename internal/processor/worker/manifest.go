@@ -35,6 +35,11 @@ func stableBatchRequestID(batchID, customID string) string {
 	return newBatchRequestID(uuid.NewSHA1(uuid.NameSpaceOID, name).String())
 }
 
+func stableBatchFileID(batchID string, fileType string) string {
+	name := []byte(batchID + "\x00" + fileType)
+	return "file_" + uuid.NewSHA1(uuid.NameSpaceOID, name).String()
+}
+
 // restoreManifestArtifacts recreates only the deterministic local execution
 // inputs. Result artifacts are rebuilt from durable checkpoints separately.
 func (p *Processor) restoreManifestArtifacts(manifest *db.BatchManifest, tenantID string) error {

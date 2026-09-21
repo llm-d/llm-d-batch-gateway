@@ -169,7 +169,7 @@ func (s *StatusUpdater) updatePersistentStatus(
 		return err
 	}
 
-	if err := s.db.DBUpdate(ctx, &db.BatchItem{
+	update := &db.BatchItem{
 		BaseIndexes: db.BaseIndexes{
 			ID: dbJob.ID,
 		},
@@ -177,11 +177,29 @@ func (s *StatusUpdater) updatePersistentStatus(
 			Status: statusBytes,
 		},
 		Epoch: dbJob.Epoch,
-	}, expectedStatus); err != nil {
-		return err
+	}
+	var updateErr error
+	if dbJob.Resumable && newStatus.IsTerminal() {
+		finalizer, ok := s.db.(db.ResumableBatchFinalizer)
+		if !ok {
+			return fmt.Errorf("database does not support resumable finalization")
+		}
+		if expectedStatus == nil {
+			expectedStatus = dbJob.Status
+		}
+		updateErr = finalizer.FinalizeResumableBatch(ctx, update, expectedStatus)
+	} else {
+		updateErr = s.db.DBUpdate(ctx, update, expectedStatus)
+	}
+	if updateErr != nil {
+		return updateErr
 	}
 
 	dbJob.Status = statusBytes
+	if dbJob.Resumable && newStatus.IsTerminal() {
+		dbJob.Resumable = false
+		dbJob.ProcessorID = ""
+	}
 
 	logger := logr.FromContextOrDiscard(ctx)
 	logger.V(logging.INFO).Info("Batch status updated successfully", "newStatus", newStatus)

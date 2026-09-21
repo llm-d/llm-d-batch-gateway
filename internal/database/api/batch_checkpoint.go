@@ -44,3 +44,11 @@ type BatchCheckpointStore interface {
 	BatchResultCheckpoints(ctx context.Context, batchID string) ([]*BatchResultCheckpoint, error)
 	CompletedBatchRequestIDs(ctx context.Context, batchID string) (map[string]bool, error)
 }
+
+// ResumableBatchFinalizer publishes a terminal status under the active owner
+// epoch and atomically removes the resumable ownership marker. Implementations
+// must treat an identical already-published terminal status as success so an
+// ambiguous database response is safe to retry.
+type ResumableBatchFinalizer interface {
+	FinalizeResumableBatch(ctx context.Context, batch *BatchItem, expectedStatus []byte) error
+}

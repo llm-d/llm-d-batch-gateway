@@ -260,6 +260,9 @@ func (p *Processor) recoverResumable(ctx context.Context, dbItem *db.BatchItem) 
 	if err != nil {
 		return err
 	}
+	if err := p.restoreCheckpointArtifacts(manifest, checkpoints, dbItem.TenantID); err != nil {
+		return fmt.Errorf("restore result checkpoints: %w", err)
+	}
 	completed := make(map[string]bool, len(checkpoints))
 	var succeeded, failed int64
 	for _, checkpoint := range checkpoints {
@@ -284,6 +287,7 @@ func (p *Processor) recoverResumable(ctx context.Context, dbItem *db.BatchItem) 
 		completedIDs:  completed,
 		recoveredOK:   succeeded,
 		recoveredFail: failed,
+		resume:        true,
 	}
 	counts, err := p.executeJobAsync(ctx, params)
 	if err != nil {
@@ -295,6 +299,72 @@ func (p *Processor) recoverResumable(ctx context.Context, dbItem *db.BatchItem) 
 	p.cleanupJobArtifacts(context.Background(), dbItem.ID, dbItem.TenantID)
 	metrics.RecordStartupRecovery(string(openai.BatchStatusInProgress), recoveryActionFinalized)
 	return nil
+}
+
+// restoreCheckpointArtifacts reconstructs local JSONL files in manifest order.
+// Checkpoints are authoritative: execution skips these request IDs, so omitting
+// them here would silently publish an incomplete batch artifact after takeover.
+func (p *Processor) restoreCheckpointArtifacts(manifest *db.BatchManifest, checkpoints []*db.BatchResultCheckpoint, tenantID string) error {
+	byRequestID := make(map[string][]byte, len(checkpoints))
+	for _, checkpoint := range checkpoints {
+		if checkpoint == nil || checkpoint.RequestID == "" || len(checkpoint.Result) == 0 {
+			return fmt.Errorf("invalid result checkpoint")
+		}
+		byRequestID[checkpoint.RequestID] = checkpoint.Result
+	}
+
+	outputPath, err := p.jobOutputFilePath(manifest.BatchID, tenantID)
+	if err != nil {
+		return err
+	}
+	errorPath, err := p.jobErrorFilePath(manifest.BatchID, tenantID)
+	if err != nil {
+		return err
+	}
+	outputFile, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer outputFile.Close()
+	errorFile, err := os.OpenFile(errorPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer errorFile.Close()
+
+	seen := 0
+	for _, entry := range manifest.Entries {
+		line, ok := byRequestID[entry.RequestID]
+		if !ok {
+			continue
+		}
+		var envelope struct {
+			Error any `json:"error"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil {
+			return fmt.Errorf("decode checkpoint %s: %w", entry.RequestID, err)
+		}
+		target := outputFile
+		if envelope.Error != nil {
+			target = errorFile
+		}
+		if _, err := target.Write(line); err != nil {
+			return fmt.Errorf("write checkpoint %s: %w", entry.RequestID, err)
+		}
+		if len(line) == 0 || line[len(line)-1] != '\n' {
+			if _, err := target.Write([]byte{'\n'}); err != nil {
+				return fmt.Errorf("terminate checkpoint %s: %w", entry.RequestID, err)
+			}
+		}
+		seen++
+	}
+	if seen != len(byRequestID) {
+		return fmt.Errorf("%d checkpoints are not present in the manifest", len(byRequestID)-seen)
+	}
+	if err := outputFile.Sync(); err != nil {
+		return err
+	}
+	return errorFile.Sync()
 }
 
 // ---------------------------------------------------------------------------

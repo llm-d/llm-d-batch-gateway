@@ -26,6 +26,40 @@ import (
 )
 
 var _ api.BatchCheckpointStore = (*PostgresBatchDBClient)(nil)
+var _ api.ResumableBatchFinalizer = (*PostgresBatchDBClient)(nil)
+
+func (c *PostgresBatchDBClient) FinalizeResumableBatch(ctx context.Context, batch *api.BatchItem, expectedStatus []byte) error {
+	if batch == nil || batch.ID == "" || batch.Epoch <= 0 || len(batch.Status) == 0 || len(expectedStatus) == 0 {
+		return fmt.Errorf("valid resumable batch finalization is required")
+	}
+	const query = `
+UPDATE batch_items
+   SET status = $4::jsonb, resumable = FALSE, processor_id = NULL
+ WHERE id = $1 AND epoch = $2 AND resumable = TRUE AND status = $3::jsonb`
+	tag, err := c.pool.Exec(ctx, query, batch.ID, batch.Epoch, expectedStatus, batch.Status)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+
+	// The UPDATE may have committed even if its response was lost. Accept only
+	// the exact terminal value at the same epoch with ownership already cleared.
+	var alreadyFinalized bool
+	if err := c.pool.QueryRow(ctx, `
+SELECT EXISTS(
+    SELECT 1 FROM batch_items
+     WHERE id = $1 AND epoch = $2 AND resumable = FALSE
+       AND processor_id IS NULL AND status = $3::jsonb
+)`, batch.ID, batch.Epoch, batch.Status).Scan(&alreadyFinalized); err != nil {
+		return err
+	}
+	if alreadyFinalized {
+		return nil
+	}
+	return fmt.Errorf("FinalizeResumableBatch: %w", api.ErrConflict)
+}
 
 func (c *PostgresBatchDBClient) RecordBatchRequestAttempt(ctx context.Context, attempt *api.BatchRequestAttempt) error {
 	if attempt == nil || attempt.BatchID == "" || attempt.RequestID == "" || attempt.Attempt <= 0 {

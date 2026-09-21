@@ -50,6 +50,50 @@ func newRecoveryTestProcessor(t *testing.T, workDir string) (*Processor, db.Batc
 	return p, batchDB, spyQueue
 }
 
+func TestRestoreCheckpointArtifactsUsesManifestOrder(t *testing.T) {
+	p, _, _ := newRecoveryTestProcessor(t, t.TempDir())
+	manifest := &db.BatchManifest{
+		BatchID: "batch-checkpoint-restore",
+		Version: db.BatchManifestVersion,
+		Entries: []db.BatchManifestEntry{
+			{Ordinal: 0, RequestID: "request-a"},
+			{Ordinal: 1, RequestID: "request-b"},
+			{Ordinal: 2, RequestID: "request-c"},
+		},
+	}
+	jobRoot, err := p.jobRootDir(manifest.BatchID, "tenant-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(jobRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	checkpoints := []*db.BatchResultCheckpoint{
+		{RequestID: "request-c", Result: json.RawMessage(`{"id":"request-c","response":{"status_code":200},"error":null}`)},
+		{RequestID: "request-a", Result: json.RawMessage(`{"id":"request-a","response":{"status_code":200},"error":null}`)},
+		{RequestID: "request-b", Result: json.RawMessage(`{"id":"request-b","response":null,"error":{"code":"failed"}}`)},
+	}
+	if err := p.restoreCheckpointArtifacts(manifest, checkpoints, "tenant-1"); err != nil {
+		t.Fatalf("restoreCheckpointArtifacts: %v", err)
+	}
+	outputPath, _ := p.jobOutputFilePath(manifest.BatchID, "tenant-1")
+	output, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(output), string(checkpoints[1].Result)+"\n"+string(checkpoints[0].Result)+"\n"; got != want {
+		t.Fatalf("output artifact = %q, want manifest order %q", got, want)
+	}
+	errorPath, _ := p.jobErrorFilePath(manifest.BatchID, "tenant-1")
+	errorOutput, err := os.ReadFile(errorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(errorOutput), string(checkpoints[2].Result)+"\n"; got != want {
+		t.Fatalf("error artifact = %q, want %q", got, want)
+	}
+}
+
 func seedDBJobWithStatus(t *testing.T, dbClient db.BatchDBClient, jobID, tenantID string, status openai.BatchStatus, counts *openai.BatchRequestCounts) {
 	t.Helper()
 

@@ -43,4 +43,5 @@ type jobExecutionParams struct {
 	completedIDs  map[string]bool
 	recoveredOK   int64
 	recoveredFail int64
+	resume        bool
 }
