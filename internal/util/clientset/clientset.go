@@ -141,7 +141,9 @@ func WithFile(cfg sharedcfg.FileClientConfig) Option {
 	return func(c *clientsetConfig) { c.fileCfg = &cfg }
 }
 
-// WithExchange enables creation of the Redis exchange client (Queue, Event, Status).
+// WithExchange configures the Redis exchange fallback and supplies the Redis
+// endpoint used by async inference. PostgreSQL-backed control-plane clients
+// take precedence when a PostgreSQL database is configured.
 func WithExchange(cfg uredis.RedisClientConfig) Option {
 	cfg = cfg.DeepCopy()
 	return func(c *clientsetConfig) { c.exchangeRedisCfg = &cfg }
@@ -186,28 +188,6 @@ func NewClientset(ctx context.Context, component ucom.Component, opts ...Option)
 			}
 		}
 	}()
-
-	// build redis exchange client
-	if cfg.exchangeRedisCfg != nil {
-		// TODO: The exchange interfaces (priority queue, events, status) currently always use Redis.
-		// Consider adding a separate type parameter for these if we need alternative backends.
-		// See: https://github.com/llm-d/llm-d-batch-gateway/pull/102#discussion_r2906181334
-		if cfg.exchangeRedisCfg.Url == "" {
-			redisURL, err := ucom.ReadSecretFile(ucom.SecretKeyRedisURL)
-			if err != nil {
-				return nil, err
-			}
-			cfg.exchangeRedisCfg.Url = redisURL
-		}
-		redisClient, err := dbRedis.NewExchangeDBClientRedis(ctx, nil, cfg.exchangeRedisCfg, 0)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create redis exchange client: %w", err)
-		}
-		logger.Info("Redis exchange client created")
-		cs.Queue = redisClient
-		cs.Event = redisClient
-		cs.Status = redisClient
-	}
 
 	// build file store client
 	if cfg.fileCfg != nil {
@@ -255,11 +235,48 @@ func NewClientset(ctx context.Context, component ucom.Component, opts ...Option)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create postgres queue client: %w", err)
 			}
-			// Postgres queue intentionally replaces the Redis queue set above.
-			// Redis is retained only for Event and Status channels.
 			cs.Queue = queueClient
+
+			eventClient, err := postgresql.NewPostgresBatchEventClient(ctx, &cfg.dbCfg.PostgreSQLCfg, logger)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create postgres event client: %w", err)
+			}
+			cs.Event = eventClient
+
+			statusClient, err := postgresql.NewPostgresBatchStatusClient(ctx, &cfg.dbCfg.PostgreSQLCfg, logger)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create postgres status client: %w", err)
+			}
+			cs.Status = statusClient
 		default:
 			return nil, fmt.Errorf("unsupported database.type: %s (supported values: postgresql)", cfg.dbCfg.Type)
+		}
+	}
+
+	// Retain the Redis exchange implementation as a fallback for callers that
+	// do not provide a PostgreSQL-backed implementation of an exchange
+	// interface. PostgreSQL is the default when database.type is postgresql.
+	if cfg.exchangeRedisCfg != nil && (cs.Queue == nil || cs.Event == nil || cs.Status == nil) {
+		if cfg.exchangeRedisCfg.Url == "" {
+			redisURL, err := ucom.ReadSecretFile(ucom.SecretKeyRedisURL)
+			if err != nil {
+				return nil, err
+			}
+			cfg.exchangeRedisCfg.Url = redisURL
+		}
+		redisClient, err := dbRedis.NewExchangeDBClientRedis(ctx, nil, cfg.exchangeRedisCfg, 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create redis exchange client: %w", err)
+		}
+		logger.Info("Redis exchange fallback client created")
+		if cs.Queue == nil {
+			cs.Queue = redisClient
+		}
+		if cs.Event == nil {
+			cs.Event = redisClient
+		}
+		if cs.Status == nil {
+			cs.Status = redisClient
 		}
 	}
 
@@ -269,6 +286,13 @@ func NewClientset(ctx context.Context, component ucom.Component, opts ...Option)
 		if cfg.asyncInference.RedisURL == "" {
 			if cfg.exchangeRedisCfg == nil {
 				return nil, fmt.Errorf("async inference requires a Redis URL (set RedisURL or use WithExchange)")
+			}
+			if cfg.exchangeRedisCfg.Url == "" {
+				redisURL, err := ucom.ReadSecretFile(ucom.SecretKeyRedisURL)
+				if err != nil {
+					return nil, err
+				}
+				cfg.exchangeRedisCfg.Url = redisURL
 			}
 			cfg.asyncInference.RedisURL = cfg.exchangeRedisCfg.Url
 		}

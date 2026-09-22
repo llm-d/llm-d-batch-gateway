@@ -55,7 +55,7 @@ const (
 	// inference for this batch.
 	AttrPassThroughHeaders = "batch.pass_through_headers"
 	// Job-level request counts as span attributes for persistent trace-based analysis.
-	// These complement the ephemeral Redis progress store (UpdateProgressCounts),
+	// These complement the ephemeral progress store (UpdateProgressCounts),
 	// which is TTL-based and used for real-time status polling only.
 	AttrRequestTotal     = "batch.request.total"
 	AttrRequestCompleted = "batch.request.completed"
