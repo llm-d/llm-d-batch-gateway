@@ -445,12 +445,12 @@ func (c *FileAPIHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	start := 0
 	if after != "" {
 		parsedStart, err := strconv.Atoi(after)
-		if err != nil {
+		if err != nil || parsedStart < 0 {
 			logger.V(logging.DEBUG).Info("invalid after parameter", "after", after)
 			apiErr := openai.NewAPIError(
 				http.StatusBadRequest,
 				"",
-				"Invalid after parameter: must be a valid integer cursor",
+				"Invalid after parameter: must be a non-negative integer cursor",
 				nil,
 			)
 			common.WriteAPIError(w, r, apiErr)

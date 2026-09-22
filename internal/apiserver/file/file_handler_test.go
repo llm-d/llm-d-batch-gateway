@@ -675,14 +675,18 @@ func doTestListFiles(t *testing.T) {
 
 	// Test 6: Invalid after parameter
 	t.Run("InvalidAfter", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/v1/files?after=invalid", nil)
-		req = req.WithContext(ctx)
+		for _, after := range []string{"invalid", "-1", "-9223372036854775808"} {
+			t.Run(after, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodGet, "/v1/files?after="+after, nil)
+				req = req.WithContext(ctx)
 
-		w := httptest.NewRecorder()
-		handler.ListFiles(w, req)
+				w := httptest.NewRecorder()
+				handler.ListFiles(w, req)
 
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected status %d for invalid after, got %d", http.StatusBadRequest, w.Code)
+				if w.Code != http.StatusBadRequest {
+					t.Errorf("expected status %d for invalid after, got %d", http.StatusBadRequest, w.Code)
+				}
+			})
 		}
 	})
 
