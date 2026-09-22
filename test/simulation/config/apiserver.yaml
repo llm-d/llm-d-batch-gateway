@@ -1,0 +1,39 @@
+# Simulation harness apiserver config: real Postgres records, Redis exchange,
+# MinIO object storage. See docs/design/consistency-harness.md.
+host: ""
+port: "8000"
+
+input_headers:
+  tenant: "X-MaaS-Username"
+
+read_header_timeout_seconds: 10
+read_timeout_seconds: 120
+write_timeout_seconds: 60
+idle_timeout_seconds: 60
+api_shutdown_timeout_seconds: 10
+observability_shutdown_timeout_seconds: 10
+
+db_client:
+  type: "postgresql"
+
+file_client:
+  type: "s3"
+  s3:
+    region: "us-east-1"
+    bucket: "batch-gateway"
+    endpoint: "http://toxiproxy:29000"
+    access_key_id: "sim-access-key"
+    use_path_style: true
+    auto_create_bucket: true
+
+batch_api:
+  batch_event_ttl_seconds: 3600
+
+file_api:
+  default_expiration_seconds: 86400
+  max_size_bytes: 209715200
+  max_line_count: 50000
+
+otel:
+  redis_tracing: true
+  postgresql_tracing: true

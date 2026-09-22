@@ -1,0 +1,11 @@
+[
+  {"name": "apiserver-postgres", "listen": "0.0.0.0:25432", "upstream": "postgres:5432", "enabled": true},
+  {"name": "apiserver-redis",    "listen": "0.0.0.0:26379", "upstream": "redis:6379",    "enabled": true},
+  {"name": "apiserver-s3",       "listen": "0.0.0.0:29000", "upstream": "minio:9000",    "enabled": true},
+  {"name": "processor-postgres", "listen": "0.0.0.0:35432", "upstream": "postgres:5432", "enabled": true},
+  {"name": "processor-redis",    "listen": "0.0.0.0:36379", "upstream": "redis:6379",    "enabled": true},
+  {"name": "processor-s3",       "listen": "0.0.0.0:39000", "upstream": "minio:9000",    "enabled": true},
+  {"name": "gc-postgres",        "listen": "0.0.0.0:45432", "upstream": "postgres:5432", "enabled": true},
+  {"name": "gc-redis",           "listen": "0.0.0.0:46379", "upstream": "redis:6379",    "enabled": true},
+  {"name": "gc-s3",              "listen": "0.0.0.0:49000", "upstream": "minio:9000",    "enabled": true}
+]
