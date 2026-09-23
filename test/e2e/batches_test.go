@@ -560,7 +560,7 @@ func doTestBatchExpiration(t *testing.T) {
 	t.Logf("created expiration batch %s with completion_window=10s (blocker=%s)", batchID, blockerBatchID)
 
 	// Wait for the batch to reach expired status.
-	finalBatch, _ := waitForBatchStatus(t, batchID, 2*time.Minute, openai.BatchStatusExpired)
+	finalBatch, results := waitForBatchStatus(t, batchID, 2*time.Minute, openai.BatchStatusExpired)
 
 	t.Logf("batch %s expired (completed=%d, failed=%d, total=%d, output_file_id=%s, error_file_id=%s)",
 		batchID,
@@ -591,6 +591,33 @@ func doTestBatchExpiration(t *testing.T) {
 	}
 	if finalBatch.ErrorFileID == "" {
 		t.Error("expected error_file_id to be set for expired batch")
+	}
+	if results == nil {
+		t.Fatal("expected batch results to be downloaded for expired batch")
+	}
+
+	foundExpiredRequest := false
+	for i, line := range strings.Split(results.ErrorBody, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		var result batchResultLine
+		if err := json.Unmarshal([]byte(line), &result); err != nil {
+			continue // validateBatchResults already reported the malformed JSON.
+		}
+		if result.Error == nil {
+			continue // validateBatchResults already reported the missing error.
+		}
+		if result.Error.Code == "batch_expired" {
+			foundExpiredRequest = true
+			continue
+		}
+		t.Errorf("error line %d: code = %q, want %q", i+1, result.Error.Code, "batch_expired")
+	}
+	if !foundExpiredRequest {
+		t.Error("expected error file to contain at least one batch_expired request")
 	}
 
 	// Blocker batch cleanup is handled by t.Cleanup() registered above.
