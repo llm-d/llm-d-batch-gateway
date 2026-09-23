@@ -1106,7 +1106,7 @@ helm upgrade --install "${DISPATCHER_RELEASE}" "${DISPATCHER_CHART}" \
     --set "ap.image.repository=${IMAGE_REPO}" \
     --set "ap.image.tag=${IMAGE_TAG}"
 
-kubectl rollout status deployment/${DISPATCHER_RELEASE}-async-processor \
+kubectl rollout status deployment/${DISPATCHER_RELEASE}-llm-d-async \
     -n ${BATCH_NAMESPACE} --timeout=120s
 ```
 
@@ -1278,7 +1278,7 @@ kubectl get inferenceobjective -n ${LLM_NAMESPACE}
 
 # If ENABLE_DISPATCHER=true:
 echo "=== Async Dispatcher ==="
-kubectl get pods -n ${BATCH_NAMESPACE} -l app.kubernetes.io/name=async-processor
+kubectl get pods -n ${BATCH_NAMESPACE} -l app.kubernetes.io/name=llm-d-async
 # Expected: dispatcher-llm-d-async (1/1 Running)
 kubectl get configmap batch-gateway-processor-config -n ${BATCH_NAMESPACE} \
     -o jsonpath='{.data}' | grep dispatch_mode
