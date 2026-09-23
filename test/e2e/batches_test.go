@@ -491,17 +491,18 @@ func doTestBatchPagination(t *testing.T) {
 
 // doTestBatchExpiration creates a batch with slow requests and a short
 // completion_window so the SLO fires before any requests are dispatched. A
-// blocker batch saturates the processor first, so the expiration batch's
-// requests all remain undispatched and are drained as batch_expired.
-// Verifies: expired status, correct timestamps, completed==0, no output file,
-// and an error file with the expired entries.
+// blocker batch saturates the processor first, so some of the expiration
+// batch's requests remain undispatched and are drained as batch_expired.
+// Verifies: expired status, at least one request expired, and an error file
+// with the expired entries. Requests that acquire a dispatch slot before the
+// SLO fires are allowed to complete.
 //
 // With dev-deploy sim-model defaults (~50ms TTFT + ~100ms inter-token), each
 // slow request (max_tokens=200) takes ~20s. The 10s completion_window is
 // longer than the processor poll interval (5s) so the batch is always
 // dequeued before its SLO fires; the SLO then fires in-flight while the
-// blocker still holds all dispatch slots, and the undelivered requests are
-// drained as batch_expired.
+// blocker holds most dispatch slots, and undelivered requests are drained as
+// batch_expired.
 func doTestBatchExpiration(t *testing.T) {
 	t.Helper()
 
@@ -569,19 +570,24 @@ func doTestBatchExpiration(t *testing.T) {
 		finalBatch.OutputFileID,
 		finalBatch.ErrorFileID)
 
-	// The processor was saturated by the blocker batch, so none of the
-	// expiration batch's requests could be dispatched before the SLO fired.
+	// The blocker batch should leave at least one expiration request undispatched
+	// when the SLO fires. Requests dispatched before then may complete because
+	// batches share the processor's dispatch slots.
 	if finalBatch.RequestCounts.Total != numRequests {
 		t.Errorf("total = %d, want %d", finalBatch.RequestCounts.Total, numRequests)
 	}
-	if finalBatch.RequestCounts.Completed != 0 {
-		t.Errorf("completed = %d, want 0 (processor was saturated)", finalBatch.RequestCounts.Completed)
+	if finalBatch.RequestCounts.Completed >= finalBatch.RequestCounts.Total {
+		t.Errorf("completed = %d, want less than total %d (at least one request should expire)",
+			finalBatch.RequestCounts.Completed, finalBatch.RequestCounts.Total)
 	}
-	if finalBatch.RequestCounts.Failed != finalBatch.RequestCounts.Total {
-		t.Errorf("failed = %d, want %d (all requests should expire)", finalBatch.RequestCounts.Failed, finalBatch.RequestCounts.Total)
+	if finalBatch.RequestCounts.Failed == 0 {
+		t.Error("failed = 0, want at least 1 expired request")
 	}
-	if finalBatch.OutputFileID != "" {
-		t.Errorf("expected empty output_file_id for fully-expired batch, got %q", finalBatch.OutputFileID)
+	if finalBatch.RequestCounts.Completed > 0 && finalBatch.OutputFileID == "" {
+		t.Error("expected output_file_id when completed requests exist")
+	}
+	if finalBatch.RequestCounts.Completed == 0 && finalBatch.OutputFileID != "" {
+		t.Errorf("expected empty output_file_id when no requests completed, got %q", finalBatch.OutputFileID)
 	}
 	if finalBatch.ErrorFileID == "" {
 		t.Error("expected error_file_id to be set for expired batch")
