@@ -1100,7 +1100,7 @@ IMAGE_REPO="${DISPATCHER_IMAGE%%:*}"
 IMAGE_TAG="${DISPATCHER_IMAGE##*:}"
 
 helm upgrade --install "${DISPATCHER_RELEASE}" "${DISPATCHER_CHART}" \
-    --version "${DISPATCHER_VERSION#v}" \
+    --version "${DISPATCHER_VERSION}" \
     --namespace "${BATCH_NAMESPACE}" \
     --values /tmp/dispatcher-values.yaml \
     --set "ap.image.repository=${IMAGE_REPO}" \
