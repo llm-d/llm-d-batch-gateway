@@ -46,6 +46,7 @@ cleanup_kubernetes_resources() {
     kubectl delete svc "${PROMETHEUS_NAME}-nodeport" -n "${NAMESPACE}" --ignore-not-found=true
     kubectl delete svc "${GRAFANA_NAME}-nodeport" -n "${NAMESPACE}" --ignore-not-found=true
     kubectl delete svc "${JAEGER_NAME}-nodeport" -n "${NAMESPACE}" --ignore-not-found=true
+    kubectl delete svc "${SEAWEEDFS_NAME}-nodeport" -n "${NAMESPACE}" --ignore-not-found=true
 
     # Delete deployments and services
     log "Deleting deployments and services..."
@@ -57,7 +58,7 @@ cleanup_kubernetes_resources() {
     kubectl delete clusterrole,clusterrolebinding "${PROMETHEUS_NAME}" --ignore-not-found=true
     kubectl delete deployment,svc "${VLLM_SIM_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
     kubectl delete deployment,svc "${VLLM_SIM_B_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
-    kubectl delete deployment,svc "${MINIO_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
+    kubectl delete deployment,svc "${SEAWEEDFS_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
 
     # Delete e2e helper pods (created by test runs, safe to ignore if absent)
     kubectl delete pod "batch-gateway-e2e-curl" -n "${NAMESPACE}" --ignore-not-found=true

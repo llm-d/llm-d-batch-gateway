@@ -1307,7 +1307,7 @@ cmd_uninstall() {
     helm uninstall "${BATCH_INSTANCE_NAME}" -n "${BATCH_NAMESPACE}" --timeout 60s 2>/dev/null || true
     helm uninstall "${BATCH_REDIS_RELEASE}" -n "${BATCH_NAMESPACE}" --timeout 60s 2>/dev/null || true
     helm uninstall "${BATCH_POSTGRESQL_RELEASE}" -n "${BATCH_NAMESPACE}" --timeout 60s 2>/dev/null || true
-    kubectl delete deployment,svc -l app="${BATCH_MINIO_RELEASE}" -n "${BATCH_NAMESPACE}" 2>/dev/null || true
+    kubectl delete deployment,svc -l app="${BATCH_S3_STORE_RELEASE}" -n "${BATCH_NAMESPACE}" 2>/dev/null || true
     kubectl delete pvc "${BATCH_FILES_PVC_NAME}" -n "${BATCH_NAMESPACE}" 2>/dev/null || true
 
     step "Removing Gateways (${GATEWAY_NAMESPACE})..."

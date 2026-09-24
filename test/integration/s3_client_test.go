@@ -16,19 +16,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Integration tests for the S3 client using a real S3-compatible service (e.g. MinIO).
+// Integration tests for the S3 client using a real S3-compatible service (SeaweedFS).
 // These tests are skipped when S3_TEST_ENDPOINT is not set.
 //
-// Option 1: Standalone MinIO via Docker
+// Option 1: Standalone SeaweedFS via Docker
 //
-//   docker run -d --name minio -p 9000:9000 \
-//     -e MINIO_ROOT_USER=minioadmin \
-//     -e MINIO_ROOT_PASSWORD=minioadmin \
-//     minio/minio server /data
+//   docker run -d --name seaweedfs -p 8333:8333 \
+//     -e AWS_ACCESS_KEY_ID=s3admin \
+//     -e AWS_SECRET_ACCESS_KEY=s3secret \
+//     ghcr.io/chrislusf/seaweedfs:4.47 mini -dir=/data \
+//       -webdav=false -admin.ui=false -admin.port=12646 \
+//       -s3.port.iceberg=0 -s3.port.lance=0
 //
-//   S3_TEST_ENDPOINT=http://localhost:9000 go test -v -tags=integration -run TestS3 ./test/integration/...
+//   S3_TEST_ENDPOINT=http://localhost:8333 go test -v -tags=integration -run TestS3 ./test/integration/...
 //
-// Option 2: After "make dev-deploy" (MinIO is exposed on localhost:9002)
+// Option 2: After "make dev-deploy" (SeaweedFS is exposed on localhost:9002)
 //
 //   S3_TEST_ENDPOINT=http://localhost:9002 go test -v -tags=integration -run TestS3 ./test/integration/...
 
@@ -57,11 +59,11 @@ const (
 func s3Config() s3client.Config {
 	accessKey := os.Getenv("S3_TEST_ACCESS_KEY")
 	if accessKey == "" {
-		accessKey = "minioadmin"
+		accessKey = "s3admin"
 	}
 	secretKey := os.Getenv("S3_TEST_SECRET_KEY")
 	if secretKey == "" {
-		secretKey = "minioadmin"
+		secretKey = "s3secret"
 	}
 
 	return s3client.Config{

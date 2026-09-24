@@ -42,7 +42,7 @@ This script:
 | `POSTGRESQL_RELEASE`  | `postgresql`                               | Helm release name for PostgreSQL                   |
 | `POSTGRESQL_PASSWORD` | `postgres`                                 | PostgreSQL admin password                          |
 | `INFERENCE_API_KEY`   | `dummy-api-key`                            | API key written to the app secret                  |
-| `S3_SECRET_ACCESS_KEY`| `minioadmin`                               | S3 secret access key written to the app secret     |
+| `S3_SECRET_ACCESS_KEY`| `s3secret`                                 | S3 secret access key written to the app secret     |
 | `APP_SECRET_NAME`     | `<HELM_RELEASE>-secrets`                   | Name of the Kubernetes secret created by the script|
 | `FILES_PVC_NAME`      | `<HELM_RELEASE>-files`                     | Name of the PVC created for file storage           |
 | `VLLM_SIM_NAME`       | `vllm-sim`                                 | Name of the vLLM simulator deployment              |
@@ -50,6 +50,8 @@ This script:
 | `VLLM_SIM_IMAGE`      | `ghcr.io/neuralmagic/vllm-vcr:0.2.2-vllm0.27` | vllm-vcr image                                  |
 | `VLLM_SIM_HF_MODEL`   | `Qwen/Qwen2.5-0.5B-Instruct`               | Hugging Face id the frontend loads the tokenizer from |
 | `VLLM_SIM_CONTROL_PORT` | `8001`                                   | vllm-vcr control API port (latency, failure injection, request counters) |
+
+> **Note:** SeaweedFS replaced MinIO as the S3-compatible store (exposed on `localhost:9002`). This is a hard switch with no migration: the `MINIO_*` variables are no longer read, the default credentials changed from `minioadmin` to `s3admin`/`s3secret`, and `make dev-clean` no longer removes an existing `minio` Deployment/Service. On a cluster deployed before the switch, recreate the kind cluster or delete the `minio` resources manually.
 
 Example with overrides:
 

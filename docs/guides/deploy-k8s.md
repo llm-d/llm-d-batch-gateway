@@ -779,44 +779,51 @@ helm upgrade --install postgresql oci://registry-1.docker.io/bitnamicharts/postg
     --set auth.database=batch
 kubectl rollout status statefulset/postgresql -n ${BATCH_NAMESPACE} --timeout=120s
 
-# Install MinIO (S3-compatible object storage for batch files)
-MINIO_USER=<your-minio-user>
-MINIO_PASSWORD=<your-minio-password>
-MINIO_BUCKET=llm-d-batch-gateway
-MINIO_REGION=us-east-1
+# Install SeaweedFS (S3-compatible object storage for batch files)
+S3_ACCESS_KEY=<your-s3-access-key>
+S3_SECRET_ACCESS_KEY=<your-s3-secret-key>
+S3_BUCKET=llm-d-batch-gateway
+S3_REGION=us-east-1
+SEAWEEDFS_S3_PORT=8333
 
 kubectl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: minio
+  name: seaweedfs
   namespace: ${BATCH_NAMESPACE}
   labels:
-    app: minio
+    app: seaweedfs
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: minio
+      app: seaweedfs
   template:
     metadata:
       labels:
-        app: minio
+        app: seaweedfs
     spec:
       containers:
-      - name: minio
-        image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
-        args: ["server", "/data", "--console-address", ":9001"]
+      - name: seaweedfs
+        image: ghcr.io/chrislusf/seaweedfs:4.47
+        # -admin.port: mini still allocates the admin port (gRPC = port+10000) even with -admin.ui=false;
+        # the default 23646/33646 can collide with the Linux ephemeral port range.
+        args: ["mini", "-dir=/data", "-s3.port=${SEAWEEDFS_S3_PORT}", "-webdav=false", "-admin.ui=false", "-admin.port=12646", "-s3.port.iceberg=0", "-s3.port.lance=0"]
         env:
-        - name: MINIO_ROOT_USER
-          value: "${MINIO_USER}"
-        - name: MINIO_ROOT_PASSWORD
-          value: "${MINIO_PASSWORD}"
+        - name: AWS_ACCESS_KEY_ID
+          value: "${S3_ACCESS_KEY}"
+        - name: AWS_SECRET_ACCESS_KEY
+          value: "${S3_SECRET_ACCESS_KEY}"
         ports:
-        - containerPort: 9000
-          name: api
-        - containerPort: 9001
-          name: console
+        - containerPort: ${SEAWEEDFS_S3_PORT}
+          name: s3
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: s3
+          initialDelaySeconds: 5
+          periodSeconds: 5
         volumeMounts:
         - name: data
           mountPath: /data
@@ -827,32 +834,29 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: minio
+  name: seaweedfs
   namespace: ${BATCH_NAMESPACE}
   labels:
-    app: minio
+    app: seaweedfs
 spec:
   selector:
-    app: minio
+    app: seaweedfs
   ports:
-  - name: api
-    port: 9000
-    targetPort: 9000
-  - name: console
-    port: 9001
-    targetPort: 9001
+  - name: s3
+    port: ${SEAWEEDFS_S3_PORT}
+    targetPort: ${SEAWEEDFS_S3_PORT}
   type: ClusterIP
 EOF
 
-until kubectl get deployment minio -n ${BATCH_NAMESPACE} &>/dev/null; do sleep 5; done
-kubectl rollout status deployment/minio -n ${BATCH_NAMESPACE} --timeout=180s
+until kubectl get deployment seaweedfs -n ${BATCH_NAMESPACE} &>/dev/null; do sleep 5; done
+kubectl rollout status deployment/seaweedfs -n ${BATCH_NAMESPACE} --timeout=180s
 
 # Create application secret
 kubectl create secret generic batch-gateway-secrets \
     --namespace ${BATCH_NAMESPACE} \
     --from-literal=redis-url="redis://redis-master.${BATCH_NAMESPACE}.svc.cluster.local:6379/0" \
     --from-literal=postgresql-url="postgresql://postgres:<your-postgres-password>@postgresql.${BATCH_NAMESPACE}.svc.cluster.local:5432/batch?sslmode=disable" \
-    --from-literal=s3-secret-access-key="${MINIO_PASSWORD}" \
+    --from-literal=s3-secret-access-key="${S3_SECRET_ACCESS_KEY}" \
     --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -883,11 +887,11 @@ helm upgrade --install batch-gateway ./charts/batch-gateway \
     --set "global.secretName=batch-gateway-secrets" \
     --set "global.dbClient.type=postgresql" \
     --set "global.fileClient.type=s3" \
-    --set "global.fileClient.s3.endpoint=http://minio.${BATCH_NAMESPACE}.svc.cluster.local:9000" \
-    --set "global.fileClient.s3.region=${MINIO_REGION}" \
-    --set "global.fileClient.s3.bucket=${MINIO_BUCKET}" \
-    --set "global.fileClient.s3.accessKeyId=${MINIO_USER}" \
-    --set "global.fileClient.s3.prefix=${MINIO_BUCKET}" \
+    --set "global.fileClient.s3.endpoint=http://seaweedfs.${BATCH_NAMESPACE}.svc.cluster.local:${SEAWEEDFS_S3_PORT}" \
+    --set "global.fileClient.s3.region=${S3_REGION}" \
+    --set "global.fileClient.s3.bucket=${S3_BUCKET}" \
+    --set "global.fileClient.s3.accessKeyId=${S3_ACCESS_KEY}" \
+    --set "global.fileClient.s3.prefix=${S3_BUCKET}" \
     --set "global.fileClient.s3.usePathStyle=true" \
     --set "global.fileClient.s3.autoCreateBucket=true" \
     --set "processor.config.modelGateways.${MODEL_NAME}.url=${MODEL_GW_URL}" \
@@ -909,7 +913,7 @@ helm upgrade --install batch-gateway ./charts/batch-gateway \
 > - **`passThroughHeaders`**: Set to `[Authorization]` so the processor forwards the end user's bearer token on inference calls. Without this, the Internal Gateway cannot attribute inference traffic to the original caller and model-level authorization checks will fail.
 > - **No `tlsInsecureSkipVerify`**: The Internal Gateway uses plain HTTP (ClusterIP :80), so TLS verification is not needed for the processor → model gateway connection.
 > - **`apiserver.tls.certManager.*`**: Enables TLS for the batch API server using cert-manager. In this demo, the DestinationRule uses `insecureSkipVerify: true` because the certificate is self-signed. For production, use a trusted CA and set `insecureSkipVerify: false`.
-> - **File storage**: This example uses S3-compatible storage (MinIO). To use a PVC instead, replace the `s3` options with:
+> - **File storage**: This example uses S3-compatible storage (SeaweedFS). To use a PVC instead, replace the `s3` options with:
 >   ```
 >   --set "global.fileClient.type=fs"
 >   --set "global.fileClient.fs.basePath=/tmp/batch-gateway"
@@ -1118,11 +1122,11 @@ helm upgrade --install batch-gateway ./charts/batch-gateway \
     --set "global.secretName=batch-gateway-secrets" \
     --set "global.dbClient.type=postgresql" \
     --set "global.fileClient.type=s3" \
-    --set "global.fileClient.s3.endpoint=http://minio.${BATCH_NAMESPACE}.svc.cluster.local:9000" \
-    --set "global.fileClient.s3.region=${MINIO_REGION}" \
-    --set "global.fileClient.s3.bucket=${MINIO_BUCKET}" \
-    --set "global.fileClient.s3.accessKeyId=${MINIO_USER}" \
-    --set "global.fileClient.s3.prefix=${MINIO_BUCKET}" \
+    --set "global.fileClient.s3.endpoint=http://seaweedfs.${BATCH_NAMESPACE}.svc.cluster.local:${SEAWEEDFS_S3_PORT}" \
+    --set "global.fileClient.s3.region=${S3_REGION}" \
+    --set "global.fileClient.s3.bucket=${S3_BUCKET}" \
+    --set "global.fileClient.s3.accessKeyId=${S3_ACCESS_KEY}" \
+    --set "global.fileClient.s3.prefix=${S3_BUCKET}" \
     --set "global.fileClient.s3.usePathStyle=true" \
     --set "global.fileClient.s3.autoCreateBucket=true" \
     --set "processor.config.dispatchMode=async" \
@@ -1257,7 +1261,7 @@ kubectl get pods -n ${LLM_NAMESPACE}
 echo "=== batch-gateway (${BATCH_NAMESPACE}) ==="
 kubectl get pods -n ${BATCH_NAMESPACE}
 # Expected: batch-gateway-apiserver, batch-gateway-processor, batch-gateway-gc (all 1/1 Running)
-#           redis-master, postgresql (all Running), minio (1/1 Running)
+#           redis-master, postgresql (all Running), seaweedfs (1/1 Running)
 
 echo "=== Gateways ==="
 kubectl get gateway -n ${GATEWAY_NAMESPACE}

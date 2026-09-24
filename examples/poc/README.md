@@ -32,7 +32,7 @@ This directory contains demo files for testing the Batch Gateway system.
    - Jaeger UI at <http://localhost:16686>
    - Prometheus UI at <http://localhost:9091>
    - Grafana UI at <http://localhost:3000> (anonymous admin access, no login required)
-   - MinIO (S3-compatible storage) at <http://localhost:9002>
+   - SeaweedFS (S3-compatible storage) at <http://localhost:9002>
    - Metrics endpoints at <http://localhost:8081/metrics> (API) and <http://localhost:9090/metrics> (Processor)
 
 3. **Choose Your Demo Tool**:
@@ -68,7 +68,7 @@ The demo environment runs the following components in a Kubernetes cluster (kind
 │  └────────────────────┘   │   └──────────────────────────────┘      │
 │                           │                                         │
 │           ┌───────────────▼─────────────────────┐                   │
-│           │   MinIO (S3-compatible storage)     │                   │
+│           │   SeaweedFS (S3-compatible storage) │                   │
 │           │                                     │                   │
 │           │  • Batch input files (.jsonl)       │                   │
 │           │  • Batch output files (results)     │                   │
@@ -122,17 +122,17 @@ The demo environment runs the following components in a Kubernetes cluster (kind
                       │  :9090  (Proc)   │
                       │  :9091  (Prom)   │
                       │  :3000  (Grafana)│
-                      │  :9002  (MinIO)  │
+                      │  :9002  (S3)     │
                       │  :16686 (Jaeger) │
                       └──────────────────┘
 ```
 
 **Request Flow:**
 
-1. **Create Batch**: User → API Server → PostgreSQL (metadata) + Redis (queue) + MinIO (input file)
-2. **Process Batch**: Processor polls Redis → reads batch from PostgreSQL → reads input from MinIO → sends requests to vLLM simulators → writes results to MinIO → updates PostgreSQL + Redis
-3. **Retrieve Results**: User → API Server → PostgreSQL (batch status) + MinIO (output file)
-4. **Garbage Collection**: GC periodically scans for expired batches and files → deletes from PostgreSQL + MinIO
+1. **Create Batch**: User → API Server → PostgreSQL (metadata) + Redis (queue) + SeaweedFS (input file)
+2. **Process Batch**: Processor polls Redis → reads batch from PostgreSQL → reads input from SeaweedFS → sends requests to vLLM simulators → writes results to SeaweedFS → updates PostgreSQL + Redis
+3. **Retrieve Results**: User → API Server → PostgreSQL (batch status) + SeaweedFS (output file)
+4. **Garbage Collection**: GC periodically scans for expired batches and files → deletes from PostgreSQL + SeaweedFS
 5. **Monitor**: All components send traces to Jaeger; metrics exposed on /metrics endpoints, collected by Prometheus, and visualized in Grafana dashboards
 
 ## Demo Sequences
