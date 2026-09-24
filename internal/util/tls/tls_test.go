@@ -5,6 +5,74 @@ import (
 	"testing"
 )
 
+func TestIsEmpty(t *testing.T) {
+	tests := []struct {
+		name  string
+		certs Certificates
+		want  bool
+	}{
+		{
+			name:  "zero value is empty",
+			certs: Certificates{},
+			want:  true,
+		},
+		{
+			name:  "cert dir set is not empty",
+			certs: Certificates{Dir: "/etc/certs"},
+			want:  false,
+		},
+		{
+			name:  "all fields set is not empty",
+			certs: Certificates{Dir: "/etc/certs", CertFile: "tls.crt", KeyFile: "tls.key", CaCertFile: "ca.crt"},
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.certs.IsEmpty(); got != tt.want {
+				t.Fatalf("IsEmpty() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestJoinCertPath(t *testing.T) {
+	tests := []struct {
+		name string
+		dir  string
+		file string
+		want string
+	}{
+		{
+			name: "empty file returns empty string",
+			dir:  "/etc/certs",
+			file: "",
+			want: "",
+		},
+		{
+			name: "non empty file is joined with dir",
+			dir:  "/etc/certs",
+			file: "tls.crt",
+			want: "/etc/certs/tls.crt",
+		},
+		{
+			name: "empty dir still joins file",
+			dir:  "",
+			file: "tls.crt",
+			want: "tls.crt",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := JoinCertPath(tt.dir, tt.file); got != tt.want {
+				t.Fatalf("JoinCertPath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetTlsConfig(t *testing.T) {
 	tests := []struct {
 		name     string
