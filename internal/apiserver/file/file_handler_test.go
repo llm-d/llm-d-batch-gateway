@@ -174,6 +174,15 @@ func (c *errDeleteFileClient) Delete(ctx context.Context, fileName, folderName s
 	return c.BatchFilesClient.Delete(ctx, fileName, folderName)
 }
 
+// errRetrieveFileClient implements fsapi.BatchFilesClient and returns os.ErrNotExist from Retrieve.
+type errRetrieveFileClient struct {
+	fsapi.BatchFilesClient
+}
+
+func (c *errRetrieveFileClient) Retrieve(ctx context.Context, fileName, folderName string) (io.ReadCloser, *fsapi.BatchFileMetadata, error) {
+	return nil, nil, os.ErrNotExist
+}
+
 type failOnceDBClient struct {
 	dbapi.FileDBClient
 	failNext atomic.Bool
@@ -926,6 +935,28 @@ func doTestDownloadFile(t *testing.T) {
 
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("expected status %d for missing file_id, got %d", http.StatusBadRequest, w.Code)
+		}
+	})
+
+	// Test 4: File exists in DB but not in storage (os.ErrNotExist from Retrieve)
+	t.Run("DownloadFileMissingFromStorage", func(t *testing.T) {
+		// Create a file record in the DB
+		existingFile := createTestFile(t, handler, ctx, "test-missing-storage.jsonl", "batch", "content")
+
+		// Replace the file client with one that returns os.ErrNotExist from Retrieve
+		origClient := handler.clients.File
+		handler.clients.File = &errRetrieveFileClient{BatchFilesClient: origClient}
+		defer func() { handler.clients.File = origClient }()
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/files/"+existingFile.ID+"/content", nil)
+		req.SetPathValue(common.PathParamFileID, existingFile.ID)
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		handler.DownloadFile(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("expected status %d for file missing from storage, got %d", http.StatusNotFound, w.Code)
 		}
 	})
 }
