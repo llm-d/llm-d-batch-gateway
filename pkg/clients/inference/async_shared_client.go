@@ -27,6 +27,7 @@ type asyncSharedClient struct {
 }
 
 var _ AsyncInferenceClient = (*asyncSharedClient)(nil)
+var _ DurableAsyncInferenceClient = (*asyncSharedClient)(nil)
 
 func newAsyncSharedClient(p producer.Producer, pollTimeout time.Duration, logger logr.Logger) *asyncSharedClient {
 	return &asyncSharedClient{
@@ -83,6 +84,37 @@ func (c *asyncSharedClient) GetResult(ctx context.Context) (*GenerateResponse, e
 		StatusCode:   result.StatusCode,
 		ErrorCode:    result.ErrorCode,
 		ErrorMessage: result.ErrorMessage,
+	}, nil
+}
+
+func (c *asyncSharedClient) SupportsDurableResults() bool {
+	_, ok := c.producer.(producer.DurableResultProducer)
+	return ok
+}
+
+func (c *asyncSharedClient) ReceiveResult(ctx context.Context) (*DurableGenerateResult, error) {
+	durable, ok := c.producer.(producer.DurableResultProducer)
+	if !ok {
+		return nil, fmt.Errorf("async producer does not support durable result delivery")
+	}
+	pollCtx, pollCancel := context.WithTimeout(ctx, c.pollTimeout)
+	defer pollCancel()
+	delivery, err := durable.ReceiveResult(pollCtx)
+	if err != nil {
+		return nil, err
+	}
+	result := delivery.Result
+	return &DurableGenerateResult{
+		Response: &GenerateResponse{
+			RequestID:    result.ID,
+			Response:     []byte(result.Payload),
+			StatusCode:   result.StatusCode,
+			ErrorCode:    result.ErrorCode,
+			ErrorMessage: result.ErrorMessage,
+		},
+		ack: func(ackCtx context.Context) error {
+			return durable.AckResult(ackCtx, delivery)
+		},
 	}, nil
 }
 

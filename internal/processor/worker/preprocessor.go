@@ -189,8 +189,12 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 			if !registered {
 				// No plan entry exists yet, so generate a UUID for the batch request ID.
 				// newBatchRequestID adds the "batch_req_" prefix for format consistency.
+				requestID := newBatchRequestID(uuid.NewString())
+				if p.cfg.ResumableRecovery {
+					requestID = stableBatchRequestID(jobID, requestMeta.CustomID)
+				}
 				errLine := &outputLine{
-					ID:       newBatchRequestID(uuid.NewString()),
+					ID:       requestID,
 					CustomID: requestMeta.CustomID,
 					Error: &outputError{
 						Code:    inference.ErrCodeModelNotFound,
