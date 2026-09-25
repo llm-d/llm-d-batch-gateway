@@ -105,3 +105,48 @@ func TestCancelBatchDoesNotRegressTerminalStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestCancelBatchDoesNotMutateQueuedResumableBatch(t *testing.T) {
+	handler := setupTestHandler()
+	batchID := "batch-cancel-resumable"
+	batch := openai.Batch{
+		ID: batchID,
+		BatchSpec: openai.BatchSpec{
+			Object:           "batch",
+			InputFileID:      "file-abc123",
+			Endpoint:         openai.EndpointChatCompletions,
+			CompletionWindow: "24h",
+			CreatedAt:        time.Now().UTC().Unix(),
+		},
+		BatchStatusInfo: openai.BatchStatusInfo{Status: openai.BatchStatusValidating},
+	}
+	item, err := converter.BatchToDBItem(&batch, common.DefaultTenantID, nil)
+	if err != nil {
+		t.Fatalf("BatchToDBItem: %v", err)
+	}
+	item.Resumable = true
+	if err := handler.clients.BatchDB.DBStore(context.Background(), item); err != nil {
+		t.Fatalf("DBStore: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/batches/"+batchID+"/cancel", nil)
+	req.SetPathValue("batch_id", batchID)
+	rr := httptest.NewRecorder()
+	handler.CancelBatch(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rr.Code, rr.Body.String())
+	}
+
+	items, _, _, err := handler.clients.BatchDB.DBGet(context.Background(),
+		&dbapi.BatchQuery{BaseQuery: dbapi.BaseQuery{IDs: []string{batchID}}}, true, 0, 1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("DBGet: %v (%d items)", err, len(items))
+	}
+	var stored openai.BatchStatusInfo
+	if err := json.Unmarshal(items[0].Status, &stored); err != nil {
+		t.Fatalf("unmarshal stored status: %v", err)
+	}
+	if stored.Status != openai.BatchStatusValidating {
+		t.Errorf("stored status changed to %q", stored.Status)
+	}
+}
