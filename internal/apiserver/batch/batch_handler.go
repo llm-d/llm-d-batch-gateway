@@ -536,6 +536,8 @@ func (c *BatchAPIHandler) CancelBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dbItem.Epoch = item.Epoch
+	expectedResumable := false
+	dbItem.ExpectedResumable = &expectedResumable
 	if err := c.clients.BatchDB.DBUpdate(ctx, dbItem, item.Status); err != nil {
 		if errors.Is(err, api.ErrConflict) {
 			apiErr := openai.NewAPIError(http.StatusConflict, "", "batch changed state during cancel, retry", nil)
