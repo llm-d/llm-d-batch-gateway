@@ -78,11 +78,13 @@ BATCH_STORAGE_TYPE="${BATCH_STORAGE_TYPE:-s3}"
 # (b) Istio Gateway -> batch apiserver (DestinationRule). Demo/lab only (CWE-295).
 # Default 1 for demo scripts using self-signed certs. Set to 0 if you have trusted CA certs.
 DEMO_TLS_INSECURE_SKIP_VERIFY="${DEMO_TLS_INSECURE_SKIP_VERIFY:-1}"
-BATCH_MINIO_RELEASE="${BATCH_MINIO_RELEASE:-minio}"
-MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
-MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
-MINIO_BUCKET="${MINIO_BUCKET:-llm-d-batch-gateway}"
-MINIO_REGION="${MINIO_REGION:-us-east-1}"
+BATCH_S3_STORE_RELEASE="${BATCH_S3_STORE_RELEASE:-seaweedfs}"
+SEAWEEDFS_IMAGE="${SEAWEEDFS_IMAGE:-ghcr.io/chrislusf/seaweedfs:4.47}"
+SEAWEEDFS_S3_PORT="${SEAWEEDFS_S3_PORT:-8333}"
+S3_ACCESS_KEY="${S3_ACCESS_KEY:-s3admin}"
+S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-s3secret}"
+S3_BUCKET="${S3_BUCKET:-llm-d-batch-gateway}"
+S3_REGION="${S3_REGION:-us-east-1}"
 # Image overrides. When set, these take precedence over defaults derived from
 # BATCH_RELEASE_VERSION / BATCH_DEV_VERSION. Leave unset to use chart defaults.
 # Example (upstream):
@@ -432,10 +434,10 @@ install_batch_postgresql() {
     log "PostgreSQL installed (database: batch)."
 }
 
-install_batch_minio() {
-    step "Installing MinIO..."
-    if kubectl get deployment "${BATCH_MINIO_RELEASE}" -n "${BATCH_NAMESPACE}" &>/dev/null; then
-        log "MinIO deployment '${BATCH_MINIO_RELEASE}' already exists. Skipping."
+install_batch_seaweedfs() {
+    step "Installing SeaweedFS..."
+    if kubectl get deployment "${BATCH_S3_STORE_RELEASE}" -n "${BATCH_NAMESPACE}" &>/dev/null; then
+        log "SeaweedFS deployment '${BATCH_S3_STORE_RELEASE}' already exists. Skipping."
         return
     fi
 
@@ -445,38 +447,48 @@ install_batch_minio() {
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ${BATCH_MINIO_RELEASE}
+  name: ${BATCH_S3_STORE_RELEASE}
   namespace: ${BATCH_NAMESPACE}
   labels:
-    app: ${BATCH_MINIO_RELEASE}
+    app: ${BATCH_S3_STORE_RELEASE}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: ${BATCH_MINIO_RELEASE}
+      app: ${BATCH_S3_STORE_RELEASE}
   template:
     metadata:
       labels:
-        app: ${BATCH_MINIO_RELEASE}
+        app: ${BATCH_S3_STORE_RELEASE}
     spec:
       containers:
-      - name: minio
-        image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+      - name: seaweedfs
+        image: ${SEAWEEDFS_IMAGE}
         args:
-        - server
-        - /data
-        - --console-address
-        - ":9001"
+        - mini
+        - -dir=/data
+        - -s3.port=${SEAWEEDFS_S3_PORT}
+        - -webdav=false
+        - -admin.ui=false
+        # -admin.port: mini still allocates the admin port (gRPC = port+10000) even with -admin.ui=false;
+        # the default 23646/33646 can collide with the Linux ephemeral port range.
+        - -admin.port=12646
+        - -s3.port.iceberg=0
+        - -s3.port.lance=0
         env:
-        - name: MINIO_ROOT_USER
-          value: "${MINIO_ROOT_USER}"
-        - name: MINIO_ROOT_PASSWORD
-          value: "${MINIO_ROOT_PASSWORD}"
+        - name: AWS_ACCESS_KEY_ID
+          value: "${S3_ACCESS_KEY}"
+        - name: AWS_SECRET_ACCESS_KEY
+          value: "${S3_SECRET_ACCESS_KEY}"
         ports:
-        - containerPort: 9000
-          name: api
-        - containerPort: 9001
-          name: console
+        - containerPort: ${SEAWEEDFS_S3_PORT}
+          name: s3
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: s3
+          initialDelaySeconds: 5
+          periodSeconds: 5
         volumeMounts:
         - name: data
           mountPath: /data
@@ -487,35 +499,22 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: ${BATCH_MINIO_RELEASE}
+  name: ${BATCH_S3_STORE_RELEASE}
   namespace: ${BATCH_NAMESPACE}
   labels:
-    app: ${BATCH_MINIO_RELEASE}
+    app: ${BATCH_S3_STORE_RELEASE}
 spec:
   selector:
-    app: ${BATCH_MINIO_RELEASE}
+    app: ${BATCH_S3_STORE_RELEASE}
   ports:
-  - name: api
-    port: 9000
-    targetPort: 9000
-  - name: console
-    port: 9001
-    targetPort: 9001
+  - name: s3
+    port: ${SEAWEEDFS_S3_PORT}
+    targetPort: ${SEAWEEDFS_S3_PORT}
   type: ClusterIP
 EOF
 
-    wait_for_deployment "${BATCH_MINIO_RELEASE}" "${BATCH_NAMESPACE}" 180s
-
-    step "Creating MinIO bucket '${MINIO_BUCKET}'..."
-    local minio_pod
-    minio_pod=$(kubectl get pod -n "${BATCH_NAMESPACE}" -l app="${BATCH_MINIO_RELEASE}" -o jsonpath='{.items[0].metadata.name}')
-    [[ -z "${minio_pod}" ]] && die "No MinIO pod found with label app=${BATCH_MINIO_RELEASE} in namespace ${BATCH_NAMESPACE}"
-    kubectl exec -n "${BATCH_NAMESPACE}" "${minio_pod}" -- \
-        mc alias set local http://localhost:9000 "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" 2>/dev/null \
-        || die "Failed to configure MinIO client. Check credentials and MinIO readiness."
-    kubectl exec -n "${BATCH_NAMESPACE}" "${minio_pod}" -- \
-        mc mb "local/${MINIO_BUCKET}" 2>/dev/null || true
-    log "MinIO installed (bucket: ${MINIO_BUCKET})."
+    wait_for_deployment "${BATCH_S3_STORE_RELEASE}" "${BATCH_NAMESPACE}" 180s
+    log "SeaweedFS installed. The batch gateway creates bucket '${S3_BUCKET}' on startup."
 }
 
 create_batch_pvc() {
@@ -559,7 +558,7 @@ metadata:
 stringData:
   redis-url: "${redis_url}"
   postgresql-url: "${postgresql_url}"
-  s3-secret-access-key: "${MINIO_ROOT_PASSWORD}"
+  s3-secret-access-key: "${S3_SECRET_ACCESS_KEY}"
 EOF
     log "Secret '${BATCH_APP_SECRET_NAME}' applied."
 }
@@ -590,7 +589,7 @@ do_deploy_batch_gateway_helm() {
     install_batch_exchange
     install_batch_postgresql
     if [ "${BATCH_STORAGE_TYPE}" = "s3" ]; then
-        install_batch_minio
+        install_batch_seaweedfs
     else
         create_batch_pvc
     fi
@@ -628,13 +627,13 @@ do_deploy_batch_gateway_helm() {
     )
 
     if [ "${BATCH_STORAGE_TYPE}" = "s3" ]; then
-        local minio_endpoint="http://${BATCH_MINIO_RELEASE}.${BATCH_NAMESPACE}.svc.cluster.local:9000"
+        local s3_endpoint="http://${BATCH_S3_STORE_RELEASE}.${BATCH_NAMESPACE}.svc.cluster.local:${SEAWEEDFS_S3_PORT}"
         helm_args+=(
-            --set "global.fileClient.s3.endpoint=${minio_endpoint}"
-            --set "global.fileClient.s3.region=${MINIO_REGION}"
-            --set "global.fileClient.s3.bucket=${MINIO_BUCKET}"
-            --set "global.fileClient.s3.accessKeyId=${MINIO_ROOT_USER}"
-            --set "global.fileClient.s3.prefix=${MINIO_BUCKET}"
+            --set "global.fileClient.s3.endpoint=${s3_endpoint}"
+            --set "global.fileClient.s3.region=${S3_REGION}"
+            --set "global.fileClient.s3.bucket=${S3_BUCKET}"
+            --set "global.fileClient.s3.accessKeyId=${S3_ACCESS_KEY}"
+            --set "global.fileClient.s3.prefix=${S3_BUCKET}"
             --set "global.fileClient.s3.usePathStyle=true"
             --set "global.fileClient.s3.autoCreateBucket=true"
         )

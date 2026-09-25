@@ -27,7 +27,7 @@ bash examples/deploy-demo/deploy-k8s.sh install
 | Kuadrant | Auth + rate limiting (installed via Helm) |
 | Redis | Exchange backend (Bitnami Helm chart, configurable via `BATCH_EXCHANGE_CLIENT_TYPE`) |
 | PostgreSQL | Batch metadata store (Bitnami Helm chart) |
-| MinIO | S3-compatible file storage (when `BATCH_STORAGE_TYPE=s3`) |
+| SeaweedFS | S3-compatible file storage (when `BATCH_STORAGE_TYPE=s3`) |
 | Internal Gateway | ClusterIP gateway for batch processor → LLM inference (bypasses rate limits, preserves AuthPolicy) |
 | InferenceObjective | GIE flow control CRDs — priority-based dispatch (interactive=100, batch=-1). Enabled by default (`ENABLE_FLOW_CONTROL=true`) |
 | batch-gateway | apiserver + processor + gc (Helm chart) |
@@ -100,7 +100,7 @@ bash examples/deploy-demo/deploy-k8s.sh uninstall
 Default `uninstall` removes the batch-gateway footprint and associated gateway/policy resources:
 
 - Dispatcher Helm release (if deployed)
-- Helm releases and CRs in `BATCH_NAMESPACE` (`batch-route` HTTPRoute, Redis, PostgreSQL, MinIO)
+- Helm releases and CRs in `BATCH_NAMESPACE` (`batch-route` HTTPRoute, Redis, PostgreSQL, SeaweedFS)
 - Both Gateways: `GATEWAY_NAME` and `BATCH_INTERNAL_GATEWAY_NAME`
 - DestinationRule `${BATCH_INSTANCE_NAME}-backend-tls`
 - Internal Gateway resources (`batch-llm-route`, `batch-llm-route-auth`) in `LLM_NAMESPACE`
@@ -124,6 +124,8 @@ Use that only on **ephemeral or dedicated** demo clusters. See [issue #309](http
 
 ## Environment Variables
 
+> **Note:** SeaweedFS replaced MinIO as the S3-compatible store. This is a hard switch with no migration: the `MINIO_*` variables are no longer read (use the `S3_*` / `SEAWEEDFS_*` variables below), the default credentials changed from `minioadmin` to `s3admin`/`s3secret`, and `uninstall` no longer removes an existing `minio` Deployment/Service. On a cluster deployed before the switch, run `uninstall` and reinstall, and delete any leftover `minio` resources manually.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BATCH_INSTANCE_NAME` | `batch-gateway` | Helm release / instance name |
@@ -135,8 +137,13 @@ Use that only on **ephemeral or dedicated** demo clusters. See [issue #309](http
 | `BATCH_GC_REPO` | — | Override gc image repository |
 | `BATCH_DB_TYPE` | `postgresql` | Database backend: `postgresql` or `redis` |
 | `BATCH_STORAGE_TYPE` | `s3` | File storage: `fs` or `s3` |
-| `MINIO_BUCKET` | `llm-d-batch-gateway` | MinIO bucket name (also used as the S3 `bucket` and `prefix` config values) |
-| `MINIO_REGION` | `us-east-1` | S3 region for MinIO |
+| `BATCH_S3_STORE_RELEASE` | `seaweedfs` | SeaweedFS Deployment and Service name |
+| `SEAWEEDFS_IMAGE` | `ghcr.io/chrislusf/seaweedfs:4.47` | SeaweedFS container image |
+| `SEAWEEDFS_S3_PORT` | `8333` | SeaweedFS S3 API port |
+| `S3_BUCKET` | `llm-d-batch-gateway` | S3 bucket name (also used as the `bucket` and `prefix` values) |
+| `S3_REGION` | `us-east-1` | S3 region for SeaweedFS |
+| `S3_ACCESS_KEY` | `s3admin` | S3 access key for SeaweedFS |
+| `S3_SECRET_ACCESS_KEY` | `s3secret` | S3 secret key for SeaweedFS |
 | `DEMO_TLS_INSECURE_SKIP_VERIFY` | `1` | Disables TLS certificate verification for processor → model gateway and Istio Gateway → batch apiserver (**demo/lab only**, [CWE-295](https://cwe.mitre.org/data/definitions/295.html)). Default `1` since demo scripts use self-signed certs. Set to `0` if you have trusted CA certs. |
 | `BATCH_NAMESPACE` | `batch-api` | Namespace for batch-gateway |
 | `LLM_NAMESPACE` | `llm` | Namespace for model serving |

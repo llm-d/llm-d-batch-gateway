@@ -88,7 +88,7 @@ if [[ "${1:-}" == "--case" ]]; then
     # No builds, certificates, real infrastructure, or HTTP calls. Keep main's
     # orchestration and both scripts' actual Helm commands under test.
     for fn in build_images pull_images ensure_cluster install_exchange install_postgresql \
-        create_secret create_tls_secret install_minio create_pvc load_images \
+        create_secret create_tls_secret install_seaweedfs create_pvc load_images \
         install_jaeger install_prometheus install_grafana install_vllm_sim \
         ensure_gie_repo install_gie_crds install_gie_epp create_inference_objectives \
         verify_deployment create_nodeport_services print_usage; do

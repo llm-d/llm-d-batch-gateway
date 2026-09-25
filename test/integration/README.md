@@ -9,7 +9,7 @@ Integration tests validate feature-level behavior through the real HTTP stack â€
 - **Multi-tenant isolation**: resources created by one tenant are invisible to another
 - **Cross-cutting behavior**: security headers, request ID propagation, 404 JSON format
 - **Inference client**: HTTP client integration with containerized mock server (Docker or Podman)
-- **S3 client**: file store operations against a real S3-compatible service (e.g. MinIO)
+- **S3 client**: file store operations against a real S3-compatible service (SeaweedFS in the dev deployment)
 
 ## Prerequisites
 
