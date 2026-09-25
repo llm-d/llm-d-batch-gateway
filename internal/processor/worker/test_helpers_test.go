@@ -120,6 +120,9 @@ func (f *failNTimesFilesClient) Retrieve(_ context.Context, _, _ string) (io.Rea
 func (f *failNTimesFilesClient) List(_ context.Context, _ string) ([]filesapi.BatchFileMetadata, error) {
 	return nil, nil
 }
+func (f *failNTimesFilesClient) RetrieveRange(_ context.Context, _, _ string, _ int64, _ int64) (io.ReadCloser, error) {
+	return nil, nil
+}
 func (f *failNTimesFilesClient) Delete(_ context.Context, _, _ string) error { return nil }
 func (f *failNTimesFilesClient) GetContext(p context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithCancel(p)
@@ -145,6 +148,9 @@ func (f *failOnNthCallClient) Retrieve(_ context.Context, _, _ string) (io.ReadC
 	return nil, nil, nil
 }
 func (f *failOnNthCallClient) List(_ context.Context, _ string) ([]filesapi.BatchFileMetadata, error) {
+	return nil, nil
+}
+func (f *failOnNthCallClient) RetrieveRange(_ context.Context, _, _ string, _ int64, _ int64) (io.ReadCloser, error) {
 	return nil, nil
 }
 func (f *failOnNthCallClient) Delete(_ context.Context, _, _ string) error { return nil }
@@ -464,6 +470,8 @@ func setupJobWithOutputFile(t *testing.T, cfg *config.ProcessorConfig, jobID, te
 }
 
 // setupExecutionJob creates a complete job directory with input file, plan files, and model map.
+// It also stores the input data in the mock files client and seeds a FileDB record so that
+// resolveInputFileCoords works for executeJob tests. The returned jobInfo has BatchJob.InputFileID set.
 func setupExecutionJob(
 	t *testing.T,
 	cfg *config.ProcessorConfig,
@@ -477,6 +485,7 @@ func setupExecutionJob(
 
 	jobID := "test-job"
 	tenantID := "tenant-1"
+	inputFileID := "file-test-input"
 
 	jobRootDir, err := env.p.jobRootDir(jobID, tenantID)
 	if err != nil {
@@ -486,8 +495,30 @@ func setupExecutionJob(
 		t.Fatalf("MkdirAll: %v", err)
 	}
 
+	// Write input locally for plan entry computation.
 	inputPath := filepath.Join(jobRootDir, "input.jsonl")
 	rawInput := writeInputJSONL(t, inputPath, requests)
+
+	// Store input data in mock files client for ranged reads.
+	folderName, err := ucom.GetFolderNameByTenantID(tenantID)
+	if err != nil {
+		t.Fatalf("GetFolderNameByTenantID: %v", err)
+	}
+	storageName := ucom.FileStorageName(inputFileID, "input.jsonl")
+	if _, err := env.p.files.storage.Store(
+		context.Background(), storageName, folderName, 0, 0, bytes.NewReader(rawInput),
+	); err != nil {
+		t.Fatalf("Store input in mock files client: %v", err)
+	}
+
+	// Seed FileDB record so resolveInputFileCoords can look it up.
+	fileSpec := &openai.FileObject{Filename: "input.jsonl"}
+	if err := env.p.files.db.DBStore(context.Background(), &db.FileItem{
+		BaseIndexes:  db.BaseIndexes{ID: inputFileID, TenantID: tenantID},
+		BaseContents: db.BaseContents{Spec: mustJSON(t, fileSpec)},
+	}); err != nil {
+		t.Fatalf("DBStore file item: %v", err)
+	}
 
 	allEntries := planEntriesFromLines(rawInput)
 
@@ -516,6 +547,11 @@ func setupExecutionJob(
 	jobInfo := &batch_types.JobInfo{
 		JobID:    jobID,
 		TenantID: tenantID,
+		BatchJob: &openai.Batch{
+			BatchSpec: openai.BatchSpec{
+				InputFileID: inputFileID,
+			},
+		},
 	}
 
 	return env, jobInfo
@@ -678,19 +714,6 @@ func testReadPlanEntries(t *testing.T, planPath string) []planEntry {
 		out = append(out, unmarshalPlanEntry(buf))
 	}
 	return out
-}
-
-func readAtExact(t *testing.T, f *os.File, off int64, n uint32) []byte {
-	t.Helper()
-	buf := make([]byte, n)
-	readN, err := f.ReadAt(buf, off)
-	if err != nil && !errors.Is(err, io.EOF) {
-		t.Fatalf("ReadAt(off=%d,n=%d): %v", off, n, err)
-	}
-	if uint32(readN) != n {
-		t.Fatalf("ReadAt short: got=%d want=%d", readN, n)
-	}
-	return buf
 }
 
 // readNonEmptyJSONLLines reads a JSONL file and returns non-empty lines as byte slices.

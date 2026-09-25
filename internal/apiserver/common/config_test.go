@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/llm-d/llm-d-batch-gateway/internal/shared/batchinput"
 )
 
 func TestAPIServerConfig(t *testing.T) {
@@ -315,4 +317,45 @@ func setupTestSSLFiles(t *testing.T, dir string) (string, string) {
 	}
 
 	return certFile, keyFile
+}
+
+func TestFileAPIBatchInputOrderPolicy(t *testing.T) {
+	t.Run("defaults to model-prefix grouping", func(t *testing.T) {
+		cfg := &ServerConfig{Port: "8080"}
+		cfg.applyDefaults()
+		if cfg.FileAPI.BatchInputOrderPolicy != string(DefaultBatchInputOrderPolicy) {
+			t.Fatalf("policy = %q, want %q", cfg.FileAPI.BatchInputOrderPolicy, DefaultBatchInputOrderPolicy)
+		}
+		if got := cfg.FileAPI.GetBatchInputOrderPolicy(); got.ID() != DefaultBatchInputOrderPolicy {
+			t.Fatalf("resolved policy = %q", got.ID())
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	})
+
+	t.Run("an explicit policy is honoured", func(t *testing.T) {
+		cfg := &ServerConfig{Port: "8080"}
+		cfg.FileAPI.BatchInputOrderPolicy = string(batchinput.PolicyOriginalV1)
+		cfg.applyDefaults()
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if got := cfg.FileAPI.GetBatchInputOrderPolicy(); got.ID() != batchinput.PolicyOriginalV1 {
+			t.Fatalf("resolved policy = %q, want %q", got.ID(), batchinput.PolicyOriginalV1)
+		}
+	})
+
+	t.Run("an unknown policy fails validation at startup", func(t *testing.T) {
+		cfg := &ServerConfig{Port: "8080"}
+		cfg.FileAPI.BatchInputOrderPolicy = "does-not-exist-v1"
+		cfg.applyDefaults()
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("expected an unknown ordering policy to be rejected")
+		}
+		if !strings.Contains(err.Error(), "batch_input_order_policy") {
+			t.Fatalf("unexpected error %v", err)
+		}
+	})
 }

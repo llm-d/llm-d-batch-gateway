@@ -1285,3 +1285,38 @@ func TestResolveModelGateways_Async(t *testing.T) {
 		}
 	})
 }
+
+func TestProcessorConfig_InputReadBudget(t *testing.T) {
+	t.Run("defaults are set", func(t *testing.T) {
+		cfg := NewConfig()
+		if cfg.InputChunkSizeBytes != DefaultInputChunkSizeBytes {
+			t.Fatalf("InputChunkSizeBytes = %d, want %d", cfg.InputChunkSizeBytes, DefaultInputChunkSizeBytes)
+		}
+		if cfg.InputPrefetchBytes != DefaultInputPrefetchBytes {
+			t.Fatalf("InputPrefetchBytes = %d, want %d", cfg.InputPrefetchBytes, DefaultInputPrefetchBytes)
+		}
+	})
+
+	t.Run("a prefetch budget below one chunk is rejected", func(t *testing.T) {
+		cfg := NewConfig()
+		cfg.GlobalInferenceGateway = validGlobalConfig()
+		cfg.InputChunkSizeBytes = 8 << 20
+		cfg.InputPrefetchBytes = 1 << 20
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("expected a prefetch budget smaller than one chunk to be rejected")
+		}
+		if !strings.Contains(err.Error(), "input_prefetch_bytes") {
+			t.Fatalf("unexpected error %v", err)
+		}
+	})
+
+	t.Run("a non-positive chunk size is rejected", func(t *testing.T) {
+		cfg := NewConfig()
+		cfg.GlobalInferenceGateway = validGlobalConfig()
+		cfg.InputChunkSizeBytes = 0
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected a zero chunk size to be rejected")
+		}
+	})
+}

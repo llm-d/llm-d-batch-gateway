@@ -96,6 +96,17 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: 'max_line_count: 50000'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'batch_input_order_policy: "model-prefix-v1"'
+
+  - it: should render an overridden batch input order policy
+    set:
+      apiserver.config.fileAPI.batchInputOrderPolicy: original-v1
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'batch_input_order_policy: "original-v1"'
 
   - it: should render the global maximum input-file size
     set:

@@ -64,6 +64,7 @@ data:
       default_expiration_seconds: {{ .Values.apiserver.config.fileAPI.defaultExpirationSeconds }}
       max_size_bytes: {{ .Values.global.maxInputFileSizeBytes | int64 }}
       max_line_count: {{ .Values.apiserver.config.fileAPI.maxLineCount }}
+      batch_input_order_policy: {{ .Values.apiserver.config.fileAPI.batchInputOrderPolicy | quote }}
     enable_pprof: {{ .Values.apiserver.config.enablePprof }}
     otel:
       redis_tracing: {{ .Values.global.otel.redisTracing }}

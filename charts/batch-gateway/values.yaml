@@ -206,6 +206,13 @@ apiserver:
     fileAPI:
       defaultExpirationSeconds: 7776000
       maxLineCount: 50000
+      # Ordering applied to purpose=batch uploads before they are stored, so the
+      # processor can stream them back in a few range reads instead of one per
+      # request. The policy that wrote an object is recorded with it, so changing
+      # this only affects new uploads.
+      #   model-prefix-v1: group by model, then system-prompt prefix (default)
+      #   original-v1:     keep the client's upload order
+      batchInputOrderPolicy: model-prefix-v1
     # Enable pprof profiling endpoints on the observability server (/debug/pprof/)
     enablePprof: false
 
@@ -317,6 +324,11 @@ processor:
     # The processor derives its effective worker count at startup from this,
     # workDirVolume.sizeLimit, and the maximum input-file size.
     inputFileDiskBudgetPercent: 10
+    # Reading an input the API server already stored in dispatch order: the
+    # span of one ranged read, and the cap on fetched-but-undispatched bytes
+    # per job. Peak input memory is roughly numWorkers * inputPrefetchBytes.
+    inputChunkSizeBytes: 8388608
+    inputPrefetchBytes: 33554432
     concurrency:
       # Fixed ceiling for total in-flight requests across all endpoints.
       # When AIMD is enabled, per-endpoint limits self-regulate via backpressure,

@@ -18,15 +18,12 @@ package worker
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -36,7 +33,7 @@ import (
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/batchctx"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/metrics"
-	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
+	"github.com/llm-d/llm-d-batch-gateway/internal/shared/batchinput"
 	batch_types "github.com/llm-d/llm-d-batch-gateway/internal/shared/types"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
 	uotel "github.com/llm-d/llm-d-batch-gateway/internal/util/otel"
@@ -44,8 +41,11 @@ import (
 )
 
 // preProcessJob performs the pre-processing steps for the job.
-// It downloads the input file, creates per-model plan files, and writes
-// error entries for requests targeting unregistered models.
+// There are two ways in: when the stored object records an ordering policy
+// this build understands, ingestion is metadata-only and the input is never
+// downloaded — execution streams the object instead. Otherwise it falls back
+// to downloading the input, validating it, and building per-model plan files,
+// writing error entries for requests targeting unregistered models.
 // The rejected count is persisted in model_map.json so executeJob can
 // seed BatchRequestCounts.Failed without an extra parameter.
 func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobInfo) (err error) {
@@ -80,6 +80,34 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 		return fmt.Errorf("create job root directory %q: %w", jobRootDir, err)
 	}
 
+	inputRef, err := p.resolveInputFileCoords(ctx, inputFileID)
+	if err != nil {
+		return fmt.Errorf("resolve input file %q: %w", inputFileID, err)
+	}
+
+	// The layout recorded with the object is the authority here, never this
+	// processor's own configuration: an object written by some other policy
+	// must not be read as though it were written by ours.
+	//
+	// Streaming the stored object is wired for async dispatch only. Sync
+	// dispatch still derives its per-endpoint concurrency state from the model
+	// map that plan-file ingestion produces, and it is on its way out, so it
+	// keeps the scanning path rather than growing a second implementation.
+	if p.asyncInference != nil && inputRef.meta.Readable() {
+		return p.ingestOrderedInput(ctx, jobInfo, jobRootDir, inputRef.meta, planBuildStart)
+	}
+	switch {
+	case inputRef.meta == nil:
+		metrics.RecordInputIngest(metrics.IngestModeScan, metrics.InputPolicyNone)
+	case !inputRef.meta.Readable():
+		logger.V(logging.INFO).Info(
+			"Stored input layout is not readable by this build, scanning the input instead",
+			"policy", inputRef.meta.Policy, "metadataVersion", inputRef.meta.Version)
+		metrics.RecordInputIngest(metrics.IngestModeScan, string(inputRef.meta.Policy))
+	default:
+		metrics.RecordInputIngest(metrics.IngestModeScan, string(inputRef.meta.Policy))
+	}
+
 	// input file stream open
 	reader, metadata, err := p.openInputFileStream(ctx, inputFileID)
 	if err != nil {
@@ -90,15 +118,6 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 	if metadata != nil {
 		logger.V(logging.INFO).Info("Input file metadata", "metadata", metadata)
 	}
-
-	// create local input file
-	localInputFile, localInputFilePath, err := p.createLocalInputFile(jobID, jobInfo.TenantID)
-	if err != nil {
-		return fmt.Errorf("create local input file: %w", err)
-	}
-	defer localInputFile.Close()
-
-	writer := bufio.NewWriterSize(localInputFile, 1024*1024)
 
 	acc := newPlanAccumulator(jobRootDir)
 
@@ -151,7 +170,7 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 		}
 
 		// read a line from the input file
-		line, done, err := readNormalizedLine(inputFileReader)
+		line, streamBytes, done, err := readNormalizedLine(inputFileReader)
 		if err != nil {
 			return fmt.Errorf("read line %d from input file: %w", lineCount+1, err)
 		}
@@ -160,11 +179,6 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 		}
 
 		lineCount++
-
-		// write the line to the input file.
-		if _, err := writer.Write(line); err != nil {
-			return fmt.Errorf("write line %d to input file %q: %w", lineCount, localInputFilePath, err)
-		}
 
 		requestMeta, err := extractAndValidateLine(line)
 		if err != nil {
@@ -211,20 +225,15 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 				metrics.RecordRequestError(lookupID)
 				logger.V(logging.DEBUG).Info("Rejected request for unregistered model",
 					"customId", requestMeta.CustomID, "model", requestMeta.ModelID)
-				offset += int64(len(line))
+				offset += int64(streamBytes)
 				continue
 			}
 		}
 
 		nextOffset := accumulatePlanEntry(
-			acc, requestMeta.ModelID, modelToSafe, used, offset, uint32(len(line)), requestMeta.PrefixHash,
+			acc, requestMeta.ModelID, modelToSafe, used, offset, uint32(streamBytes), requestMeta.PrefixHash,
 		)
 		offset = nextOffset
-	}
-
-	// flush input.jsonl file
-	if err := writer.Flush(); err != nil {
-		return fmt.Errorf("flush input file %q: %w", localInputFilePath, err)
 	}
 
 	if err := finalizePlanFiles(acc, modelToSafe); err != nil {
@@ -251,90 +260,39 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 		modelCounts[model] = len(acc.entries[safe])
 	}
 	logger.V(logging.INFO).Info("Processor Pre-processing job completed",
-		"inputFilePath", localInputFilePath, "planFilePath", acc.plansDir(),
+		"planFilePath", acc.plansDir(),
 		"lineCount", lineCount, "rejected", rejectedCount, "models", modelCounts)
 
 	return nil
 }
 
 // readNormalizedLine reads the next line from the reader, ensuring it ends with '\n'.
-// Returns (line, eof, err): line is the normalized bytes, eof is true when input is exhausted.
-func readNormalizedLine(r *bufio.Reader) ([]byte, bool, error) {
-	line, err := r.ReadBytes('\n')
+// streamBytes is the number of bytes consumed from the underlying stream (may differ from
+// len(line) for the last line in a file that has no trailing newline).
+func readNormalizedLine(r *bufio.Reader) (line []byte, streamBytes int, done bool, err error) {
+	line, err = r.ReadBytes('\n')
 	if err != nil && err != io.EOF {
-		return nil, false, err
+		return nil, 0, false, err
 	}
 	if len(line) == 0 && err == io.EOF {
-		return nil, true, nil
+		return nil, 0, true, nil
 	}
-	// if last line is not terminated with '\n', append '\n' to the line
+	streamBytes = len(line)
 	if line[len(line)-1] != '\n' {
 		line = append(line, '\n')
 	}
-	return line, false, nil
+	return line, streamBytes, false, nil
 }
 
-type requestMeta struct {
-	CustomID   string
-	ModelID    string
-	PrefixHash uint32
-}
+// requestMeta is the ingestion-time view of a request line.
+type requestMeta = batchinput.LineMeta
 
 // extractAndValidateLine parses and validates a request line and returns the
-// metadata needed during ingestion.
+// metadata needed during ingestion. The implementation is shared with the API
+// server so that a line ordered at upload time and the same line validated
+// here can never disagree on its model or prefix hash.
 func extractAndValidateLine(line []byte) (requestMeta, error) {
-	var req planRequestLine
-	trimmedLine := bytes.TrimSuffix(line, []byte{'\n'})
-	if err := json.Unmarshal(trimmedLine, &req); err != nil {
-		return requestMeta{}, err
-	}
-	if req.CustomID == "" {
-		return requestMeta{}, fmt.Errorf("custom_id is required")
-	}
-	if req.Method == "" {
-		return requestMeta{}, fmt.Errorf("method is required")
-	}
-	if req.Method != "POST" {
-		return requestMeta{}, fmt.Errorf("invalid method: %s", req.Method)
-	}
-	if req.URL == "" {
-		return requestMeta{}, fmt.Errorf("url is required")
-	}
-	if !strings.HasPrefix(req.URL, "/") || strings.HasPrefix(req.URL, "//") || strings.Contains(req.URL, "://") {
-		return requestMeta{}, fmt.Errorf("url must be a relative path: %s", req.URL)
-	}
-	if !openai.IsValidEndpoint(req.URL) {
-		return requestMeta{}, fmt.Errorf("invalid endpoint: %s", req.URL)
-	}
-	if req.Body.Model == "" {
-		return requestMeta{}, fmt.Errorf("model id is empty")
-	}
-	if req.Body.Stream != nil && *req.Body.Stream {
-		return requestMeta{}, fmt.Errorf("streaming is not supported in batch requests (model: %s)", req.Body.Model)
-	}
-
-	prefixHash := NoPrefixHash
-	for _, msg := range req.Body.Messages {
-		if msg.Role != "system" {
-			continue
-		}
-		text, err := messageText(msg.Content)
-		if err != nil {
-			return requestMeta{}, fmt.Errorf("system message content: %w", err)
-		}
-		if text != "" {
-			h := fnv.New32a()
-			h.Write([]byte(text))
-			prefixHash = h.Sum32()
-			break
-		}
-	}
-
-	return requestMeta{
-		CustomID:   req.CustomID,
-		ModelID:    req.Body.Model,
-		PrefixHash: prefixHash,
-	}, nil
+	return batchinput.ParseLine(line)
 }
 
 func writeModelMappings(jobRootDir string, modelToSafe map[string]string, lineCount, rejectedCount int64) error {
@@ -348,6 +306,10 @@ func writeModelMappings(jobRootDir string, modelToSafe map[string]string, lineCo
 		SafeToModel:   safeToModel,
 		LineCount:     lineCount,
 		RejectedCount: rejectedCount,
+		// Stated rather than left implicit, even though it is the zero value:
+		// this path is the one that produced the plan files, so it should say
+		// so.
+		InputMode: inputModePlanFiles,
 	}
 	return writeModelMapFile(jobRootDir, modelMap)
 }

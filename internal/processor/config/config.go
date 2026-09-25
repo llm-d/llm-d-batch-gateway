@@ -98,6 +98,15 @@ const (
 	// DefaultMaxInputFileSizeBytes is the files API's default maximum input-file
 	// size. It is used unless input_file_max_size_bytes is explicitly configured.
 	DefaultMaxInputFileSizeBytes int64 = 200 << 20
+
+	// DefaultInputChunkSizeBytes is the span of one ranged read against an
+	// input stored in dispatch order. At 8 MiB a maximum-size input costs 25
+	// requests instead of one per request.
+	DefaultInputChunkSizeBytes int64 = 8 << 20
+
+	// DefaultInputPrefetchBytes bounds fetched-but-undispatched input per job,
+	// giving three chunks of read-ahead at the default chunk size.
+	DefaultInputPrefetchBytes int64 = 32 << 20
 )
 
 // RouteKeyMethod selects how model_gateways lookup keys are derived from a
@@ -175,6 +184,17 @@ type ProcessorConfig struct {
 	// the files API. It keeps the worker cap conservative when that API limit is
 	// overridden from its default.
 	MaxInputFileSizeBytes int64 `yaml:"input_file_max_size_bytes"`
+
+	// InputChunkSizeBytes is the span of one ranged read when streaming an
+	// input that is already stored in dispatch order. Larger spans mean fewer
+	// storage requests per job; smaller ones mean less memory per worker.
+	InputChunkSizeBytes int64 `yaml:"input_chunk_size_bytes"`
+
+	// InputPrefetchBytes caps how much fetched-but-undispatched input a single
+	// job holds. With the chunk size it fixes both the read-ahead depth and
+	// the per-worker memory cost, so budget for
+	// num_workers * input_prefetch_bytes.
+	InputPrefetchBytes int64 `yaml:"input_prefetch_bytes"`
 
 	// Concurrency groups all dispatch-rate and concurrency control settings.
 	Concurrency ConcurrencyConfig `yaml:"concurrency"`
@@ -381,6 +401,8 @@ func NewConfig() *ProcessorConfig {
 		WorkDirSizeLimit:           DefaultWorkDirSizeLimit,
 		InputFileDiskBudgetPercent: DefaultInputFileDiskBudgetPercent,
 		MaxInputFileSizeBytes:      DefaultMaxInputFileSizeBytes,
+		InputChunkSizeBytes:        DefaultInputChunkSizeBytes,
+		InputPrefetchBytes:         DefaultInputPrefetchBytes,
 		Addr:                       ":9090",
 		// Keep observability as best-effort by default.
 		TerminateOnObservabilityFailure: false,
@@ -426,6 +448,14 @@ func (c *ProcessorConfig) Validate() error {
 
 	if err := c.Concurrency.validate(); err != nil {
 		return err
+	}
+
+	if c.InputChunkSizeBytes <= 0 {
+		return fmt.Errorf("input_chunk_size_bytes must be > 0")
+	}
+	if c.InputPrefetchBytes < c.InputChunkSizeBytes {
+		return fmt.Errorf("input_prefetch_bytes (%d) must be >= input_chunk_size_bytes (%d)",
+			c.InputPrefetchBytes, c.InputChunkSizeBytes)
 	}
 
 	if c.ShutdownTimeout <= 0 {

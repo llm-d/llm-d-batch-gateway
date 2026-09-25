@@ -48,6 +48,7 @@ func testBatches(t *testing.T) {
 	t.Run("PassThroughHeaders", doTestPassThroughHeaders)
 	skipIf(t, testDispatcherDeployed, "requires sync dispatch slot saturation", "Expiration", doTestBatchExpiration)
 	t.Run("MultiModel", doTestMultiModelBatch)
+	t.Run("InputStoredInDispatchOrder", doTestBatchInputStoredInDispatchOrder)
 	t.Run("ProgressPolling", doTestProgressPolling)
 	t.Run("Ingestion", func(t *testing.T) {
 		t.Run("DuplicateCustomID", doTestDuplicateCustomID)
@@ -964,4 +965,135 @@ func doTestCreateBatchNonexistentFile(t *testing.T) {
 		t.Errorf("expected 400, got %d", apiErr.StatusCode)
 	}
 	t.Logf("nonexistent file correctly rejected: %d", apiErr.StatusCode)
+}
+
+// doTestBatchInputStoredInDispatchOrder verifies the upload-time ordering that
+// lets the processor read an input in a few range reads instead of one per
+// request.
+//
+// Ordering is observable through the Files API, since downloading an input
+// returns the object as stored. The assertion is on grouping rather than on an
+// exact permutation: the policy that produced it is an implementation detail
+// that may be re-tuned, while "requests for the same model and system prompt
+// arrive together" is the property the inference backends actually benefit
+// from.
+func doTestBatchInputStoredInDispatchOrder(t *testing.T) {
+	t.Helper()
+
+	const sharedPrompt = "You are a terse assistant."
+
+	// Interleave two models and two system prompts so that any grouping in the
+	// stored object has to be the result of reordering.
+	var lines []string
+	var uploadedIDs []string
+	for i := range 3 {
+		for _, spec := range []struct {
+			model  string
+			prompt string
+			group  string
+		}{
+			{testModelB, sharedPrompt, "b-shared"},
+			{testModel, "", "a-none"},
+			{testModel, sharedPrompt, "a-shared"},
+		} {
+			id := fmt.Sprintf("%s-%d", spec.group, i)
+			uploadedIDs = append(uploadedIDs, id)
+
+			messages := ""
+			if spec.prompt != "" {
+				messages = fmt.Sprintf(`{"role":"system","content":%q},`, spec.prompt)
+			}
+			lines = append(lines, fmt.Sprintf(
+				`{"custom_id":%q,"method":"POST","url":"/v1/chat/completions","body":{"model":"%s","max_tokens":5,"messages":[%s{"role":"user","content":"Hello"}]}}`,
+				id, spec.model, messages))
+		}
+	}
+	jsonl := strings.Join(lines, "\n")
+
+	fileID := mustCreateFile(t, fmt.Sprintf("test-input-order-%s.jsonl", testRunID), jsonl)
+
+	// Download the input back: the API returns the object as stored.
+	resp, err := newClient().Files.Content(context.Background(), fileID)
+	if err != nil {
+		t.Fatalf("download input file failed: %v", err)
+	}
+	stored, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read input file failed: %v", err)
+	}
+
+	var storedIDs []string
+	var groups []string
+	for _, line := range strings.Split(strings.TrimSpace(string(stored)), "\n") {
+		var req struct {
+			CustomID string `json:"custom_id"`
+		}
+		if err := json.Unmarshal([]byte(line), &req); err != nil {
+			t.Fatalf("stored input line is not valid JSON: %v", err)
+		}
+		storedIDs = append(storedIDs, req.CustomID)
+
+		group := req.CustomID[:strings.LastIndex(req.CustomID, "-")]
+		if len(groups) == 0 || groups[len(groups)-1] != group {
+			groups = append(groups, group)
+		}
+	}
+
+	// Nothing may be lost or duplicated by reordering.
+	if len(storedIDs) != len(uploadedIDs) {
+		t.Fatalf("stored input has %d requests, uploaded %d", len(storedIDs), len(uploadedIDs))
+	}
+	seen := map[string]int{}
+	for _, id := range storedIDs {
+		seen[id]++
+	}
+	for _, id := range uploadedIDs {
+		if seen[id] != 1 {
+			t.Errorf("custom_id %q appears %d times in the stored input, want 1", id, seen[id])
+		}
+	}
+
+	// Each model/prompt group must be contiguous, so it is entered once.
+	if len(groups) != 3 {
+		t.Errorf("stored input has %d contiguous groups, want 3 (one per model/prompt pair): %v",
+			len(groups), groups)
+	}
+	t.Logf("stored input groups: %v", groups)
+
+	// And the batch must still run correctly over the reordered object.
+	batchID := mustCreateBatch(t, fileID)
+	finalBatch, results := waitForBatchStatus(t, batchID, 5*time.Minute, openai.BatchStatusCompleted)
+
+	total := int64(len(uploadedIDs))
+	if finalBatch.RequestCounts.Total != total {
+		t.Errorf("total = %d, want %d", finalBatch.RequestCounts.Total, total)
+	}
+	if finalBatch.RequestCounts.Completed != total {
+		t.Errorf("completed = %d, want %d", finalBatch.RequestCounts.Completed, total)
+	}
+	if finalBatch.RequestCounts.Failed != 0 {
+		t.Errorf("failed = %d, want 0", finalBatch.RequestCounts.Failed)
+	}
+
+	// Every uploaded custom_id must come back exactly once.
+	if results != nil {
+		got := map[string]int{}
+		for _, line := range strings.Split(strings.TrimSpace(results.OutputBody), "\n") {
+			if line == "" {
+				continue
+			}
+			var out batchResultLine
+			if err := json.Unmarshal([]byte(line), &out); err != nil {
+				t.Errorf("invalid output line: %v", err)
+				continue
+			}
+			got[out.CustomID]++
+		}
+		for _, id := range uploadedIDs {
+			if got[id] != 1 {
+				t.Errorf("custom_id %q appears %d times in the output, want 1", id, got[id])
+			}
+		}
+	}
 }

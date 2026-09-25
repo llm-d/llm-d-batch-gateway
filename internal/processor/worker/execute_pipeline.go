@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 
+	filesapi "github.com/llm-d/llm-d-batch-gateway/internal/files_store/api"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/batchctx"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/pipeline"
@@ -48,6 +50,29 @@ func (p *Processor) executeJobAsync(ctx context.Context, params *jobExecutionPar
 		sloDeadline = params.task.SLO
 	}
 
+	var (
+		inputRef  *inputFileRef
+		inputFile *os.File
+	)
+	if params.jobInfo != nil && params.jobInfo.BatchJob != nil && params.jobInfo.BatchJob.InputFileID != "" {
+		ref, err := p.resolveInputFileCoords(ctx, params.jobInfo.BatchJob.InputFileID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve input file coordinates: %w", err)
+		}
+		inputRef = ref
+	} else {
+		localInputPath := filepath.Join(jobRootDir, "input.jsonl")
+		if f, err := os.Open(localInputPath); err == nil {
+			inputFile = f
+			defer inputFile.Close()
+		}
+	}
+
+	var storage filesapi.BatchFilesClient
+	if p.files != nil {
+		storage = p.files.storage
+	}
+
 	// Setup pipeline.
 
 	tracker := pipeline.NewProgressTracker(
@@ -59,17 +84,40 @@ func (p *Processor) executeJobAsync(ctx context.Context, params *jobExecutionPar
 	)
 	tracker.AddFailed(modelMap.RejectedCount)
 
-	source := NewPlanFileSource(PlanFileSourceConfig{
-		InputFile:          files.input,
-		PlansDir:           plansDir,
-		ModelMap:           modelMap,
-		Resolver:           p.inference,
-		Cfg:                p.cfg,
-		PassThroughHeaders: params.jobInfo.PassThroughHeaders,
-		SLODeadline:        sloDeadline,
-		TenantID:           params.jobInfo.TenantID,
-		Logger:             logger,
-	})
+	// Ingestion already decided how the input must be read and recorded it in
+	// the manifest, so execution follows that decision rather than re-deriving
+	// it from the file record.
+	var source pipeline.RequestSource
+	if modelMap.sequentialInput() {
+		source = NewObjectSource(ObjectSourceConfig{
+			Storage:            storage,
+			InputRef:           inputRef,
+			Size:               modelMap.InputBytes,
+			LineCount:          modelMap.LineCount,
+			Policy:             modelMap.InputPolicy,
+			Cfg:                p.cfg,
+			PassThroughHeaders: params.jobInfo.PassThroughHeaders,
+			SLODeadline:        sloDeadline,
+			TenantID:           params.jobInfo.TenantID,
+			Logger:             logger,
+			ChunkSize:          p.cfg.InputChunkSizeBytes,
+			PrefetchBytes:      p.cfg.InputPrefetchBytes,
+		})
+	} else {
+		source = NewPlanFileSource(PlanFileSourceConfig{
+			Storage:            storage,
+			InputRef:           inputRef,
+			InputFile:          inputFile,
+			PlansDir:           plansDir,
+			ModelMap:           modelMap,
+			Resolver:           p.inference,
+			Cfg:                p.cfg,
+			PassThroughHeaders: params.jobInfo.PassThroughHeaders,
+			SLODeadline:        sloDeadline,
+			TenantID:           params.jobInfo.TenantID,
+			Logger:             logger,
+		})
+	}
 
 	// The dispatcher forwards requests for processing.
 	pending := pipeline.NewPendingRequests(modelMap.LineCount)
@@ -126,6 +174,9 @@ func (p *Processor) buildRequestDispatcher(modelMap *modelMapFile, pending *pipe
 	switch {
 	case p.asyncInference != nil:
 		broadcasters := p.broadcasters.forModels(modelMap)
+		if modelMap.sequentialInput() {
+			broadcasters = p.broadcasters.forModelNames(modelMap.InputModels)
+		}
 		async := pipeline.NewAsyncDispatcher(p.asyncInference, broadcasters, pending, logger)
 		return pipeline.NewPreDispatcher(async), nil
 	case p.cfg.Concurrency.AIMD.Enabled:
@@ -152,11 +203,11 @@ func (p *Processor) buildRequestDispatcher(modelMap *modelMapFile, pending *pipe
 }
 
 type dataFiles struct {
-	input, output, error *os.File
+	output, error *os.File
 }
 
 func (f *dataFiles) close() {
-	for _, file := range []*os.File{f.input, f.output, f.error} {
+	for _, file := range []*os.File{f.output, f.error} {
 		if file != nil {
 			_ = file.Close()
 		}
@@ -167,40 +218,27 @@ func (p *Processor) openDataFiles(params *jobExecutionParams) (*dataFiles, error
 	jobID := params.jobInfo.JobID
 	tenantID := params.jobInfo.TenantID
 
-	inputPath, err := p.jobInputFilePath(jobID, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	inputFile, err := os.Open(inputPath)
-	if err != nil {
-		return nil, fmt.Errorf("open input file: %w", err)
-	}
-
 	outputPath, err := p.jobOutputFilePath(jobID, tenantID)
 	if err != nil {
-		inputFile.Close()
 		return nil, err
 	}
 	outputFile, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		inputFile.Close()
 		return nil, fmt.Errorf("create output file: %w", err)
 	}
 
 	errorPath, err := p.jobErrorFilePath(jobID, tenantID)
 	if err != nil {
-		inputFile.Close()
 		outputFile.Close()
 		return nil, err
 	}
 	errorFile, err := os.OpenFile(errorPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		inputFile.Close()
 		outputFile.Close()
 		return nil, fmt.Errorf("create error file: %w", err)
 	}
 
-	return &dataFiles{input: inputFile, output: outputFile, error: errorFile}, nil
+	return &dataFiles{output: outputFile, error: errorFile}, nil
 }
 
 // buildAIMDModels keys per-endpoint concurrency state by route key: dispatch

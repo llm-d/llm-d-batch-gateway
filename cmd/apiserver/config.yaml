@@ -89,3 +89,10 @@ file_api:
   # Maximum number of lines per file (default: 50,000)
   # Set to 0 or omit to use the default of 50,000 lines
   max_line_count: 50000
+  # Ordering applied to purpose=batch uploads before they are stored, so the
+  # processor can stream them back in a few range reads instead of one per
+  # request. The policy that wrote an object is recorded with it, so changing
+  # this only affects new uploads; existing files keep their own layout.
+  #   model-prefix-v1: group by model, then system-prompt prefix (default)
+  #   original-v1:     keep the client's upload order
+  batch_input_order_policy: model-prefix-v1
