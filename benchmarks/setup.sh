@@ -16,7 +16,9 @@ set -euo pipefail
 #   LLM_D_REPO         — path to llm-d checkout (overrides downloading from LLM_D_TAG)
 #   ROUTER_REPO        — path to llm-d-router checkout (overrides OCI chart)
 #   ROUTER_CHART_VERSION — OCI chart version for llm-d-router (default: 0.9.2)
-#   ROUTER_EPP_TAG     — EPP image tag for local repo mode (default: v0.8.0)
+#   ROUTER_EPP_TAG     — EPP image tag (default: v0.9.0)
+#   ROUTER_EPP_REGISTRY — EPP image registry (default: ghcr.io)
+#   ROUTER_EPP_REPOSITORY — EPP image repository (default: llm-d/llm-d-inference-scheduler)
 #   LLM_D_TAG          — git tag for llm-d guide values (default: v0.7.0)
 #   NAMESPACE          — override auto-generated namespace (default: batch-bench-s${SCENARIO})
 #   MODEL              — model to serve (default: Qwen/Qwen3-8B)
@@ -30,9 +32,6 @@ set -euo pipefail
 #   BENCH_DB_PASSWORD  — PostgreSQL password (default: random 24-char string)
 #   PROMETHEUS_RELEASE — Prometheus Operator release label for ServiceMonitor discovery (default: llmd-kube-prometheus-stack)
 #   PROMETHEUS_NAMESPACE — Namespace where Prometheus is deployed (default: llm-d-monitoring)
-#   DISPATCHER_VERSION — async-processor image version for scenario 5 (default: v0.7.3)
-#   DISPATCHER_CHART   — async-processor Helm chart reference (default: OCI chart)
-#   DISPATCHER_CHART_VERSION — async-processor chart version (default: 0.7.3)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -47,7 +46,9 @@ fi
 GUIDE_NAME="${GUIDE_NAME:-optimized-baseline}"
 NAMESPACE="${NAMESPACE:-batch-bench-s${SCENARIO}}"
 ROUTER_CHART_VERSION="${ROUTER_CHART_VERSION:-0.9.2}"
-ROUTER_EPP_TAG="${ROUTER_EPP_TAG:-v0.8.0}"
+ROUTER_EPP_TAG="${ROUTER_EPP_TAG:-v0.9.0}"
+ROUTER_EPP_REGISTRY="${ROUTER_EPP_REGISTRY:-ghcr.io}"
+ROUTER_EPP_REPOSITORY="${ROUTER_EPP_REPOSITORY:-llm-d/llm-d-inference-scheduler}"
 LLM_D_TAG="${LLM_D_TAG:-v0.7.0}"
 SIM_IMAGE="${SIM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:latest}"
 SIM_TTFT="${SIM_TTFT:-50ms}"
@@ -65,6 +66,11 @@ done
 
 if [ "${SCENARIO}" -lt 0 ] || [ "${SCENARIO}" -gt 6 ]; then
     echo "ERROR: SCENARIO must be 0-6, got: ${SCENARIO}" >&2
+    exit 1
+fi
+
+if [ "${MODE}" = "sim" ] && [ "${SCENARIO}" = "3" ]; then
+    echo "ERROR: MODE=sim SCENARIO=3 is unsupported; use MODE=gpu for admission control or SCENARIO=4 for the simulator EPP path" >&2
     exit 1
 fi
 
@@ -164,16 +170,10 @@ spec:
       storage: 10Gi
 EOF
 
-# GIE (EPP) settings for sim mode scenarios 3/4
+# GIE (flow control) settings for sim mode scenario 4
 GIE_VERSION="${GIE_VERSION:-v1.5.0}"
 GIE_REPO="${GIE_REPO:-}"
 GIE_UPSTREAM_REPO="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
-
-# Async-processor settings for scenario 5
-DISPATCHER_VERSION="${DISPATCHER_VERSION:-v0.7.3}"
-DISPATCHER_IMAGE="${DISPATCHER_IMAGE:-ghcr.io/llm-d-incubation/llm-d-async:${DISPATCHER_VERSION}}"
-DISPATCHER_CHART="${DISPATCHER_CHART:-oci://ghcr.io/llm-d-incubation/charts/async-processor}"
-DISPATCHER_CHART_VERSION="${DISPATCHER_CHART_VERSION:-0.7.3}"
 
 # --- Inference backend ---
 if [ "${MODE}" = "sim" ]; then
@@ -208,11 +208,6 @@ spec:
             - "8000"
             - --time-to-first-token=${SIM_TTFT}
             - --inter-token-latency=${SIM_ITL}
-$([ "${SCENARIO}" = "5" ] && cat <<FAKEARGS
-            - --fake-metrics
-            - '{"kv-cache-usage": 0, "waiting-requests": 0, "running-requests": 0}'
-FAKEARGS
-)
           ports:
             - containerPort: 8000
               name: modelserver
@@ -243,17 +238,9 @@ spec:
       name: http
 EOF
 
-    # --- Scenario 5 sim mode: enable fake metrics on inference-sim ---
-    if [ "${SCENARIO}" = "5" ]; then
-        log "  Enabling --fake-metrics on inference-sim for endpoint-scrape gate"
-        ${K} -n "${NAMESPACE}" patch deployment inference-sim --type=json \
-            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--fake-metrics"},{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"{\"kv-cache-usage\": 0, \"waiting-requests\": 0, \"running-requests\": 0}"}]' >/dev/null
-        ${K} -n "${NAMESPACE}" rollout status deployment/inference-sim --timeout=120s >/dev/null
-    fi
-
-    # --- Scenarios 3/4 sim mode: deploy GIE EPP ---
-    if [ "${SCENARIO}" = "3" ] || [ "${SCENARIO}" = "4" ]; then
-        log "Deploying GIE EPP (sim mode, scenario ${SCENARIO})"
+    # --- Scenario 4 sim mode: deploy GIE EPP with flow control ---
+    if [ "${SCENARIO}" = "4" ]; then
+        log "Deploying GIE EPP with flow control (sim mode, scenario 4)"
 
         # Ensure GIE repo is available
         if [ -z "${GIE_REPO}" ] || [ ! -d "${GIE_REPO}" ]; then
@@ -270,31 +257,12 @@ EOF
         chart_dir="${GIE_REPO}/config/charts/standalone"
         (cd "${chart_dir}" && helm dependency build >/dev/null 2>&1)
 
-        # Create EPP config values (scenario-specific)
+        # Create flow-control values
         values_file="$(mktemp)"
-        epp_plugins_file="epp-plugins.yaml"
-
-        if [ "${SCENARIO}" = "3" ]; then
-            # S3: admission control only (no flowControl feature gate)
-            cat > "${values_file}" <<'VALUESEOF'
+        cat > "${values_file}" <<'VALUESEOF'
 inferenceExtension:
   pluginsCustomConfig:
-    epp-plugins.yaml: |
-      apiVersion: inference.networking.x-k8s.io/v1alpha1
-      kind: EndpointPickerConfig
-      plugins:
-        - type: concurrency-detector
-          parameters:
-            maxConcurrency: 50
-      saturationDetector:
-        pluginRef: concurrency-detector
-VALUESEOF
-        else
-            # S4: flow control with priority dispatch ordering
-            cat > "${values_file}" <<'VALUESEOF'
-inferenceExtension:
-  pluginsCustomConfig:
-    epp-plugins.yaml: |
+    flow-control-plugins.yaml: |
       apiVersion: inference.networking.x-k8s.io/v1alpha1
       kind: EndpointPickerConfig
       featureGates:
@@ -325,7 +293,6 @@ inferenceExtension:
       saturationDetector:
         pluginRef: concurrency-detector
 VALUESEOF
-        fi
 
         # Install EPP standalone chart
         epp_release="epp-bench"
@@ -339,7 +306,7 @@ VALUESEOF
             --set "inferencePool.modelServers.matchLabels.app=inference-sim" \
             --set "inferencePool.targetPorts[0].number=8000" \
             --set inferencePool.modelServerType=vllm \
-            --set "inferenceExtension.pluginsConfigFile=${epp_plugins_file}" \
+            --set inferenceExtension.pluginsConfigFile=flow-control-plugins.yaml \
             --set inferenceExtension.resources.requests.cpu=100m \
             --set inferenceExtension.resources.requests.memory=256Mi \
             --set inferenceExtension.resources.limits.memory=512Mi \
@@ -350,11 +317,8 @@ VALUESEOF
         log "  Waiting for EPP to be ready..."
         ${K} -n "${NAMESPACE}" wait --for=condition=available deployment/${epp_release}-epp --timeout=120s
 
-        # Create InferenceObjective CRDs in both API groups.
-        # The EPP prefers the llm-d.ai group when both are installed;
-        # creating in both ensures priority assignment works regardless
-        # of which CRD versions the cluster has.
-        log "  Creating InferenceObjective CRDs (both API groups)"
+        # Create InferenceObjective CRDs
+        log "  Creating InferenceObjective CRDs"
         ${K} -n "${NAMESPACE}" apply -f - <<EOOBJ
 apiVersion: inference.networking.x-k8s.io/v1alpha2
 kind: InferenceObjective
@@ -376,26 +340,7 @@ spec:
     group: inference.networking.k8s.io
     name: ${epp_release}
 EOOBJ
-        ${K} -n "${NAMESPACE}" apply -f - <<EOOBJ2
-apiVersion: llm-d.ai/v1alpha2
-kind: InferenceObjective
-metadata:
-  name: interactive-default
-spec:
-  priority: 100
-  poolRef:
-    name: ${epp_release}
----
-apiVersion: llm-d.ai/v1alpha2
-kind: InferenceObjective
-metadata:
-  name: batch-sheddable
-spec:
-  priority: -1
-  poolRef:
-    name: ${epp_release}
-EOOBJ2
-        log "  EPP ready: ${epp_release}-epp:8081 (scenario ${SCENARIO})"
+        log "  Flow control ready: EPP at ${epp_release}-epp:8081"
     fi
 else
     # GPU mode: deploy real vLLM + llm-d Router + Istio Gateway
@@ -403,45 +348,50 @@ else
     # --- llm-d Router (EPP) ---
     log "Installing llm-d Router (${GUIDE_NAME})"
 
-    # Scenarios 3/4: include router overlay for admission control / flow control
-    ROUTER_OVERLAY=""
-    if [ "${SCENARIO}" = "3" ]; then
-        log "  Admission control: enabling saturation-based rejection (batch priority=-1)"
-        ROUTER_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-3-admission-control-overlay-router.yaml"
-    elif [ "${SCENARIO}" = "4" ]; then
-        log "  Flow control: enabling EPP priority dispatch ordering (interactive=100, batch=-1)"
-        ROUTER_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-4-flow-control-overlay-router.yaml"
+    # Scenario 4: include router overlay for priority-based scheduling
+    FLOW_CONTROL_OVERLAY=""
+    if [ "${SCENARIO}" = "4" ]; then
+        log "  Flow control: enabling EPP priority bands (interactive=100, batch=-1)"
     fi
 
     if [ -n "${ROUTER_REPO:-}" ]; then
+        if [ "${SCENARIO}" = "3" ]; then
+            FLOW_CONTROL_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-3-admission-control-overlay-router.yaml"
+        elif [ "${SCENARIO}" = "4" ]; then
+            FLOW_CONTROL_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-4-flow-control-overlay-router.yaml"
+        fi
         # Local repo mode (development override)
         log "  Using local repo: ROUTER_REPO=${ROUTER_REPO}"
         chart_dir="${ROUTER_REPO}/config/charts/llm-d-router-gateway"
         rm -f "${chart_dir}/Chart.lock"
         (cd "${chart_dir}" && helm dependency build >/dev/null 2>&1)
+        # Only set default pluginsConfigFile when no overlay provides one
+        PLUGINS_CFG_SET=""
+        if [ -z "${FLOW_CONTROL_OVERLAY}" ]; then
+            PLUGINS_CFG_SET="--set router.epp.pluginsConfigFile=default-plugins.yaml"
+        fi
         ${H} upgrade --install "${GUIDE_NAME}" "${chart_dir}" \
             -n "${NAMESPACE}" \
             --set router.epp.replicas=1 \
-            --set router.epp.image.registry=ghcr.io \
-            --set router.epp.image.repository=llm-d/llm-d-inference-scheduler \
+            --set router.epp.image.registry=${ROUTER_EPP_REGISTRY} \
+            --set router.epp.image.repository=${ROUTER_EPP_REPOSITORY} \
             --set router.epp.image.tag=${ROUTER_EPP_TAG} \
-            --set router.epp.pluginsConfigFile=$(if [ "${SCENARIO}" = "4" ]; then echo "flow-control-plugins.yaml"; elif [ "${SCENARIO}" = "3" ]; then echo "admission-control-plugins.yaml"; else echo "default-plugins.yaml"; fi) \
+            ${PLUGINS_CFG_SET} \
             --set router.epp.resources.requests.cpu=4 \
             --set router.epp.resources.requests.memory=8Gi \
             --set router.epp.resources.limits.memory=16Gi \
             --set router.modelServers.matchLabels.llm-d\\.ai/guide=optimized-baseline \
             --set router.inferencePool.modelServerProtocol=http \
-            --set router.monitoring.prometheus.auth.enabled=true \
-            ${ROUTER_OVERLAY} \
+            --set router.monitoring.prometheus.auth.enabled=false \
+            ${FLOW_CONTROL_OVERLAY} \
             --set provider.name=istio \
             --set httpRoute.create=true \
             --set httpRoute.inferenceGatewayName=llm-d-inference-gateway >/dev/null
     else
-        # OCI mode uses inferenceExtension.* format for the overlay
         if [ "${SCENARIO}" = "3" ]; then
-            ROUTER_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-3-admission-control-overlay.yaml"
+            FLOW_CONTROL_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-3-admission-control-overlay.yaml"
         elif [ "${SCENARIO}" = "4" ]; then
-            ROUTER_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-4-flow-control-overlay.yaml"
+            FLOW_CONTROL_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-4-flow-control-overlay.yaml"
         fi
         # OCI mode (default — reproducible, pinned versions)
         log "  Using OCI chart: ghcr.io/llm-d/llm-d-router-gateway:${ROUTER_CHART_VERSION}"
@@ -462,7 +412,7 @@ else
             -f "${LLM_D_VALUES_DIR}/base.values.yaml" \
             -f "${LLM_D_VALUES_DIR}/guide.values.yaml" \
             -f "${LLM_D_VALUES_DIR}/monitoring.values.yaml" \
-            ${ROUTER_OVERLAY} \
+            ${FLOW_CONTROL_OVERLAY} \
             --set provider.name=istio \
             --set httpRoute.create=true \
             --set httpRoute.inferenceGatewayName=llm-d-inference-gateway >/dev/null
@@ -508,7 +458,7 @@ if [ "${MODE}" = "sim" ]; then
 else
     log "Waiting for vLLM to be ready..."
     ${K} -n "${NAMESPACE}" wait pod -l llm-d.ai/role=decode \
-        --for=condition=Ready --timeout=600s >/dev/null
+        --for=condition=Ready --timeout=1800s >/dev/null
 fi
 
 # --- Batch Gateway (scenarios 2-6 only) ---
@@ -535,20 +485,10 @@ if [ -n "${VALUES_FILE}" ]; then
         )
     fi
 
-    if [ "${SCENARIO}" = "5" ]; then
-        # Match the async-processor queue in both sim and GPU modes.
-        ASYNC_POOL_NAME="${GUIDE_NAME}"
-        if [ "${MODE}" = "sim" ]; then
-            ASYNC_POOL_NAME="sim-pool"
-        fi
-        BG_EXTRA_ARGS+=(
-            --set-json "processor.config.asyncDispatch.models={\"${MODEL}\":{\"inferencePoolName\":\"${ASYNC_POOL_NAME}\"}}"
-        )
-    elif [ "${MODE}" = "sim" ]; then
-        # In sync sim scenarios, replace all model gateways with a single entry.
-        if [ "${SCENARIO}" = "3" ] || [ "${SCENARIO}" = "4" ]; then
-            # Scenarios 3/4: route through EPP for admission control / flow control;
-            # null out globalInferenceGateway from values file
+    # In sim mode, replace all model gateways with a single entry
+    if [ "${MODE}" = "sim" ]; then
+        if [ "${SCENARIO}" = "4" ]; then
+            # Scenario 4: route through EPP for flow control; null out globalInferenceGateway from values file
             BG_EXTRA_ARGS+=(
                 --set-json "processor.config.globalInferenceGateway=null"
                 --set-json "processor.config.modelGateways={\"${MODEL}\":{\"url\":\"http://epp-bench-epp.${NAMESPACE}.svc.cluster.local:8081\",\"requestTimeout\":\"5m\",\"maxRetries\":3,\"initialBackoff\":\"2s\",\"maxBackoff\":\"30s\",\"inferenceObjective\":\"batch-sheddable\"}}"
@@ -577,11 +517,9 @@ else
     log "Skipping batch-gateway (not needed for scenario ${SCENARIO})"
 fi
 
-# --- Scenarios 3/4: InferenceObjective CRDs for priority assignment ---
-# Created in both API groups: the EPP prefers llm-d.ai when both are
-# installed, so omitting it causes priority assignment to be silently ignored.
+# --- Scenario 3/4: InferenceObjective CRDs (priority-based routing) ---
 if [ "${SCENARIO}" = "3" ] || [ "${SCENARIO}" = "4" ]; then
-    log "Deploying InferenceObjective CRDs for priority assignment (both API groups)"
+    log "Deploying InferenceObjective CRDs for flow control"
     ${K} -n "${NAMESPACE}" apply -f - <<EOF
 apiVersion: inference.networking.x-k8s.io/v1alpha2
 kind: InferenceObjective
@@ -603,6 +541,10 @@ spec:
     group: inference.networking.k8s.io
     name: ${GUIDE_NAME}
 EOF
+    log "  Created InferenceObjective: interactive-default (priority 100)"
+    log "  Created InferenceObjective: batch-sheddable (priority -1)"
+
+    # Also create under llm-d.ai API group (EPP selects this when available)
     ${K} -n "${NAMESPACE}" apply -f - <<EOF2
 apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
@@ -611,6 +553,7 @@ metadata:
 spec:
   priority: 100
   poolRef:
+    group: inference.networking.k8s.io
     name: ${GUIDE_NAME}
 ---
 apiVersion: llm-d.ai/v1alpha2
@@ -620,70 +563,21 @@ metadata:
 spec:
   priority: -1
   poolRef:
+    group: inference.networking.k8s.io
     name: ${GUIDE_NAME}
 EOF2
-    log "  Created InferenceObjective: interactive-default (priority 100)"
-    log "  Created InferenceObjective: batch-sheddable (priority -1)"
+    log "  Created InferenceObjective (llm-d.ai): interactive-default, batch-sheddable"
 fi
 
 # --- Scenario 5: Async processor ---
 if [ "${SCENARIO}" = "5" ]; then
-    log "Deploying async-processor (scenario 5)"
-
-    # Pool name was set with the batch-gateway mapping above.
-    if [ "${MODE}" = "sim" ]; then
-        ASYNC_IGW_URL="http://inference-sim.${NAMESPACE}.svc.cluster.local:8000"
-        ASYNC_METRICS_URL="http://inference-sim.${NAMESPACE}.svc.cluster.local:8000/metrics"
-    else
-        ASYNC_IGW_URL="http://vllm-metrics.${NAMESPACE}.svc.cluster.local:8000"
-        ASYNC_METRICS_URL="http://vllm-metrics.${NAMESPACE}.svc.cluster.local:8000/metrics"
-
-        # Create a Service for the vLLM decode deployment (endpoint-scrape needs it)
-        log "  Creating vLLM metrics Service"
-        ${K} -n "${NAMESPACE}" apply -f - <<EOVLLMSVC
-apiVersion: v1
-kind: Service
-metadata:
-  name: vllm-metrics
-spec:
-  selector:
-    llm-d.ai/role: decode
-  ports:
-    - port: 8000
-      targetPort: 8000
-      name: http
-EOVLLMSVC
-    fi
-
-    DISPATCHER_IMAGE_REPO="$(echo "${DISPATCHER_IMAGE}" | cut -d: -f1)"
-    DISPATCHER_IMAGE_TAG="$(echo "${DISPATCHER_IMAGE}" | cut -d: -f2)"
-
-    ${H} upgrade --install async-processor "${DISPATCHER_CHART}" \
-        --version "${DISPATCHER_CHART_VERSION}" \
-        -n "${NAMESPACE}" \
-        --set "ap.image.repository=${DISPATCHER_IMAGE_REPO}" \
-        --set "ap.image.tag=${DISPATCHER_IMAGE_TAG}" \
-        --set ap.messageQueueImpl=redis-sortedset \
-        --set ap.concurrency=1 \
-        --set ap.redis.enabled=true \
-        --set "ap.redis.url=redis://redis-master.${NAMESPACE}.svc.cluster.local:6379" \
-        --set ap.redis.pollIntervalMs=500 \
-        --set ap.redis.batchSize=10 \
-        --set-json "ap.redis.queuesConfig=[{\"queue_name\":\"llm-d-async:requests:${ASYNC_POOL_NAME}\",\"request_path_url\":\"/v1/chat/completions\",\"igw_base_url\":\"${ASYNC_IGW_URL}\",\"gate_type\":\"endpoint-scrape\",\"gate_params\":{\"url\":\"${ASYNC_METRICS_URL}\",\"metric\":\"vllm:num_requests_waiting\",\"max_count_per_pod\":\"5\",\"fallback\":\"1.0\"}}]" \
-        --set ap.modelServerMonitor.enabled=false \
-        --set ap.metrics.enabled=true \
-        --set ap.metrics.port=9091 \
-        --set ap.metrics.secure=false \
-        --wait --timeout=120s >/dev/null
-
-    log "  Waiting for async-processor to be ready..."
-    ${K} -n "${NAMESPACE}" wait --for=condition=available deployment/async-processor --timeout=120s >/dev/null
-    log "  Async-processor deployed (pool: ${ASYNC_POOL_NAME}, gate: endpoint-scrape)"
+    log "ERROR: Scenario 5 (async) is blocked on async-processor integration"
+    exit 1
 fi
 
 if [ -n "${VALUES_FILE}" ]; then
     ${K} -n "${NAMESPACE}" rollout status deploy/batch-gateway-apiserver --timeout=60s >/dev/null
-    ${K} -n "${NAMESPACE}" rollout status deploy/batch-gateway-processor --timeout=60s >/dev/null
+    ${K} -n "${NAMESPACE}" rollout status statefulset/batch-gateway-processor --timeout=60s >/dev/null
 fi
 
 # --- Prometheus ServiceMonitor (GPU mode, scenarios >= 3) ---
