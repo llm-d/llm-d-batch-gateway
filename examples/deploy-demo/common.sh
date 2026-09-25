@@ -1217,11 +1217,11 @@ verify_dispatcher_runtime() {
     local prom_url="http://prometheus.${LLM_NAMESPACE}.svc.cluster.local:9090"
 
     local prom_queries=(
-        "inference_pool_ready_pods{name=\"${pool_name}\"}"
+        "llm_d_epp_ready_endpoints{name=\"${pool_name}\"}"
         "vllm:num_requests_running{inference_pool=\"${pool_name}\"}"
     )
     local prom_labels=(
-        "inference_pool_ready_pods (ready pods count)"
+        "llm_d_epp_ready_endpoints (ready endpoints count)"
         "vllm:num_requests_running with inference_pool label"
     )
 
