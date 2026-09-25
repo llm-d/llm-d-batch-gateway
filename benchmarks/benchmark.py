@@ -1085,12 +1085,21 @@ def collect_aimd_metrics(context, namespace, start_time, end_time):
 
 
 def collect_flow_control_metrics(context, namespace, start_time, end_time):
-    """Collect llm-d Router flow control metrics from Prometheus."""
+    """Collect EPP flow control metrics from Prometheus.
+
+    Tries the llm-d Router (v0.9.0+) ``llm_d_epp_*`` names first and
+    falls back to the legacy ``inference_extension_*`` names emitted by
+    GIE v1.5.0 standalone EPP and router <= v0.8.0 (see ROUTER_EPP_TAG /
+    GIE_VERSION in setup.sh).
+    """
     metrics = {}
 
     # Pool saturation (0-1 ratio of flow control capacity used)
-    saturation_query = 'avg(inference_extension_flow_control_pool_saturation)'
+    saturation_query = 'avg(llm_d_epp_flow_control_pool_saturation)'
     results = query_prometheus(context, namespace, saturation_query, start_time, end_time)
+    if not results:
+        saturation_query = 'avg(inference_extension_flow_control_pool_saturation)'
+        results = query_prometheus(context, namespace, saturation_query, start_time, end_time)
     if results:
         values = [float(v[1]) for v in results[0].get("values", []) if v[1] != "NaN"]
         if values:
@@ -1099,8 +1108,11 @@ def collect_flow_control_metrics(context, namespace, start_time, end_time):
             metrics["flow_control_saturation_series"] = values
 
     # Queue size per priority band
-    queue_query = 'sum by (priority) (inference_extension_flow_control_queue_size)'
+    queue_query = 'sum by (priority) (llm_d_epp_flow_control_queue_size)'
     results = query_prometheus(context, namespace, queue_query, start_time, end_time)
+    if not results:
+        queue_query = 'sum by (priority) (inference_extension_flow_control_queue_size)'
+        results = query_prometheus(context, namespace, queue_query, start_time, end_time)
     if results:
         for series in results:
             priority = series.get("metric", {}).get("priority", "unknown")
@@ -1110,8 +1122,11 @@ def collect_flow_control_metrics(context, namespace, start_time, end_time):
                 metrics[f"queue_size_priority_{priority}_series"] = values
 
     # Total queue size (all priorities combined) for the chart
-    total_queue_query = 'sum(inference_extension_flow_control_queue_size)'
+    total_queue_query = 'sum(llm_d_epp_flow_control_queue_size)'
     results = query_prometheus(context, namespace, total_queue_query, start_time, end_time)
+    if not results:
+        total_queue_query = 'sum(inference_extension_flow_control_queue_size)'
+        results = query_prometheus(context, namespace, total_queue_query, start_time, end_time)
     if results:
         values = [float(v[1]) for v in results[0].get("values", []) if v[1] != "NaN"]
         if values:
