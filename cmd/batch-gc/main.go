@@ -91,16 +91,11 @@ func run() error {
 	ctx, cancel := interrupt.ContextWithSignal(ctx)
 	defer cancel()
 
-	cfg.DBClientCfg.RedisCfg.ServiceName = "batch-gc"
-	cfg.DBClientCfg.RedisCfg.EnableTracing = cfg.OTelCfg.RedisTracing
 	cfg.DBClientCfg.PostgreSQLCfg.EnableTracing = cfg.OTelCfg.PostgresqlTracing
 
 	clientOpts := []clientset.Option{
 		clientset.WithDB(cfg.DBClientCfg),
 		clientset.WithFile(cfg.FileClientCfg),
-	}
-	if cfg.Reconciler.Enabled {
-		clientOpts = append(clientOpts, clientset.WithExchange(cfg.DBClientCfg.RedisCfg))
 	}
 
 	clients, err := clientset.NewClientset(ctx, ucom.ComponentGC, clientOpts...)
@@ -127,6 +122,12 @@ func run() error {
 		}
 	})
 	g.Go(func() error { return gc.RunLoop(gCtx) })
+	if !cfg.DryRun {
+		if clients.EventGC == nil {
+			return fmt.Errorf("event GC is not configured")
+		}
+		g.Go(func() error { return clients.EventGC.Run(gCtx) })
+	}
 
 	if cfg.Reconciler.Enabled {
 		onCycle := func(r *reconciler.Result) {
@@ -150,6 +151,11 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("failed to create pod watcher: %w", err)
 		}
+
+		// Refresh the reconciler's live set from actual pod readiness each cycle,
+		// so a freshly-Ready replica is never a false orphan even before the
+		// StatefulSet reports stable.
+		rec.SetLivePodRefresher(pw.LivePods)
 
 		g.Go(func() error { return pw.Run(gCtx) })
 		g.Go(func() error { return rec.RunLoop(gCtx) })

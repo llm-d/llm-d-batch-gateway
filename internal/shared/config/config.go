@@ -21,7 +21,6 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/database/postgresql"
 	fsclient "github.com/llm-d/llm-d-batch-gateway/internal/files_store/fs"
 	s3client "github.com/llm-d/llm-d-batch-gateway/internal/files_store/s3"
-	uredis "github.com/llm-d/llm-d-batch-gateway/internal/util/redis"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/retry"
 )
 
@@ -44,14 +43,10 @@ type DBClientConfig struct {
 	Type string `yaml:"type"`
 	// PostgreSQLCfg holds PostgreSQL connection settings (used when Type is "postgresql").
 	PostgreSQLCfg postgresql.PostgreSQLConfig `yaml:"postgresql"`
-	// RedisCfg holds Redis client settings (timeouts, retries, pool, TLS).
-	// URL, ServiceName, EnableTracing, and Certificates are set at runtime, not from YAML.
-	RedisCfg uredis.RedisClientConfig `yaml:"redis"`
 }
 
-// DeepCopy returns a copy of the config with pointer fields cloned.
+// DeepCopy returns a copy of the config.
 func (c DBClientConfig) DeepCopy() DBClientConfig {
-	c.RedisCfg = c.RedisCfg.DeepCopy()
 	return c
 }
 
@@ -65,6 +60,5 @@ type FileClientConfig struct {
 
 // OTelConfig holds OpenTelemetry-related settings shared by apiserver and processor.
 type OTelConfig struct {
-	RedisTracing      bool `yaml:"redis_tracing"`
 	PostgresqlTracing bool `yaml:"postgresql_tracing"`
 }

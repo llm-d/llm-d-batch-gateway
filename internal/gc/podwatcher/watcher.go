@@ -137,12 +137,27 @@ func (w *Watcher) onStatefulSetChange(ctx context.Context, logger logr.Logger, o
 		return
 	}
 
+	live, err := w.LivePods(ctx)
+	if err != nil {
+		logger.Error(err, "Failed to list processor pods")
+		return
+	}
+
+	logger.Info("StatefulSet stable, updating live processors",
+		"ready", len(live), "desired", desired)
+	w.handler(live)
+}
+
+// LivePods returns the set of currently-Ready processor pod names. The
+// reconciler calls it each cycle to refresh its live set from actual pod
+// readiness, independent of the StatefulSet's stable-state gating, so a
+// freshly-Ready replica is never treated as a dead owner.
+func (w *Watcher) LivePods(ctx context.Context) (map[string]bool, error) {
 	podList, err := w.clientset.CoreV1().Pods(w.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: w.podLabelSelector,
 	})
 	if err != nil {
-		logger.Error(err, "Failed to list processor pods")
-		return
+		return nil, err
 	}
 
 	live := make(map[string]bool, len(podList.Items))
@@ -151,10 +166,7 @@ func (w *Watcher) onStatefulSetChange(ctx context.Context, logger logr.Logger, o
 			live[podList.Items[i].Name] = true
 		}
 	}
-
-	logger.Info("StatefulSet stable, updating live processors",
-		"ready", len(live), "desired", desired)
-	w.handler(live)
+	return live, nil
 }
 
 func isPodReady(pod *corev1.Pod) bool {

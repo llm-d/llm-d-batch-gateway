@@ -1,4 +1,4 @@
-.PHONY: help build build-apiserver build-processor build-gc run-apiserver run-processor run-gc run-apiserver-dev run-processor-dev run-gc-dev build-release package-release publish-helm-chart generate-release test test-coverage test-coverage-func clean lint fmt vet tidy install-tools deps-get deps-verify bench check check-container-tool ci image-build image-build-apiserver image-build-processor image-build-gc test-regression test-integration test-all test-e2e test-helm test-scripts dev-deploy dev-clean dev-rm-cluster pre-commit benchmark-local benchmark-local-teardown benchmark-gpu benchmark-gpu-teardown
+.PHONY: help build build-apiserver build-processor build-gc run-apiserver run-processor run-gc run-apiserver-dev run-processor-dev run-gc-dev build-release package-release publish-helm-chart generate-release test test-coverage test-coverage-func clean lint fmt vet tidy install-tools deps-get deps-verify bench check check-container-tool ci image-build image-build-apiserver image-build-processor image-build-gc test-regression test-integration test-postgres test-postgres-local test-all test-e2e test-helm test-scripts dev-deploy dev-clean dev-rm-cluster pre-commit benchmark-local benchmark-local-teardown benchmark-gpu benchmark-gpu-teardown
 
 SHELL := /usr/bin/env bash
 
@@ -332,6 +332,37 @@ test-integration:
 	@$(GO) test -v -tags=integration ./... || \
 		(echo "\n❌ Integration tests failed" && exit 1)
 	@echo "\n✅ Integration tests passed!"
+
+## test-postgres: Run all PostgreSQL-backed tests (requires TEST_POSTGRES_URL)
+# Run these packages sequentially: the migration and recovery tests modify
+# batch_items and must not share a database concurrently.
+test-postgres:
+	@test -n "$(TEST_POSTGRES_URL)" || { echo "TEST_POSTGRES_URL is required for PostgreSQL-backed tests"; exit 1; }
+	$(GO) test -count=1 -v ./internal/database/postgresql
+	$(GO) test -count=1 -v ./internal/processor/worker
+
+## test-postgres-local: Run PostgreSQL-backed tests in a disposable Docker or Podman container
+test-postgres-local:
+	@set -euo pipefail; \
+	tool=; \
+	for candidate in docker podman; do \
+		if command -v "$$candidate" >/dev/null 2>&1 && "$$candidate" info >/dev/null 2>&1; then tool="$$candidate"; break; fi; \
+	done; \
+	if [ -z "$$tool" ]; then echo "Docker or Podman must be available to run PostgreSQL-backed tests"; exit 1; fi; \
+	container="batch-gateway-test-pg-$$$$"; \
+	"$$tool" run --rm -d --name "$$container" \
+		-e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=batch_gateway_test \
+		-p 127.0.0.1::5432 docker.io/postgres:16 >/dev/null; \
+	trap '"$$tool" stop "$$container" >/dev/null 2>&1 || true' EXIT; \
+	ready=0; \
+	for ((attempt=0; attempt<60; attempt++)); do \
+		if "$$tool" exec "$$container" pg_isready -U postgres -d batch_gateway_test >/dev/null 2>&1; then ready=1; break; fi; \
+		sleep 1; \
+	done; \
+	if [ "$$ready" -ne 1 ]; then "$$tool" logs "$$container"; exit 1; fi; \
+	mapped="$$("$$tool" port "$$container" 5432/tcp)"; \
+	port="$${mapped##*:}"; \
+	TEST_POSTGRES_URL="postgres://postgres:postgres@127.0.0.1:$$port/batch_gateway_test?sslmode=disable" $(MAKE) test-postgres
 
 ## test-all: Run all tests (unit + regression + integration + scripts)
 test-all: test test-regression test-integration test-scripts

@@ -92,6 +92,10 @@ func (d *dbGetErrWrapper) DBDelete(ctx context.Context, IDs []string) ([]string,
 	return d.inner.DBDelete(ctx, IDs)
 }
 
+func (d *dbGetErrWrapper) DBUpdateProgress(ctx context.Context, id string, epoch int64, counts db.BatchRequestCounts) error {
+	return d.inner.DBUpdateProgress(ctx, id, epoch, counts)
+}
+
 func (d *dbGetErrWrapper) GetContext(parentCtx context.Context, timeLimit time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parentCtx, timeLimit)
 }

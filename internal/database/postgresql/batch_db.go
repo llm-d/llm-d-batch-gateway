@@ -19,6 +19,7 @@ package postgresql
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -50,6 +51,9 @@ const (
 	colEpoch            = "epoch"
 	colRecoveryAttempts = "recovery_attempts"
 )
+
+// Compile-time checks.
+var _ api.BatchProgressDBClient = (*PostgresBatchDBClient)(nil)
 
 // Compile-time check: batchDescriptor implements TableDescriptor.
 var _ TableDescriptor = (*batchDescriptor)(nil)
@@ -179,4 +183,36 @@ func (c *PostgresBatchDBClient) DBDelete(ctx context.Context, ids []string) (del
 		return
 	}
 	return
+}
+
+// DBUpdateProgress updates the in-flight request counts in the batch's status
+// column, fenced by the batch's current epoch: a stale-epoch writer (a
+// fenced-out processor incarnation) must not overwrite the current owner's
+// counts, so a mismatched epoch matches no rows and is silently discarded.
+func (c *PostgresBatchDBClient) DBUpdateProgress(ctx context.Context, id string, epoch int64, counts api.BatchRequestCounts) error {
+	if id == "" {
+		return fmt.Errorf("DBUpdateProgress: empty ID")
+	}
+	countsJSON, err := json.Marshal(counts)
+	if err != nil {
+		return fmt.Errorf("DBUpdateProgress: marshal counts: %w", err)
+	}
+
+	sql := fmt.Sprintf(
+		"UPDATE %s SET status = jsonb_set(COALESCE(status, '{}'::jsonb), '{request_counts}', $1::jsonb, true) "+
+			"WHERE id = $2 AND "+nonTerminalCondition+" AND "+colEpoch+" = $3",
+		c.desc.TableName(),
+	)
+
+	result, err := c.pool.Exec(ctx, sql, string(countsJSON), id, epoch)
+	if err != nil {
+		return fmt.Errorf("DBUpdateProgress: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		// The epoch fence matched no row: this processor is no longer the owner
+		// (its epoch was bumped by a reclaimer). Surface it so the caller can
+		// abort instead of dispatching against a job it no longer owns.
+		return fmt.Errorf("DBUpdateProgress: %w", api.ErrConflict)
+	}
+	return nil
 }

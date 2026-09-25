@@ -90,7 +90,7 @@ func NewProcessor(
 		return nil, fmt.Errorf("global semaphore (concurrency.global=%d): %w", cfg.Concurrency.Global, semaphore.ErrCap)
 	}
 	poller := NewPoller(clients.Queue, clients.BatchDB)
-	updater := NewStatusUpdater(clients.BatchDB, clients.Status, cfg.ProgressTTLSeconds)
+	updater := NewStatusUpdater(clients.BatchDB)
 	return &Processor{
 		cfg:            cfg,
 		processorID:    processorID,

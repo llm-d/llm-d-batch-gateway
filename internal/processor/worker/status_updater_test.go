@@ -9,21 +9,20 @@ import (
 	"time"
 
 	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
-	mockdb "github.com/llm-d/llm-d-batch-gateway/internal/database/mock"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 )
 
-type errStatusClient struct {
-	db.BatchStatusClient
+type dbProgressErrWrapper struct {
+	db.BatchProgressDBClient
 	err error
 }
 
-func (c *errStatusClient) StatusSet(ctx context.Context, ID string, TTL int, data []byte) error {
-	return c.err
+func (d *dbProgressErrWrapper) DBUpdateProgress(ctx context.Context, id string, epoch int64, counts db.BatchRequestCounts) error {
+	return d.err
 }
 
 type dbUpdateErrWrapper struct {
-	inner db.BatchDBClient
+	inner db.BatchProgressDBClient
 	err   error
 }
 
@@ -35,6 +34,9 @@ func (d *dbUpdateErrWrapper) DBGet(ctx context.Context, query *db.BatchQuery, in
 }
 func (d *dbUpdateErrWrapper) DBUpdate(ctx context.Context, item *db.BatchItem, expectedStatus []byte) error {
 	return d.err
+}
+func (d *dbUpdateErrWrapper) DBUpdateProgress(ctx context.Context, id string, epoch int64, counts db.BatchRequestCounts) error {
+	return d.inner.DBUpdateProgress(ctx, id, epoch, counts)
 }
 func (d *dbUpdateErrWrapper) DBDelete(ctx context.Context, IDs []string) ([]string, error) {
 	return d.inner.DBDelete(ctx, IDs)
@@ -48,7 +50,7 @@ func (d *dbUpdateErrWrapper) Close() error {
 
 // dbUpdateFailOnceWrapper fails the first N DBUpdate calls, then delegates to inner.
 type dbUpdateFailOnceWrapper struct {
-	inner     db.BatchDBClient
+	inner     db.BatchProgressDBClient
 	failCount int
 	calls     int
 }
@@ -66,6 +68,9 @@ func (d *dbUpdateFailOnceWrapper) DBUpdate(ctx context.Context, item *db.BatchIt
 	}
 	return d.inner.DBUpdate(ctx, item, expectedStatus)
 }
+func (d *dbUpdateFailOnceWrapper) DBUpdateProgress(ctx context.Context, id string, epoch int64, counts db.BatchRequestCounts) error {
+	return d.inner.DBUpdateProgress(ctx, id, epoch, counts)
+}
 func (d *dbUpdateFailOnceWrapper) DBDelete(ctx context.Context, IDs []string) ([]string, error) {
 	return d.inner.DBDelete(ctx, IDs)
 }
@@ -77,44 +82,59 @@ func (d *dbUpdateFailOnceWrapper) Close() error {
 }
 
 func TestUpdateProgressCounts_NilCounts_ReturnsError(t *testing.T) {
-	updater := NewStatusUpdater(newMockBatchDBClient(), mockdb.NewMockBatchStatusClient(), 86400)
+	updater := NewStatusUpdater(newMockBatchDBClient())
 
-	if err := updater.UpdateProgressCounts(context.Background(), "job-1", nil); err == nil {
+	if err := updater.UpdateProgressCounts(context.Background(), "job-1", 0, nil); err == nil {
 		t.Fatalf("expected error for nil requestCounts")
 	}
 }
 
 func TestUpdateProgressCounts_StatusSetError_ReturnsError(t *testing.T) {
-	statusErr := errors.New("status set failed")
-	updater := NewStatusUpdater(newMockBatchDBClient(), &errStatusClient{err: statusErr}, 86400)
+	statusErr := errors.New("progress update failed")
+	updater := NewStatusUpdater(&dbProgressErrWrapper{BatchProgressDBClient: newMockBatchDBClient(), err: statusErr})
 
-	err := updater.UpdateProgressCounts(context.Background(), "job-1", &openai.BatchRequestCounts{Total: 1})
+	err := updater.UpdateProgressCounts(context.Background(), "job-1", 0, &openai.BatchRequestCounts{Total: 1})
 	if !errors.Is(err, statusErr) {
-		t.Fatalf("expected status client error, got %v", err)
+		t.Fatalf("expected progress error, got %v", err)
 	}
 }
 
 func TestUpdateProgressCounts_Success_WritesPayload(t *testing.T) {
-	statusClient := mockdb.NewMockBatchStatusClient()
-	updater := NewStatusUpdater(newMockBatchDBClient(), statusClient, 86400)
+	ctx := context.Background()
+	dbClient := newMockBatchDBClient()
+	updater := NewStatusUpdater(dbClient)
 
-	if err := updater.UpdateProgressCounts(context.Background(), "job-1", &openai.BatchRequestCounts{
+	seed := &db.BatchItem{
+		BaseIndexes: db.BaseIndexes{ID: "job-1"},
+		BaseContents: db.BaseContents{
+			Status: mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusInProgress}),
+		},
+	}
+	if err := dbClient.DBStore(ctx, seed); err != nil {
+		t.Fatalf("DBStore seed: %v", err)
+	}
+
+	if err := updater.UpdateProgressCounts(ctx, "job-1", 0, &openai.BatchRequestCounts{
 		Total: 10, Completed: 7, Failed: 3,
 	}); err != nil {
 		t.Fatalf("UpdateProgressCounts: %v", err)
 	}
 
-	data, err := statusClient.StatusGet(context.Background(), "job-1")
-	if err != nil {
-		t.Fatalf("StatusGet: %v", err)
+	items, _, _, err := dbClient.DBGet(ctx, &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{"job-1"}}}, true, 0, 1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("DBGet: err=%v len=%d", err, len(items))
 	}
-	if len(data) == 0 {
-		t.Fatalf("expected payload written to status client")
+	var got openai.BatchStatusInfo
+	if err := json.Unmarshal(items[0].Status, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.RequestCounts.Total != 10 || got.RequestCounts.Completed != 7 || got.RequestCounts.Failed != 3 {
+		t.Fatalf("unexpected request counts: %+v", got.RequestCounts)
 	}
 }
 
 func TestUpdatePersistentStatus_InputValidationErrors(t *testing.T) {
-	updater := NewStatusUpdater(newMockBatchDBClient(), mockdb.NewMockBatchStatusClient(), 86400)
+	updater := NewStatusUpdater(newMockBatchDBClient())
 
 	if err := updater.UpdatePersistentStatus(context.Background(), nil, openai.BatchStatusFailed, nil, nil); err == nil {
 		t.Fatalf("expected error for nil dbJob")
@@ -129,7 +149,7 @@ func TestUpdatePersistentStatus_InputValidationErrors(t *testing.T) {
 }
 
 func TestUpdatePersistentStatus_UnmarshalError(t *testing.T) {
-	updater := NewStatusUpdater(newMockBatchDBClient(), mockdb.NewMockBatchStatusClient(), 86400)
+	updater := NewStatusUpdater(newMockBatchDBClient())
 
 	err := updater.UpdatePersistentStatus(context.Background(), &db.BatchItem{
 		BaseIndexes: db.BaseIndexes{ID: "job-1"},
@@ -148,7 +168,7 @@ func TestUpdatePersistentStatus_DBUpdateError(t *testing.T) {
 		inner: newMockBatchDBClient(),
 		err:   updateErr,
 	}
-	updater := NewStatusUpdater(dbClient, mockdb.NewMockBatchStatusClient(), 86400)
+	updater := NewStatusUpdater(dbClient)
 
 	err := updater.UpdatePersistentStatus(context.Background(), &db.BatchItem{
 		BaseIndexes: db.BaseIndexes{ID: "job-1"},
@@ -164,7 +184,7 @@ func TestUpdatePersistentStatus_DBUpdateError(t *testing.T) {
 func TestUpdatePersistentStatus_Success(t *testing.T) {
 	ctx := context.Background()
 	dbClient := newMockBatchDBClient()
-	updater := NewStatusUpdater(dbClient, mockdb.NewMockBatchStatusClient(), 86400)
+	updater := NewStatusUpdater(dbClient)
 	jobID := "job-update-success"
 
 	seed := &db.BatchItem{
@@ -239,7 +259,7 @@ func TestUpdatePersistentStatus_PreservesPriorTimestamps(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			dbClient := newMockBatchDBClient()
-			updater := NewStatusUpdater(dbClient, mockdb.NewMockBatchStatusClient(), 86400)
+			updater := NewStatusUpdater(dbClient)
 			jobID := "job-preserve-timestamps"
 
 			// Seed what CreateBatch writes: validating, every timestamp unset.

@@ -62,9 +62,8 @@ func setupTestHandlerWithConfig(config *common.ServerConfig) *BatchAPIHandler {
 			func(f *dbapi.FileItem) string { return f.ID },
 			func(q *dbapi.FileQuery) *dbapi.BaseQuery { return &q.BaseQuery },
 		),
-		Queue:  mockapi.NewMockBatchPriorityQueueClient(),
-		Event:  mockapi.NewMockBatchEventChannelClient(),
-		Status: mockapi.NewMockBatchStatusClient(),
+		Queue: mockapi.NewMockBatchPriorityQueueClient(),
+		Event: mockapi.NewMockBatchEventChannelClient(),
 	}
 	handler := NewBatchAPIHandler(config, clients)
 	return handler
@@ -1030,9 +1029,8 @@ func TestBatchHandler(t *testing.T) {
 					func(f *dbapi.FileItem) string { return f.ID },
 					func(q *dbapi.FileQuery) *dbapi.BaseQuery { return &q.BaseQuery },
 				),
-				Queue:  mockapi.NewMockBatchPriorityQueueClient(),
-				Event:  failingEvent,
-				Status: mockapi.NewMockBatchStatusClient(),
+				Queue: mockapi.NewMockBatchPriorityQueueClient(),
+				Event: failingEvent,
 			}
 			handler := NewBatchAPIHandler(&common.ServerConfig{}, clients)
 
@@ -1130,9 +1128,8 @@ func TestBatchHandler(t *testing.T) {
 					func(f *dbapi.FileItem) string { return f.ID },
 					func(q *dbapi.FileQuery) *dbapi.BaseQuery { return &q.BaseQuery },
 				),
-				Queue:  mockapi.NewMockBatchPriorityQueueClient(),
-				Event:  failingEvent,
-				Status: mockapi.NewMockBatchStatusClient(),
+				Queue: mockapi.NewMockBatchPriorityQueueClient(),
+				Event: failingEvent,
 			}
 			handler := NewBatchAPIHandler(&common.ServerConfig{}, clients)
 
@@ -1170,154 +1167,6 @@ func TestBatchHandler(t *testing.T) {
 			}
 		})
 	})
-
-	t.Run("MergeProgressCounts", func(t *testing.T) {
-		t.Run("SkipsNonInProgressBatches", func(t *testing.T) {
-			handler := setupTestHandler()
-			ctx := context.Background()
-
-			statuses := []openai.BatchStatus{
-				openai.BatchStatusValidating,
-				openai.BatchStatusCompleted,
-				openai.BatchStatusFailed,
-				openai.BatchStatusCancelled,
-				openai.BatchStatusExpired,
-			}
-
-			for _, status := range statuses {
-				batch := &openai.Batch{
-					ID: "batch-test",
-					BatchStatusInfo: openai.BatchStatusInfo{
-						Status: status,
-						RequestCounts: openai.BatchRequestCounts{
-							Total:     100,
-							Completed: 50,
-							Failed:    10,
-						},
-					},
-				}
-
-				err := handler.mergeProgressCounts(ctx, batch)
-				if err != nil {
-					t.Errorf("mergeProgressCounts should not error for status %s: %v", status, err)
-				}
-
-				// Counts should not change
-				if batch.RequestCounts.Total != 100 || batch.RequestCounts.Completed != 50 || batch.RequestCounts.Failed != 10 {
-					t.Errorf("counts should not change for status %s, got: %+v", status, batch.RequestCounts)
-				}
-			}
-		})
-
-		t.Run("MergesRedisCountsForInProgress", func(t *testing.T) {
-			handler := setupTestHandler()
-			ctx := context.Background()
-
-			batchID := "batch-in-progress"
-			batch := &openai.Batch{
-				ID: batchID,
-				BatchStatusInfo: openai.BatchStatusInfo{
-					Status: openai.BatchStatusInProgress,
-					RequestCounts: openai.BatchRequestCounts{
-						Total:     80,
-						Completed: 0,
-						Failed:    0,
-					},
-				},
-			}
-
-			// Store progress counts in Redis
-			redisData := `{"total": 80, "completed": 35, "failed": 2}`
-			err := handler.clients.Status.StatusSet(ctx, batchID, 60, []byte(redisData))
-			if err != nil {
-				t.Fatalf("Failed to set status in Redis: %v", err)
-			}
-
-			// Merge progress
-			err = handler.mergeProgressCounts(ctx, batch)
-			if err != nil {
-				t.Fatalf("mergeProgressCounts failed: %v", err)
-			}
-
-			// Verify counts were merged from Redis
-			if batch.RequestCounts.Total != 80 {
-				t.Errorf("expected total=80, got %d", batch.RequestCounts.Total)
-			}
-			if batch.RequestCounts.Completed != 35 {
-				t.Errorf("expected completed=35, got %d", batch.RequestCounts.Completed)
-			}
-			if batch.RequestCounts.Failed != 2 {
-				t.Errorf("expected failed=2, got %d", batch.RequestCounts.Failed)
-			}
-		})
-
-		t.Run("KeepsDBCountsWhenRedisEmpty", func(t *testing.T) {
-			handler := setupTestHandler()
-			ctx := context.Background()
-
-			batch := &openai.Batch{
-				ID: "batch-no-redis",
-				BatchStatusInfo: openai.BatchStatusInfo{
-					Status: openai.BatchStatusInProgress,
-					RequestCounts: openai.BatchRequestCounts{
-						Total:     80,
-						Completed: 10,
-						Failed:    5,
-					},
-				},
-			}
-
-			// Don't set anything in Redis
-
-			// Merge progress
-			err := handler.mergeProgressCounts(ctx, batch)
-			if err != nil {
-				t.Fatalf("mergeProgressCounts failed: %v", err)
-			}
-
-			// Verify counts stayed the same (from DB)
-			if batch.RequestCounts.Total != 80 {
-				t.Errorf("expected total=80, got %d", batch.RequestCounts.Total)
-			}
-			if batch.RequestCounts.Completed != 10 {
-				t.Errorf("expected completed=10, got %d", batch.RequestCounts.Completed)
-			}
-			if batch.RequestCounts.Failed != 5 {
-				t.Errorf("expected failed=5, got %d", batch.RequestCounts.Failed)
-			}
-		})
-
-		t.Run("HandlesInvalidRedisJSON", func(t *testing.T) {
-			handler := setupTestHandler()
-			ctx := context.Background()
-
-			batchID := "batch-bad-json"
-			batch := &openai.Batch{
-				ID: batchID,
-				BatchStatusInfo: openai.BatchStatusInfo{
-					Status: openai.BatchStatusInProgress,
-					RequestCounts: openai.BatchRequestCounts{
-						Total:     80,
-						Completed: 10,
-						Failed:    0,
-					},
-				},
-			}
-
-			// Store invalid JSON in Redis
-			err := handler.clients.Status.StatusSet(ctx, batchID, 60, []byte("invalid json"))
-			if err != nil {
-				t.Fatalf("Failed to set status in Redis: %v", err)
-			}
-
-			// Merge progress should return error
-			err = handler.mergeProgressCounts(ctx, batch)
-			if err == nil {
-				t.Error("mergeProgressCounts should return error for invalid JSON")
-			}
-		})
-	})
-
 }
 
 // Benchmark tests for batch handler

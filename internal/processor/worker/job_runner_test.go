@@ -52,7 +52,7 @@ func TestRunJob_EventWatcherError_ReturnsSafely(t *testing.T) {
 	p.wg.Add(1)
 
 	p.runJob(testLoggerCtx(t), &jobExecutionParams{
-		updater: NewStatusUpdater(newMockBatchDBClient(), mockdb.NewMockBatchStatusClient(), 86400),
+		updater: NewStatusUpdater(newMockBatchDBClient()),
 		jobItem: &db.BatchItem{BaseIndexes: db.BaseIndexes{ID: "job-1", TenantID: "tenantA"}},
 		jobInfo: &batch_types.JobInfo{JobID: "job-1"},
 	})
@@ -62,14 +62,12 @@ func TestRunJob_EventWatcherAndReEnqueueBothFail_MarksJobFailed(t *testing.T) {
 	ctx := testLoggerCtx(t)
 
 	dbClient := newMockBatchDBClient()
-	statusClient := mockdb.NewMockBatchStatusClient()
 	pqClient := &errPQClient{err: errors.New("queue unavailable")}
 
 	cfg := config.NewConfig()
 	cfg.NumWorkers = 1
 	p := mustNewProcessor(t, cfg, &clientset.Clientset{
 		BatchDB: dbClient,
-		Status:  statusClient,
 		Queue:   pqClient,
 		Event:   &errEventClient{err: errors.New("event unavailable")},
 	})
@@ -90,7 +88,7 @@ func TestRunJob_EventWatcherAndReEnqueueBothFail_MarksJobFailed(t *testing.T) {
 	p.wg.Add(1)
 
 	p.runJob(ctx, &jobExecutionParams{
-		updater: NewStatusUpdater(dbClient, statusClient, 86400),
+		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: &batch_types.JobInfo{JobID: "job-stuck"},
 		task:    &db.BatchJobPriority{ID: "job-stuck"},
@@ -117,11 +115,9 @@ func TestRunJob_PreProcessError_HandlesFailedStatus(t *testing.T) {
 	cfg.NumWorkers = 1
 	cfg.WorkDir = t.TempDir()
 	dbClient := newMockBatchDBClient()
-	statusClient := mockdb.NewMockBatchStatusClient()
 	eventClient := mockdb.NewMockBatchEventChannelClient()
 	p := mustNewProcessor(t, cfg, &clientset.Clientset{
 		BatchDB: dbClient,
-		Status:  statusClient,
 		Event:   eventClient,
 	})
 
@@ -153,7 +149,7 @@ func TestRunJob_PreProcessError_HandlesFailedStatus(t *testing.T) {
 	}
 	p.wg.Add(1)
 	p.runJob(ctx, &jobExecutionParams{
-		updater: NewStatusUpdater(dbClient, statusClient, 86400),
+		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: jobInfo,
 		task: &db.BatchJobPriority{
@@ -186,12 +182,10 @@ func TestRunJob_ReachesPreProcess(t *testing.T) {
 	cfg.WorkDir = t.TempDir()
 
 	dbClient := newMockBatchDBClient()
-	statusClient := mockdb.NewMockBatchStatusClient()
 	eventClient := mockdb.NewMockBatchEventChannelClient()
 	p := mustNewProcessor(t, cfg, &clientset.Clientset{
 		BatchDB: dbClient,
 		FileDB:  newMockFileDBClient(),
-		Status:  statusClient,
 		Event:   eventClient,
 		File:    mockfiles.NewMockBatchFilesClient(t.TempDir()),
 	})
@@ -228,7 +222,7 @@ func TestRunJob_ReachesPreProcess(t *testing.T) {
 	p.wg.Add(1)
 
 	p.runJob(ctx, &jobExecutionParams{
-		updater: NewStatusUpdater(dbClient, statusClient, 86400),
+		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: jobInfo,
 		task: &db.BatchJobPriority{
@@ -259,7 +253,7 @@ func TestHandleFailed_DBUpdateError_ReturnsError(t *testing.T) {
 		inner: newMockBatchDBClient(),
 		err:   updateErr,
 	}
-	updater := NewStatusUpdater(dbClient, mockdb.NewMockBatchStatusClient(), 86400)
+	updater := NewStatusUpdater(dbClient)
 
 	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{})
 	err := p.handleFailed(testLoggerCtx(t), updater, &db.BatchItem{
@@ -278,7 +272,6 @@ func TestHandleFailed_DBUpdateError_ReturnsError(t *testing.T) {
 func TestHandlePanicRecovery_BeforeInProgress_MarksFailed(t *testing.T) {
 	ctx := testLoggerCtx(t)
 	dbClient := newMockBatchDBClient()
-	statusClient := mockdb.NewMockBatchStatusClient()
 
 	jobItem := &db.BatchItem{
 		BaseIndexes:  db.BaseIndexes{ID: "job-panic-pre", TenantID: "tenantA"},
@@ -288,9 +281,9 @@ func TestHandlePanicRecovery_BeforeInProgress_MarksFailed(t *testing.T) {
 		t.Fatalf("DBStore: %v", err)
 	}
 
-	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: dbClient, Status: statusClient})
+	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: dbClient})
 	p.handlePanicRecovery(ctx, &jobExecutionParams{
-		updater: NewStatusUpdater(dbClient, statusClient, 86400),
+		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: &batch_types.JobInfo{JobID: "job-panic-pre"},
 	}, false, nil)
@@ -301,7 +294,6 @@ func TestHandlePanicRecovery_BeforeInProgress_MarksFailed(t *testing.T) {
 func TestHandlePanicRecovery_AfterInProgress_WithCounts_MarksFailed(t *testing.T) {
 	ctx := testLoggerCtx(t)
 	dbClient := newMockBatchDBClient()
-	statusClient := mockdb.NewMockBatchStatusClient()
 
 	jobItem := &db.BatchItem{
 		BaseIndexes:  db.BaseIndexes{ID: "job-panic-partial", TenantID: "tenantA"},
@@ -312,9 +304,9 @@ func TestHandlePanicRecovery_AfterInProgress_WithCounts_MarksFailed(t *testing.T
 	}
 
 	counts := &openai.BatchRequestCounts{Total: 10, Completed: 3, Failed: 0}
-	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: dbClient, Status: statusClient})
+	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: dbClient})
 	p.handlePanicRecovery(ctx, &jobExecutionParams{
-		updater: NewStatusUpdater(dbClient, statusClient, 86400),
+		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: &batch_types.JobInfo{JobID: "job-panic-partial"},
 	}, true, counts)
@@ -325,7 +317,6 @@ func TestHandlePanicRecovery_AfterInProgress_WithCounts_MarksFailed(t *testing.T
 func TestHandlePanicRecovery_AfterInProgress_NilCounts_MarksFailed(t *testing.T) {
 	ctx := testLoggerCtx(t)
 	dbClient := newMockBatchDBClient()
-	statusClient := mockdb.NewMockBatchStatusClient()
 
 	jobItem := &db.BatchItem{
 		BaseIndexes:  db.BaseIndexes{ID: "job-panic-nocounts", TenantID: "tenantA"},
@@ -335,9 +326,9 @@ func TestHandlePanicRecovery_AfterInProgress_NilCounts_MarksFailed(t *testing.T)
 		t.Fatalf("DBStore: %v", err)
 	}
 
-	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: dbClient, Status: statusClient})
+	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: dbClient})
 	p.handlePanicRecovery(ctx, &jobExecutionParams{
-		updater: NewStatusUpdater(dbClient, statusClient, 86400),
+		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: &batch_types.JobInfo{JobID: "job-panic-nocounts"},
 	}, true, nil)
@@ -350,7 +341,6 @@ func TestHandlePanicRecovery_CancelledContext_StillMarksFailed(t *testing.T) {
 	cancel()
 
 	dbClient := newMockBatchDBClient()
-	statusClient := mockdb.NewMockBatchStatusClient()
 
 	jobItem := &db.BatchItem{
 		BaseIndexes:  db.BaseIndexes{ID: "job-panic-cancelled-ctx", TenantID: "tenantA"},
@@ -360,9 +350,9 @@ func TestHandlePanicRecovery_CancelledContext_StillMarksFailed(t *testing.T) {
 		t.Fatalf("DBStore: %v", err)
 	}
 
-	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: dbClient, Status: statusClient})
+	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: dbClient})
 	p.handlePanicRecovery(ctx, &jobExecutionParams{
-		updater: NewStatusUpdater(dbClient, statusClient, 86400),
+		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: &batch_types.JobInfo{JobID: "job-panic-cancelled-ctx"},
 	}, true, nil)
@@ -373,7 +363,6 @@ func TestHandlePanicRecovery_CancelledContext_StillMarksFailed(t *testing.T) {
 func TestHandlePanicRecovery_DBError_DoesNotCrash(t *testing.T) {
 	ctx := testLoggerCtx(t)
 	dbClient := &dbUpdateFailOnceWrapper{inner: newMockBatchDBClient(), failCount: 1}
-	statusClient := mockdb.NewMockBatchStatusClient()
 
 	jobItem := &db.BatchItem{
 		BaseIndexes:  db.BaseIndexes{ID: "job-panic-db-err", TenantID: "tenantA"},
@@ -384,9 +373,9 @@ func TestHandlePanicRecovery_DBError_DoesNotCrash(t *testing.T) {
 	}
 
 	counts := &openai.BatchRequestCounts{Total: 10, Completed: 3, Failed: 0}
-	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: dbClient, Status: statusClient})
+	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: dbClient})
 	p.handlePanicRecovery(ctx, &jobExecutionParams{
-		updater: NewStatusUpdater(dbClient, statusClient, 86400),
+		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: &batch_types.JobInfo{JobID: "job-panic-db-err"},
 	}, true, counts)
@@ -404,7 +393,7 @@ func TestHandlePanicRecovery_NilParams_DoesNotPanic(t *testing.T) {
 // dbBlockingUpdateWrapper blocks DBUpdate until its context is cancelled,
 // simulating an unreachable database.
 type dbBlockingUpdateWrapper struct {
-	inner db.BatchDBClient
+	inner db.BatchProgressDBClient
 }
 
 func (d *dbBlockingUpdateWrapper) DBStore(ctx context.Context, item *db.BatchItem) error {
@@ -416,6 +405,9 @@ func (d *dbBlockingUpdateWrapper) DBGet(ctx context.Context, query *db.BatchQuer
 func (d *dbBlockingUpdateWrapper) DBUpdate(ctx context.Context, _ *db.BatchItem, _ []byte) error {
 	<-ctx.Done()
 	return ctx.Err()
+}
+func (d *dbBlockingUpdateWrapper) DBUpdateProgress(ctx context.Context, id string, epoch int64, counts db.BatchRequestCounts) error {
+	return d.inner.DBUpdateProgress(ctx, id, epoch, counts)
 }
 func (d *dbBlockingUpdateWrapper) DBDelete(ctx context.Context, IDs []string) ([]string, error) {
 	return d.inner.DBDelete(ctx, IDs)
@@ -439,7 +431,6 @@ func TestHandlePanicRecovery_BlockingDB_ReturnsWithinTimeout(t *testing.T) {
 
 	ctx := testLoggerCtx(t)
 	blockingDB := &dbBlockingUpdateWrapper{inner: newMockBatchDBClient()}
-	statusClient := mockdb.NewMockBatchStatusClient()
 
 	jobItem := &db.BatchItem{
 		BaseIndexes:  db.BaseIndexes{ID: "job-panic-block", TenantID: "tenantA"},
@@ -449,12 +440,12 @@ func TestHandlePanicRecovery_BlockingDB_ReturnsWithinTimeout(t *testing.T) {
 		t.Fatalf("DBStore: %v", err)
 	}
 
-	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: blockingDB, Status: statusClient})
+	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: blockingDB})
 
 	done := make(chan struct{})
 	go func() {
 		p.handlePanicRecovery(ctx, &jobExecutionParams{
-			updater: NewStatusUpdater(blockingDB, statusClient, 86400),
+			updater: NewStatusUpdater(blockingDB),
 			jobItem: jobItem,
 			jobInfo: &batch_types.JobInfo{JobID: "job-panic-block"},
 		}, false, nil)
@@ -532,12 +523,10 @@ func TestRunJob_Success_CompletesAndCleansArtifacts(t *testing.T) {
 		t.Fatalf("DBStore batch item: %v", err)
 	}
 
-	statusClient := mockdb.NewMockBatchStatusClient()
 	p := mustNewProcessor(t, cfg, &clientset.Clientset{
 		BatchDB:   dbClient,
 		FileDB:    fileDBClient,
 		File:      mockfiles.NewMockBatchFilesClient(filesRoot),
-		Status:    statusClient,
 		Event:     mockdb.NewMockBatchEventChannelClient(),
 		Queue:     mockdb.NewMockBatchPriorityQueueClient(),
 		Inference: inference.NewSingleClientResolver(&mockInferenceClient{}),
@@ -561,7 +550,7 @@ func TestRunJob_Success_CompletesAndCleansArtifacts(t *testing.T) {
 	}
 	p.wg.Add(1)
 	p.runJob(ctx, &jobExecutionParams{
-		updater: NewStatusUpdater(dbClient, statusClient, 86400),
+		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: jobInfo,
 		task: &db.BatchJobPriority{
@@ -595,7 +584,7 @@ func TestRunJob_Success_CompletesAndCleansArtifacts(t *testing.T) {
 	}
 }
 
-func assertJobStatus(t *testing.T, dbClient db.BatchDBClient, jobID string, want openai.BatchStatus) {
+func assertJobStatus(t *testing.T, dbClient db.BatchProgressDBClient, jobID string, want openai.BatchStatus) {
 	t.Helper()
 	items, _, _, err := dbClient.DBGet(context.Background(), &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{jobID}}}, true, 0, 1)
 	if err != nil || len(items) != 1 {
@@ -676,12 +665,10 @@ func TestRunJob_FinalizeFailedOver_PreservesFileIDsAndDoesNotCallHandleFailed(t 
 		t.Fatalf("DBStore batch item: %v", err)
 	}
 
-	statusClient := mockdb.NewMockBatchStatusClient()
 	p := mustNewProcessor(t, cfg, &clientset.Clientset{
 		BatchDB:   failDB,
 		FileDB:    fileDBClient,
 		File:      mockfiles.NewMockBatchFilesClient(filesRoot),
-		Status:    statusClient,
 		Event:     mockdb.NewMockBatchEventChannelClient(),
 		Queue:     mockdb.NewMockBatchPriorityQueueClient(),
 		Inference: inference.NewSingleClientResolver(&mockInferenceClient{}),
@@ -706,7 +693,7 @@ func TestRunJob_FinalizeFailedOver_PreservesFileIDsAndDoesNotCallHandleFailed(t 
 	}
 	p.wg.Add(1)
 	p.runJob(ctx, &jobExecutionParams{
-		updater: NewStatusUpdater(failDB, statusClient, 86400),
+		updater: NewStatusUpdater(failDB),
 		jobItem: jobItem,
 		jobInfo: jobInfo,
 		task: &db.BatchJobPriority{
@@ -744,14 +731,12 @@ func TestHandleJobError_Shutdown_LeavesJobInProgress(t *testing.T) {
 	cfg.WorkDir = t.TempDir()
 
 	dbClient := newMockBatchDBClient()
-	statusClient := mockdb.NewMockBatchStatusClient()
 	pqClient := mockdb.NewMockBatchPriorityQueueClient()
 
 	p := mustNewProcessor(t, cfg, &clientset.Clientset{
 		BatchDB:   dbClient,
 		FileDB:    newMockFileDBClient(),
 		File:      mockfiles.NewMockBatchFilesClient(t.TempDir()),
-		Status:    statusClient,
 		Queue:     pqClient,
 		Event:     mockdb.NewMockBatchEventChannelClient(),
 		Inference: inference.NewSingleClientResolver(&fakeInferenceClient{}),
@@ -774,7 +759,7 @@ func TestHandleJobError_Shutdown_LeavesJobInProgress(t *testing.T) {
 	jobInfo := &batch_types.JobInfo{JobID: jobID, TenantID: tenantID}
 	counts := &openai.BatchRequestCounts{Total: 5, Completed: 3, Failed: 2}
 
-	updater := NewStatusUpdater(dbClient, statusClient, 86400)
+	updater := NewStatusUpdater(dbClient)
 	params := &jobExecutionParams{
 		updater:       updater,
 		jobItem:       jobItem,
