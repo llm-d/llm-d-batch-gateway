@@ -209,7 +209,7 @@ func TestDispatcher(t *testing.T) {
 // from the async ResultMessage (e.g. 403 with an empty body) is preserved in
 // the batch output file instead of being collapsed into parse_error.
 //
-// Uses the consumer-less "sim-pool-inject" pool: no async-processor subscribes
+// Uses the consumer-less "sim-pool-inject" pool: no llm-d-async subscribes
 // to it, so the request stays in the queue deterministically until the test
 // removes it and injects a synthetic ResultMessage.
 func testDispatcherHTTPErrorStatusPreserved(t *testing.T, rdb *redis.Client) {

@@ -30,9 +30,9 @@ set -euo pipefail
 #   BENCH_DB_PASSWORD  — PostgreSQL password (default: random 24-char string)
 #   PROMETHEUS_RELEASE — Prometheus Operator release label for ServiceMonitor discovery (default: llmd-kube-prometheus-stack)
 #   PROMETHEUS_NAMESPACE — Namespace where Prometheus is deployed (default: llm-d-monitoring)
-#   DISPATCHER_VERSION — async-processor image version for scenario 5 (default: v0.7.3)
+#   DISPATCHER_VERSION — llm-d-async image version for scenario 5 (default: v0.9.1)
 #   DISPATCHER_CHART   — async-processor Helm chart reference (default: OCI chart)
-#   DISPATCHER_CHART_VERSION — async-processor chart version (default: 0.7.3)
+#   DISPATCHER_CHART_VERSION — llm-d-async chart version (default: v0.9.1)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -170,10 +170,10 @@ GIE_REPO="${GIE_REPO:-}"
 GIE_UPSTREAM_REPO="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
 
 # Async-processor settings for scenario 5
-DISPATCHER_VERSION="${DISPATCHER_VERSION:-v0.7.3}"
-DISPATCHER_IMAGE="${DISPATCHER_IMAGE:-ghcr.io/llm-d-incubation/llm-d-async:${DISPATCHER_VERSION}}"
-DISPATCHER_CHART="${DISPATCHER_CHART:-oci://ghcr.io/llm-d-incubation/charts/async-processor}"
-DISPATCHER_CHART_VERSION="${DISPATCHER_CHART_VERSION:-0.7.3}"
+DISPATCHER_VERSION="${DISPATCHER_VERSION:-v0.9.1}"
+DISPATCHER_IMAGE="${DISPATCHER_IMAGE:-ghcr.io/llm-d/llm-d-async:${DISPATCHER_VERSION}}"
+DISPATCHER_CHART="${DISPATCHER_CHART:-oci://ghcr.io/llm-d/charts/llm-d-async}"
+DISPATCHER_CHART_VERSION="${DISPATCHER_CHART_VERSION:-v0.9.1}"
 
 # --- Inference backend ---
 if [ "${MODE}" = "sim" ]; then
@@ -663,13 +663,9 @@ EOVLLMSVC
         -n "${NAMESPACE}" \
         --set "ap.image.repository=${DISPATCHER_IMAGE_REPO}" \
         --set "ap.image.tag=${DISPATCHER_IMAGE_TAG}" \
-        --set ap.messageQueueImpl=redis-sortedset \
+        --set ap.transport=redis-sortedset \
         --set ap.concurrency=1 \
-        --set ap.redis.enabled=true \
-        --set "ap.redis.url=redis://redis-master.${NAMESPACE}.svc.cluster.local:6379" \
-        --set ap.redis.pollIntervalMs=500 \
-        --set ap.redis.batchSize=10 \
-        --set-json "ap.redis.queuesConfig=[{\"queue_name\":\"llm-d-async:requests:${ASYNC_POOL_NAME}\",\"request_path_url\":\"/v1/chat/completions\",\"igw_base_url\":\"${ASYNC_IGW_URL}\",\"gate_type\":\"endpoint-scrape\",\"gate_params\":{\"url\":\"${ASYNC_METRICS_URL}\",\"metric\":\"vllm:num_requests_waiting\",\"max_count_per_pod\":\"5\",\"fallback\":\"1.0\"}}]" \
+        --set-json "ap.transportConfig={\"urlSecret\":{\"url\":\"redis://redis-master.${NAMESPACE}.svc.cluster.local:6379\"},\"result_queue_name\":\"result-list\",\"poll_interval_ms\":500,\"batch_size\":10,\"queues\":[{\"queue_name\":\"llm-d-async:requests:${ASYNC_POOL_NAME}\",\"request_path_url\":\"/v1/chat/completions\",\"igw_base_url\":\"${ASYNC_IGW_URL}\",\"gate_type\":\"endpoint-scrape\",\"gate_params\":{\"url\":\"${ASYNC_METRICS_URL}\",\"metric\":\"vllm:num_requests_waiting\",\"max_count_per_pod\":\"5\",\"fallback\":\"1.0\"}}]}" \
         --set ap.modelServerMonitor.enabled=false \
         --set ap.metrics.enabled=true \
         --set ap.metrics.port=9091 \
@@ -677,7 +673,7 @@ EOVLLMSVC
         --wait --timeout=120s >/dev/null
 
     log "  Waiting for async-processor to be ready..."
-    ${K} -n "${NAMESPACE}" wait --for=condition=available deployment/async-processor --timeout=120s >/dev/null
+    ${K} -n "${NAMESPACE}" wait --for=condition=available deployment/async-processor-llm-d-async --timeout=120s >/dev/null
     log "  Async-processor deployed (pool: ${ASYNC_POOL_NAME}, gate: endpoint-scrape)"
 fi
 

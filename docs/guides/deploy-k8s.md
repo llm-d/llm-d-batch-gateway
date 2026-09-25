@@ -181,7 +181,7 @@ export BATCH_FLOW_CONTROL_OBJECTIVE=batch-sheddable
 
 # Async dispatcher (optional — set ENABLE_DISPATCHER=true to use)
 export ENABLE_DISPATCHER=false
-export DISPATCHER_VERSION=v0.7.3
+export DISPATCHER_VERSION=v0.9.1
 ```
 
 > **Note**: `GAIE_VERSION`, `ROUTER_CHART_VERSION`, and `ROUTER_GATEWAY_CHART` are automatically sourced from the llm-d repo's `guides/env.sh` after cloning (see step 3.2). You do not need to set them manually.
@@ -1051,13 +1051,13 @@ kubectl rollout status deployment/${PROMETHEUS_NAME} -n ${LLM_NAMESPACE} --timeo
 <details>
 <summary>Deploy async-processor</summary>
 
-> Do not set `result_queue_name` inside `queuesConfig`. Batch Processor replicas provide their own result destinations on each request; a static per-queue value overrides that routing in llm-d Async versions through v0.9.0. When upgrading, remove the per-queue override and wait for the Async Processor rollout to complete before upgrading the Batch Processors. Reversing this order strands results even with one Processor replica.
+> Do not set `result_queue_name` inside `transportConfig.queues`. Batch Processor replicas provide their own result destinations on each request; a static per-queue value overrides that routing in llm-d Async v0.9.1. When upgrading, remove the per-queue override and wait for the Async Processor rollout to complete before upgrading the Batch Processors. Reversing this order strands results even with one Processor replica.
 
 ```bash
 DISPATCHER_RELEASE=dispatcher
-DISPATCHER_VERSION=${DISPATCHER_VERSION:-v0.7.3}
-DISPATCHER_IMAGE="ghcr.io/llm-d-incubation/llm-d-async:${DISPATCHER_VERSION}"
-DISPATCHER_CHART="oci://ghcr.io/llm-d-incubation/charts/async-processor"
+DISPATCHER_VERSION=${DISPATCHER_VERSION:-v0.9.1}
+DISPATCHER_IMAGE="ghcr.io/llm-d/llm-d-async:${DISPATCHER_VERSION}"
+DISPATCHER_CHART="oci://ghcr.io/llm-d/charts/llm-d-async"
 
 REDIS_SVC=redis-master   # or redis-valkey-primary for Valkey
 REDIS_HOST="${REDIS_SVC}.${BATCH_NAMESPACE}.svc.cluster.local"
@@ -1071,16 +1071,17 @@ PROMETHEUS_URL="http://prometheus.${LLM_NAMESPACE}.svc.cluster.local:9090"
 cat > /tmp/dispatcher-values.yaml <<YAML
 ap:
   imagePullPolicy: IfNotPresent
-  messageQueueImpl: "redis-sortedset"
+  transport: "redis-sortedset"
   concurrency: 1
   prometheusURL: "${PROMETHEUS_URL}"
   prometheusCacheTTL: "0s"
-  redis:
-    enabled: true
-    url: "redis://${REDIS_HOST}:6379"
-    pollIntervalMs: 500
-    batchSize: 10
-    queuesConfig:
+  transportConfig:
+    urlSecret:
+      url: "redis://${REDIS_HOST}:6379"
+    result_queue_name: "result-list"
+    poll_interval_ms: 500
+    batch_size: 10
+    queues:
       - queue_name: "llm-d-async:requests:${LLMD_POOL_NAME}"
         request_path_url: "/v1/chat/completions"
         igw_base_url: "http://${INTERNAL_GW_SVC}.${BATCH_INTERNAL_GATEWAY_NAMESPACE}.svc.cluster.local/${LLM_NAMESPACE}/${MODEL_NAME}"
@@ -1099,13 +1100,13 @@ IMAGE_REPO="${DISPATCHER_IMAGE%%:*}"
 IMAGE_TAG="${DISPATCHER_IMAGE##*:}"
 
 helm upgrade --install "${DISPATCHER_RELEASE}" "${DISPATCHER_CHART}" \
-    --version "${DISPATCHER_VERSION#v}" \
+    --version "${DISPATCHER_VERSION}" \
     --namespace "${BATCH_NAMESPACE}" \
     --values /tmp/dispatcher-values.yaml \
     --set "ap.image.repository=${IMAGE_REPO}" \
     --set "ap.image.tag=${IMAGE_TAG}"
 
-kubectl rollout status deployment/${DISPATCHER_RELEASE}-async-processor \
+kubectl rollout status deployment/${DISPATCHER_RELEASE}-llm-d-async \
     -n ${BATCH_NAMESPACE} --timeout=120s
 ```
 
@@ -1277,8 +1278,8 @@ kubectl get inferenceobjective -n ${LLM_NAMESPACE}
 
 # If ENABLE_DISPATCHER=true:
 echo "=== Async Dispatcher ==="
-kubectl get pods -n ${BATCH_NAMESPACE} -l app.kubernetes.io/name=async-processor
-# Expected: dispatcher-async-processor (1/1 Running)
+kubectl get pods -n ${BATCH_NAMESPACE} -l app.kubernetes.io/name=llm-d-async
+# Expected: dispatcher-llm-d-async (1/1 Running)
 kubectl get configmap batch-gateway-processor-config -n ${BATCH_NAMESPACE} \
     -o jsonpath='{.data}' | grep dispatch_mode
 # Expected: dispatch_mode: "async"

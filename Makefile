@@ -174,6 +174,7 @@ test-scripts:
 	@echo "Running shell script tests..."
 	@bash scripts/generate-release_test.sh
 	@bash scripts/dev-deploy_test.sh
+	@bash benchmarks/setup_test.sh
 
 ## test-coverage: Run tests with coverage
 test-coverage:
