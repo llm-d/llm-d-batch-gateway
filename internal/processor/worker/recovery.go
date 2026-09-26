@@ -19,6 +19,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,6 +48,8 @@ const (
 	recoveryUnknownStatus openai.BatchStatus = "unknown"
 )
 
+var errResumableRecoveryUnavailable = errors.New("resumable recovery is not enabled")
+
 // recoveryResult carries the outcome of a recover* function back to recoverJob
 // so that cleanup, metrics, and fallback logic are handled in a single place.
 type recoveryResult struct {
@@ -69,18 +72,17 @@ type recoveryResult struct {
 // writes at the new epoch and a zombie holding the previous one is fenced out.
 //
 // Runs once at startup before the polling loop.
-func (p *Processor) recoverOwnedJobs(ctx context.Context) {
+func (p *Processor) recoverOwnedJobs(ctx context.Context) error {
 	logger := logr.FromContextOrDiscard(ctx)
 
 	tasks, err := p.poller.claimOwned(ctx)
 	if err != nil {
-		logger.Error(err, "Startup recovery: failed to claim owned jobs")
-		return
+		return fmt.Errorf("claim owned jobs: %w", err)
 	}
 
 	if len(tasks) == 0 {
 		logger.V(logging.DEBUG).Info("Startup recovery: no owned jobs found")
-		return
+		return nil
 	}
 
 	logger.V(logging.INFO).Info("Startup recovery: found owned jobs", "count", len(tasks))
@@ -95,16 +97,25 @@ func (p *Processor) recoverOwnedJobs(ctx context.Context) {
 			if task.RecoveryAttempts > maxRecoveryAttempts {
 				if failErr := p.recoverExhausted(jctx, task.ID); failErr != nil {
 					jlogger.Error(failErr, "Startup recovery: failed to fail job past its recovery budget")
+					if task.Resumable || errors.Is(failErr, errResumableRecoveryUnavailable) {
+						return failErr
+					}
 				}
 				return nil
 			}
 			if recoverErr := p.recoverJob(jctx, task.ID); recoverErr != nil {
 				jlogger.Error(recoverErr, "Startup recovery: failed to recover owned job")
+				if task.Resumable || errors.Is(recoverErr, errResumableRecoveryUnavailable) {
+					return recoverErr
+				}
 			}
 			return nil
 		})
 	}
-	_ = grp.Wait()
+	if err := grp.Wait(); err != nil {
+		return fmt.Errorf("recover owned jobs: %w", err)
+	}
+	return nil
 }
 
 // maxRecoveryAttempts bounds how often one ownership may recover a job before
@@ -120,17 +131,30 @@ func (p *Processor) recoverExhausted(ctx context.Context, jobID string) error {
 	if dbItem == nil {
 		return nil
 	}
+	if dbItem.Resumable {
+		return fmt.Errorf("%w: recovery attempts exhausted after %d for job %s", errResumableRecoveryUnavailable, maxRecoveryAttempts, jobID)
+	}
 	jobInfo, _ := batch_utils.FromDBItemToJobInfoObject(dbItem)
 	logr.FromContextOrDiscard(ctx).Info("Startup recovery: recovery budget exhausted, failing job")
 	return p.recoverWithFailed(ctx, dbItem, fmt.Errorf("recovery attempts exhausted after %d", maxRecoveryAttempts), nil, jobInfo)
 }
 
-// recoverJob is the single routing point for startup recovery. Each recover*
-// function returns (*recoveryResult, nil) on success, or (*recoveryResult, error)
-// on failure — where the result may be non-nil (carrying partial file IDs for
-// fallback) or nil when no partial state was created. recoverJob handles
-// fallback, cleanup, and metrics recording uniformly.
 func (p *Processor) recoverJob(ctx context.Context, jobID string) error {
+	err := p.recoverJobOnce(ctx, jobID)
+	if !errors.Is(err, db.ErrConflict) {
+		return err
+	}
+
+	logr.FromContextOrDiscard(ctx).Info("Startup recovery: state changed during recovery, retrying", "jobId", jobID)
+	return p.recoverJobOnce(ctx, jobID)
+}
+
+// recoverJobOnce is the single routing point for one startup recovery attempt.
+// Each recover* function returns (*recoveryResult, nil) on success, or
+// (*recoveryResult, error) on failure — where the result may be non-nil
+// (carrying partial file IDs for fallback) or nil when no partial state was
+// created. It handles fallback, cleanup, and metrics recording uniformly.
+func (p *Processor) recoverJobOnce(ctx context.Context, jobID string) error {
 	logger := logr.FromContextOrDiscard(ctx)
 
 	dbItem, err := p.poller.fetchJobItemByID(ctx, jobID)
@@ -149,6 +173,11 @@ func (p *Processor) recoverJob(ctx context.Context, jobID string) error {
 		metrics.RecordStartupRecovery(string(recoveryUnknownStatus), recoveryActionCleanedUp)
 		p.cleanupStaleJobDir(ctx, jobID)
 		return nil
+	}
+	// The resumable writer and durable-manifest recovery path are introduced in
+	// stages. Resumable rows never enter the legacy reset/fail paths.
+	if dbItem.Resumable {
+		return p.recoverResumable(ctx, dbItem)
 	}
 
 	jobInfo, err := batch_utils.FromDBItemToJobInfoObject(dbItem)
@@ -201,6 +230,141 @@ func (p *Processor) recoverJob(ctx context.Context, jobID string) error {
 	}
 	logger.V(logging.INFO).Info("Startup recovery: completed", "action", result.action)
 	return nil
+}
+
+func (p *Processor) recoverResumable(ctx context.Context, dbItem *db.BatchItem) error {
+	manifestStore, ok := p.batchDB.(db.ResumableBatchStore)
+	if !ok {
+		return fmt.Errorf("%w: manifest store unavailable", errResumableRecoveryUnavailable)
+	}
+	checkpointStore, ok := p.batchDB.(db.BatchCheckpointStore)
+	if !ok {
+		return fmt.Errorf("%w: checkpoint store unavailable", errResumableRecoveryUnavailable)
+	}
+	manifest, err := manifestStore.GetBatchManifest(ctx, dbItem.ID)
+	if err != nil {
+		return err
+	}
+	if manifest == nil {
+		return fmt.Errorf("%w: manifest missing for job %s", errResumableRecoveryUnavailable, dbItem.ID)
+	}
+	jobInfo, err := batch_utils.FromDBItemToJobInfoObject(dbItem)
+	if err != nil {
+		return err
+	}
+	if err := p.restoreManifestArtifacts(manifest, dbItem.TenantID); err != nil {
+		return fmt.Errorf("restore manifest: %w", err)
+	}
+
+	checkpoints, err := checkpointStore.BatchResultCheckpoints(ctx, dbItem.ID)
+	if err != nil {
+		return err
+	}
+	if err := p.restoreCheckpointArtifacts(manifest, checkpoints, dbItem.TenantID); err != nil {
+		return fmt.Errorf("restore result checkpoints: %w", err)
+	}
+	completed := make(map[string]bool, len(checkpoints))
+	var succeeded, failed int64
+	for _, checkpoint := range checkpoints {
+		completed[checkpoint.RequestID] = true
+		var line struct {
+			Response *struct {
+				StatusCode int `json:"status_code"`
+			} `json:"response"`
+			Error any `json:"error"`
+		}
+		if json.Unmarshal(checkpoint.Result, &line) == nil && line.Error == nil && line.Response != nil && line.Response.StatusCode == 200 {
+			succeeded++
+		} else {
+			failed++
+		}
+	}
+
+	params := &jobExecutionParams{
+		updater:       p.updater,
+		jobItem:       dbItem,
+		jobInfo:       jobInfo,
+		completedIDs:  completed,
+		recoveredOK:   succeeded,
+		recoveredFail: failed,
+		resume:        true,
+	}
+	counts, err := p.executeJobAsync(ctx, params)
+	if err != nil {
+		return err
+	}
+	if err := p.finalizeJob(ctx, p.updater, dbItem, jobInfo, counts); err != nil {
+		return err
+	}
+	p.cleanupJobArtifacts(context.Background(), dbItem.ID, dbItem.TenantID)
+	metrics.RecordStartupRecovery(string(openai.BatchStatusInProgress), recoveryActionFinalized)
+	return nil
+}
+
+// restoreCheckpointArtifacts reconstructs local JSONL files in manifest order.
+// Checkpoints are authoritative: execution skips these request IDs, so omitting
+// them here would silently publish an incomplete batch artifact after takeover.
+func (p *Processor) restoreCheckpointArtifacts(manifest *db.BatchManifest, checkpoints []*db.BatchResultCheckpoint, tenantID string) error {
+	byRequestID := make(map[string][]byte, len(checkpoints))
+	for _, checkpoint := range checkpoints {
+		if checkpoint == nil || checkpoint.RequestID == "" || len(checkpoint.Result) == 0 {
+			return fmt.Errorf("invalid result checkpoint")
+		}
+		byRequestID[checkpoint.RequestID] = checkpoint.Result
+	}
+
+	outputPath, err := p.jobOutputFilePath(manifest.BatchID, tenantID)
+	if err != nil {
+		return err
+	}
+	errorPath, err := p.jobErrorFilePath(manifest.BatchID, tenantID)
+	if err != nil {
+		return err
+	}
+	outputFile, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer outputFile.Close()
+	errorFile, err := os.OpenFile(errorPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer errorFile.Close()
+
+	seen := 0
+	for _, entry := range manifest.Entries {
+		line, ok := byRequestID[entry.RequestID]
+		if !ok {
+			continue
+		}
+		var envelope struct {
+			Error any `json:"error"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil {
+			return fmt.Errorf("decode checkpoint %s: %w", entry.RequestID, err)
+		}
+		target := outputFile
+		if envelope.Error != nil {
+			target = errorFile
+		}
+		if _, err := target.Write(line); err != nil {
+			return fmt.Errorf("write checkpoint %s: %w", entry.RequestID, err)
+		}
+		if len(line) == 0 || line[len(line)-1] != '\n' {
+			if _, err := target.Write([]byte{'\n'}); err != nil {
+				return fmt.Errorf("terminate checkpoint %s: %w", entry.RequestID, err)
+			}
+		}
+		seen++
+	}
+	if seen != len(byRequestID) {
+		return fmt.Errorf("%d checkpoints are not present in the manifest", len(byRequestID)-seen)
+	}
+	if err := outputFile.Sync(); err != nil {
+		return err
+	}
+	return errorFile.Sync()
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +485,7 @@ func (p *Processor) recoverReEnqueue(ctx context.Context, dbItem *db.BatchItem, 
 		}
 	}
 
-	task, err := p.buildRecoveryTask(dbItem, slo)
+	task, err := p.buildRecoveryTask(dbItem, slo, openai.BatchStatusValidating)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build recovery task: %w", err)
 	}
@@ -439,14 +603,17 @@ func (p *Processor) extractRecoverySLO(dbItem *db.BatchItem, jobInfo *batch_type
 }
 
 // buildRecoveryTask constructs a BatchJobPriority for re-enqueue.
-func (p *Processor) buildRecoveryTask(dbItem *db.BatchItem, slo *time.Time) (*db.BatchJobPriority, error) {
+func (p *Processor) buildRecoveryTask(dbItem *db.BatchItem, slo *time.Time, expectedStatus openai.BatchStatus) (*db.BatchJobPriority, error) {
 	if slo == nil || slo.IsZero() {
 		return nil, fmt.Errorf("missing recovery SLO for job %s", dbItem.ID)
 	}
 
 	task := &db.BatchJobPriority{
-		ID:  dbItem.ID,
-		SLO: slo.UTC(),
+		ID:             dbItem.ID,
+		SLO:            slo.UTC(),
+		Epoch:          dbItem.Epoch,
+		ProcessorID:    dbItem.ProcessorID,
+		ExpectedStatus: string(expectedStatus),
 	}
 	return task, nil
 }

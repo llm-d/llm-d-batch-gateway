@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"runtime/debug"
 	"slices"
 	"sync"
@@ -179,10 +180,34 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 		return
 	}
 
-	// transition to in_progress before executing requests
-	if err := params.updater.UpdatePersistentStatus(ctx, params.jobItem, openai.BatchStatusInProgress, nil, nil); err != nil {
-		logger.Error(err, "Failed to update status to in_progress")
-		span.RecordError(err)
+	// Persist a complete manifest and activate resumability before the first
+	// Async request can be dispatched. The legacy path remains unchanged while
+	// the feature gate is disabled.
+	var transitionErr error
+	if p.cfg.ResumableRecovery {
+		inputPath, pathErr := p.jobInputFilePath(params.jobInfo.JobID, params.jobInfo.TenantID)
+		if pathErr != nil {
+			transitionErr = pathErr
+		} else {
+			input, openErr := os.Open(inputPath)
+			if openErr != nil {
+				transitionErr = openErr
+			} else {
+				manifest, manifestErr := buildBatchManifest(params.jobItem.ID, input)
+				_ = input.Close()
+				if manifestErr != nil {
+					transitionErr = manifestErr
+				} else {
+					transitionErr = params.updater.ActivateResumable(ctx, params.jobItem, manifest)
+				}
+			}
+		}
+	} else {
+		transitionErr = params.updater.UpdatePersistentStatus(ctx, params.jobItem, openai.BatchStatusInProgress, nil, nil)
+	}
+	if transitionErr != nil {
+		logger.Error(transitionErr, "Failed to update status to in_progress")
+		span.RecordError(transitionErr)
 		span.SetStatus(codes.Error, "status transition failed")
 		if failErr := p.handleFailed(ctx, params.updater, params.jobItem, nil, params.jobInfo); failErr != nil {
 			logger.Error(failErr, "Failed to handle failed event")
@@ -237,6 +262,11 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 			metrics.RecordJobProcessingDuration(time.Since(jobStart), metrics.GetSizeBucket(int(requestCounts.Total)))
 			recordE2ELatency(params.jobInfo, metrics.E2EStatusFailed)
 			metrics.RecordJobProcessed(metrics.ResultFailed, metrics.ReasonSystemError)
+		} else if params.jobItem.Resumable {
+			// Keep the fenced non-terminal row and durable checkpoints intact.
+			// Startup recovery can retry deterministic artifact publication; a
+			// terminal failure here would discard that recovery opportunity.
+			logger.Info("Leaving resumable job for startup finalization retry")
 		} else {
 			// Pre-upload failure (e.g. finalizing status write) — no file IDs exist yet.
 			if failErr := p.handleFailed(ctx, params.updater, params.jobItem, requestCounts, params.jobInfo); failErr != nil {

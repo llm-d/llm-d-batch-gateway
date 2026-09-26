@@ -20,6 +20,11 @@ type AsyncDispatcher struct {
 	broadcasters *BroadcasterGroup
 	pending      *PendingRequests
 	logger       logr.Logger
+	beforeSubmit func(context.Context, RequestItem) error
+}
+
+func (d *AsyncDispatcher) SetBeforeSubmit(fn func(context.Context, RequestItem) error) {
+	d.beforeSubmit = fn
 }
 
 var _ RequestDispatcher = (*AsyncDispatcher)(nil)
@@ -50,6 +55,12 @@ func (d *AsyncDispatcher) Run(ctx context.Context, requestCh <-chan RequestItem,
 		}
 
 		d.pending.Store(msg)
+		if d.beforeSubmit != nil {
+			if err := d.beforeSubmit(ctx, msg); err != nil {
+				resultCh <- *msg.Error("checkpoint_error", err.Error())
+				continue
+			}
+		}
 
 		req := &inference.GenerateRequest{
 			RequestID: msg.RequestID,

@@ -87,6 +87,60 @@ func (s *StatusUpdater) UpdatePersistentStatus(
 	slo *time.Time,
 	modifiers ...func(*openai.BatchStatusInfo),
 ) error {
+	return s.updatePersistentStatus(ctx, dbJob, newStatus, counts, slo, nil, modifiers...)
+}
+
+// ActivateResumable persists a complete manifest and the in_progress status in
+// one ownership-fenced PostgreSQL statement. No dispatch may occur before it
+// returns successfully.
+func (s *StatusUpdater) ActivateResumable(
+	ctx context.Context,
+	dbJob *db.BatchItem,
+	manifest *db.BatchManifest,
+) error {
+	store, ok := s.db.(db.ResumableBatchStore)
+	if !ok {
+		return fmt.Errorf("database does not support resumable manifests")
+	}
+	if dbJob == nil || len(dbJob.Status) == 0 {
+		return fmt.Errorf("dbJob with status is required")
+	}
+	var original openai.BatchStatusInfo
+	if err := json.Unmarshal(dbJob.Status, &original); err != nil {
+		return err
+	}
+	updated, err := batch_utils.BuildUpdatedStatusInfo(&original, openai.BatchStatusInProgress, nil, nil)
+	if err != nil {
+		return err
+	}
+	statusBytes, err := json.Marshal(updated)
+	if err != nil {
+		return err
+	}
+	expectedStatus := append([]byte(nil), dbJob.Status...)
+	activation := &db.BatchItem{
+		BaseIndexes:  db.BaseIndexes{ID: dbJob.ID},
+		BaseContents: db.BaseContents{Status: statusBytes},
+		ProcessorID:  dbJob.ProcessorID,
+		Epoch:        dbJob.Epoch,
+	}
+	if err := store.ActivateResumableBatch(ctx, activation, expectedStatus, manifest); err != nil {
+		return err
+	}
+	dbJob.Status = statusBytes
+	dbJob.Resumable = true
+	return nil
+}
+
+func (s *StatusUpdater) updatePersistentStatus(
+	ctx context.Context,
+	dbJob *db.BatchItem,
+	newStatus openai.BatchStatus,
+	counts *openai.BatchRequestCounts,
+	slo *time.Time,
+	expectedStatus []byte,
+	modifiers ...func(*openai.BatchStatusInfo),
+) error {
 	if dbJob == nil {
 		return fmt.Errorf("dbJob is nil")
 	}
@@ -115,7 +169,7 @@ func (s *StatusUpdater) UpdatePersistentStatus(
 		return err
 	}
 
-	if err := s.db.DBUpdate(ctx, &db.BatchItem{
+	update := &db.BatchItem{
 		BaseIndexes: db.BaseIndexes{
 			ID: dbJob.ID,
 		},
@@ -123,11 +177,29 @@ func (s *StatusUpdater) UpdatePersistentStatus(
 			Status: statusBytes,
 		},
 		Epoch: dbJob.Epoch,
-	}, nil); err != nil {
-		return err
+	}
+	var updateErr error
+	if dbJob.Resumable && newStatus.IsTerminal() {
+		finalizer, ok := s.db.(db.ResumableBatchFinalizer)
+		if !ok {
+			return fmt.Errorf("database does not support resumable finalization")
+		}
+		if expectedStatus == nil {
+			expectedStatus = dbJob.Status
+		}
+		updateErr = finalizer.FinalizeResumableBatch(ctx, update, expectedStatus)
+	} else {
+		updateErr = s.db.DBUpdate(ctx, update, expectedStatus)
+	}
+	if updateErr != nil {
+		return updateErr
 	}
 
 	dbJob.Status = statusBytes
+	if dbJob.Resumable && newStatus.IsTerminal() {
+		dbJob.Resumable = false
+		dbJob.ProcessorID = ""
+	}
 
 	logger := logr.FromContextOrDiscard(ctx)
 	logger.V(logging.INFO).Info("Batch status updated successfully", "newStatus", newStatus)
@@ -173,7 +245,10 @@ func (s *StatusUpdater) UpdateFailedStatus(
 	outputFileID string,
 	errorFileID string,
 ) error {
-	return s.UpdatePersistentStatus(ctx, dbJob, openai.BatchStatusFailed, counts, nil,
+	if dbJob == nil {
+		return fmt.Errorf("dbJob is nil")
+	}
+	return s.updatePersistentStatus(ctx, dbJob, openai.BatchStatusFailed, counts, nil, dbJob.Status,
 		withFileIDs(outputFileID, errorFileID),
 	)
 }

@@ -291,6 +291,43 @@ func TestSkipNonOrphans(t *testing.T) {
 	}
 }
 
+func TestSkipResumableOrphans(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name     string
+		status   openai.BatchStatus
+		priority int64
+	}{
+		{name: "future SLO", status: openai.BatchStatusInProgress, priority: futureSLO()},
+		{name: "expired SLO", status: openai.BatchStatusInProgress, priority: expiredSLO()},
+		{name: "cancelling", status: openai.BatchStatusCancelling, priority: expiredSLO()},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			batchDB := newMockBatchDB()
+			queue := mock.NewMockBatchPriorityQueueClient()
+			item := newTestBatchItem("job-1", "dead-processor", tc.status, tc.priority)
+			item.Resumable = true
+			storeItems(t, batchDB, item)
+
+			r, resultCh := newTestReconciler(t, batchDB, queue)
+			r.SetLiveProcessors(map[string]bool{})
+			r.run(ctx)
+
+			result := <-resultCh
+			if result.Expired != 0 || result.ReEnqueued != 0 || result.Conflicts != 0 || result.Errors != 0 {
+				t.Fatalf("expected no GC mutation for resumable job, got %+v", result)
+			}
+			assertJobStatus(t, batchDB, "job-1", tc.status)
+			queuedIDs, _ := queue.PQGetIDs(ctx)
+			if queuedIDs["job-1"] {
+				t.Fatal("resumable job was re-enqueued")
+			}
+		})
+	}
+}
+
 func TestRunCycleMixedJobs(t *testing.T) {
 	ctx := context.Background()
 

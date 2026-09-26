@@ -329,7 +329,7 @@ test-regression:
 ## test-integration: Run integration tests (in-process server with mock backends and external service integration, no cluster needed)
 test-integration:
 	@echo "Running integration tests..."
-	@$(GO) test -v -tags=integration ./... || \
+	@$(GO) test $(GOFLAGS) -v -tags=integration ./... || \
 		(echo "\n❌ Integration tests failed" && exit 1)
 	@echo "\n✅ Integration tests passed!"
 

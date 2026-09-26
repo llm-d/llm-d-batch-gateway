@@ -10,6 +10,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 
+	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/batchctx"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/pipeline"
@@ -49,6 +50,7 @@ func (p *Processor) executeJobAsync(ctx context.Context, params *jobExecutionPar
 	}
 
 	// Setup pipeline.
+	resumable := params.jobItem != nil && params.jobItem.Resumable
 
 	tracker := pipeline.NewProgressTracker(
 		modelMap.LineCount,
@@ -58,8 +60,11 @@ func (p *Processor) executeJobAsync(ctx context.Context, params *jobExecutionPar
 		logger,
 	)
 	tracker.AddFailed(modelMap.RejectedCount)
+	tracker.Seed(params.recoveredOK, params.recoveredFail)
 
 	source := NewPlanFileSource(PlanFileSourceConfig{
+		BatchID:            params.jobInfo.JobID,
+		StableRequestIDs:   resumable,
 		InputFile:          files.input,
 		PlansDir:           plansDir,
 		ModelMap:           modelMap,
@@ -69,11 +74,12 @@ func (p *Processor) executeJobAsync(ctx context.Context, params *jobExecutionPar
 		SLODeadline:        sloDeadline,
 		TenantID:           params.jobInfo.TenantID,
 		Logger:             logger,
+		CompletedIDs:       params.completedIDs,
 	})
 
 	// The dispatcher forwards requests for processing.
 	pending := pipeline.NewPendingRequests(modelMap.LineCount)
-	dispatcher, err := p.buildRequestDispatcher(modelMap, pending, params.jobInfo.TenantID, logger)
+	dispatcher, err := p.buildRequestDispatcher(modelMap, pending, params, logger)
 	if err != nil {
 		return nil, fmt.Errorf("build dispatcher: %w", err)
 	}
@@ -86,6 +92,20 @@ func (p *Processor) executeJobAsync(ctx context.Context, params *jobExecutionPar
 		tracker,
 		logger,
 	)
+	if resumable {
+		checkpointStore, ok := p.batchDB.(db.BatchCheckpointStore)
+		if !ok {
+			return nil, fmt.Errorf("database does not support durable result checkpoints")
+		}
+		resultCollector.SetCheckpoint(func(checkpointCtx context.Context, requestID string, result []byte) error {
+			return checkpointStore.CheckpointBatchResult(checkpointCtx, &db.BatchResultCheckpoint{
+				BatchID:    params.jobItem.ID,
+				RequestID:  requestID,
+				OwnerEpoch: params.jobItem.Epoch,
+				Result:     append([]byte(nil), result...),
+			})
+		})
+	}
 
 	// Orchestrates Job execution.
 	executor := pipeline.NewJobExecutor(pipeline.JobExecutorConfig{
@@ -122,14 +142,29 @@ func classifyOutcome(cause error, counts *openai.BatchRequestCounts, execErr err
 	return execErr
 }
 
-func (p *Processor) buildRequestDispatcher(modelMap *modelMapFile, pending *pipeline.PendingRequests, tenantID string, logger logr.Logger) (pipeline.RequestDispatcher, error) {
+func (p *Processor) buildRequestDispatcher(modelMap *modelMapFile, pending *pipeline.PendingRequests, params *jobExecutionParams, logger logr.Logger) (pipeline.RequestDispatcher, error) {
 	switch {
 	case p.asyncInference != nil:
 		broadcasters := p.broadcasters.forModels(modelMap)
 		async := pipeline.NewAsyncDispatcher(p.asyncInference, broadcasters, pending, logger)
+		if params.jobItem != nil && params.jobItem.Resumable {
+			checkpointStore, ok := p.batchDB.(db.BatchCheckpointStore)
+			if !ok {
+				return nil, fmt.Errorf("database does not support durable request attempts")
+			}
+			attemptNumber := int(params.jobItem.RecoveryAttempts) + 1
+			async.SetBeforeSubmit(func(submitCtx context.Context, item pipeline.RequestItem) error {
+				return checkpointStore.RecordBatchRequestAttempt(submitCtx, &db.BatchRequestAttempt{
+					BatchID:    params.jobItem.ID,
+					RequestID:  item.RequestID,
+					Attempt:    attemptNumber,
+					OwnerEpoch: params.jobItem.Epoch,
+				})
+			})
+		}
 		return pipeline.NewPreDispatcher(async), nil
 	case p.cfg.Concurrency.AIMD.Enabled:
-		models := buildAIMDModels(modelMap, p.inference, p.endpointLimits, p.cfg.RouteKeyMethod, tenantID)
+		models := buildAIMDModels(modelMap, p.inference, p.endpointLimits, p.cfg.RouteKeyMethod, params.jobInfo.TenantID)
 		direct := pipeline.NewDirectDispatcher(p.inference, logger)
 		aimd, err := pipeline.NewAIMDDispatcher(direct, models, p.cfg.Concurrency.Global, logger)
 		if err != nil {
@@ -141,7 +176,7 @@ func (p *Processor) buildRequestDispatcher(modelMap *modelMapFile, pending *pipe
 		// EndpointAIMD.AIMD is nil so recordAIMDSignal is a no-op, but the semaphores
 		// still enforce fixed concurrency limits (global + per-endpoint). Without this,
 		// DirectDispatcher would dispatch all requests as unbounded goroutines.
-		models := buildAIMDModels(modelMap, p.inference, p.endpointLimits, p.cfg.RouteKeyMethod, tenantID)
+		models := buildAIMDModels(modelMap, p.inference, p.endpointLimits, p.cfg.RouteKeyMethod, params.jobInfo.TenantID)
 		direct := pipeline.NewDirectDispatcher(p.inference, logger)
 		aimd, err := pipeline.NewAIMDDispatcher(direct, models, p.cfg.Concurrency.Global, logger)
 		if err != nil {
@@ -181,7 +216,11 @@ func (p *Processor) openDataFiles(params *jobExecutionParams) (*dataFiles, error
 		inputFile.Close()
 		return nil, err
 	}
-	outputFile, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	outputFlags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	if params.resume {
+		outputFlags = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	}
+	outputFile, err := os.OpenFile(outputPath, outputFlags, 0o600)
 	if err != nil {
 		inputFile.Close()
 		return nil, fmt.Errorf("create output file: %w", err)

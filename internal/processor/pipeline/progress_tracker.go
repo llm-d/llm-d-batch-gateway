@@ -105,6 +105,15 @@ func (pt *ProgressTracker) AddFailed(n int64) {
 	pt.mu.Unlock()
 }
 
+// Seed restores counts already durably checkpointed by an earlier processor.
+func (pt *ProgressTracker) Seed(completed, failed int64) {
+	pt.mu.Lock()
+	pt.completed += completed
+	pt.failed += failed
+	pt.dirty = true
+	pt.mu.Unlock()
+}
+
 func (pt *ProgressTracker) push(ctx context.Context) {
 	if pt.updater == nil {
 		return
