@@ -56,3 +56,24 @@ CREATE INDEX IF NOT EXISTS idx_batch_items_queue
 CREATE INDEX IF NOT EXISTS idx_batch_items_processor
     ON batch_items (processor_id)
     WHERE processor_id IS NOT NULL;
+
+-- Durable-until-consumed events (BatchEventChannelClient). The table is the
+-- source of truth; PostgreSQL NOTIFY is only used to wake live consumers.
+CREATE TABLE IF NOT EXISTS batch_events (
+    id         BIGSERIAL PRIMARY KEY,
+    job_id     TEXT      NOT NULL,
+    event_type INTEGER   NOT NULL,
+    expires_at BIGINT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_batch_events_job_id ON batch_events (job_id, id);
+CREATE INDEX IF NOT EXISTS idx_batch_events_expires_at ON batch_events (expires_at);
+
+-- Temporary progress snapshots (BatchStatusClient). This keeps the existing
+-- opaque payload and TTL semantics separate from the authoritative batch
+-- status JSON stored in batch_items.
+CREATE TABLE IF NOT EXISTS batch_status (
+    job_id     TEXT  PRIMARY KEY,
+    data       BYTEA NOT NULL,
+    expires_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_batch_status_expires_at ON batch_status (expires_at);

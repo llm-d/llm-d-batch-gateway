@@ -55,7 +55,7 @@ func (s *StatusUpdater) validate() error {
 	return nil
 }
 
-// UpdateProgressCounts pushes request counts to the volatile status store (e.g. Redis).
+// UpdateProgressCounts pushes request counts to the temporary status store.
 // This is NOT a persistent DB update — it is a lightweight, frequent update used to power
 // real-time progress polling. The data expires after progressTTLSec.
 func (s *StatusUpdater) UpdateProgressCounts(

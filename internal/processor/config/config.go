@@ -232,7 +232,7 @@ type ProcessorConfig struct {
 	// 0 means no expiration (keep until explicitly deleted).
 	DefaultOutputExpirationSeconds int64 `yaml:"default_output_expiration_seconds"`
 
-	// ProgressTTLSeconds is the TTL for temporary progress updates in the status store (Redis).
+	// ProgressTTLSeconds is the TTL for temporary progress updates in the status store.
 	ProgressTTLSeconds int `yaml:"progress_ttl_seconds"`
 
 	// SendFairnessHeader controls whether the processor sends
