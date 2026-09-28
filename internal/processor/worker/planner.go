@@ -18,70 +18,22 @@ limitations under the License.
 package worker
 
 import (
-	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strings"
+
+	"github.com/llm-d/llm-d-batch-gateway/internal/shared/batchinput"
 )
 
 const modelMapFileName = "model_map.json"
 
-type planRequestLine struct {
-	CustomID string `json:"custom_id"`
-	Method   string `json:"method"`
-	URL      string `json:"url"`
-	Body     struct {
-		Model    string `json:"model"`
-		Stream   *bool  `json:"stream,omitempty"`
-		Messages []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		} `json:"messages"`
-	} `json:"body"`
-}
-
-// messageText extracts only the system text needed for prefix grouping.
-// Other content stays encoded and the original input is used for forwarding.
-func messageText(content json.RawMessage) (string, error) {
-	content = bytes.TrimSpace(content)
-	if len(content) == 0 || bytes.Equal(content, []byte("null")) {
-		return "", nil
-	}
-	switch content[0] {
-	case '"':
-		var text string
-		err := json.Unmarshal(content, &text)
-		return text, err
-	case '[':
-		var parts []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		}
-		if err := json.Unmarshal(content, &parts); err != nil {
-			return "", err
-		}
-		var builder strings.Builder
-		for _, part := range parts {
-			if part.Type == "text" {
-				builder.WriteString(part.Text)
-			}
-		}
-		return builder.String(), nil
-	default:
-		return "", fmt.Errorf("must be a string or an array of content parts")
-	}
-}
-
-// NoPrefixHash is used when a request has no system prompt.
-// Set to MaxUint32 so that no-prompt requests sort last, allowing
-// requests with actual system prompts to be dispatched first.
-const NoPrefixHash uint32 = math.MaxUint32
+// NoPrefixHash re-exports the shared no-system-prompt sentinel so that plan
+// files and the API server's ordering agree on the sort key.
+const NoPrefixHash = batchinput.NoPrefixHash
 
 // planEntry is a single entry in the plan file.
 // 16 bytes:
@@ -117,12 +69,46 @@ func newPlanAccumulator(jobRootDir string) *planAccumulator {
 	}
 }
 
-// modelMapFile is a map of modelID to the file name of the plan file
+// inputMode tells execution how to read the job's input.
+type inputMode string
+
+const (
+	// inputModePlanFiles reads per-model plan files built during ingestion and
+	// fetches each request line by offset. It is the zero value so that a
+	// manifest written before sequential reads existed still reads correctly.
+	inputModePlanFiles inputMode = ""
+
+	// inputModeSequential streams the stored object front to back, because it
+	// was already written in dispatch order.
+	inputModeSequential inputMode = "sequential"
+)
+
+// modelMapFile is the ingestion-to-execution handoff manifest. Besides the
+// model/plan-file mapping it records how execution should read the input, so
+// that the two phases cannot disagree about the layout even if the file
+// record were to be re-read in between.
 type modelMapFile struct {
 	ModelToSafe   map[string]string `json:"model_to_safe"`
 	SafeToModel   map[string]string `json:"safe_to_model"`
 	LineCount     int64             `json:"line_count"`
 	RejectedCount int64             `json:"rejected_count"`
+
+	// InputMode selects the request source. Empty means plan files.
+	InputMode inputMode `json:"input_mode,omitempty"`
+	// InputPolicy is the ordering policy the stored object was written under,
+	// carried for diagnostics and for attributing runs to a layout.
+	InputPolicy batchinput.PolicyID `json:"input_policy,omitempty"`
+	// InputBytes is the stored object size, needed to plan the ranged reads.
+	InputBytes int64 `json:"input_bytes,omitempty"`
+	// InputModels lists the models the stored object references. Sequential
+	// input carries no per-model plan files, so this is how execution knows
+	// which result queues to subscribe to.
+	InputModels []string `json:"input_models,omitempty"`
+}
+
+// sequentialInput reports whether execution should stream the stored object.
+func (m *modelMapFile) sequentialInput() bool {
+	return m.InputMode == inputModeSequential
 }
 
 func writeModelMapFile(jobRootDir string, modelMapFile modelMapFile) error {

@@ -35,6 +35,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/apiserver/common"
 	dbapi "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	fsapi "github.com/llm-d/llm-d-batch-gateway/internal/files_store/api"
+	"github.com/llm-d/llm-d-batch-gateway/internal/shared/batchinput"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/converter"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/clientset"
@@ -341,7 +342,44 @@ func (c *FileAPIHandler) CreateFile(w http.ResponseWriter, r *http.Request) {
 		common.WriteInternalServerError(w, r)
 		return
 	}
-	fileMeta, err := c.clients.File.Store(ctx, storageName, folderName, c.config.FileAPI.GetMaxSizeBytes(), c.config.FileAPI.GetMaxLineCount(), fileReader)
+
+	// Batch inputs are reordered into dispatch order before they are stored,
+	// so the processor can stream them back in a few range reads. Every other
+	// purpose is stored exactly as uploaded.
+	storeReader := io.Reader(fileReader)
+	storeSizeLimit := maxFileSize
+	var inputMeta *batchinput.Metadata
+	if purpose == openai.FileObjectPurposeBatch {
+		prepared, prepErr := prepareBatchInput(
+			fileReader,
+			fileHeader.Size,
+			c.config.FileAPI.GetMaxLineCount(),
+			maxFileSize,
+			c.config.FileAPI.GetBatchInputOrderPolicy(),
+		)
+		switch {
+		case errors.Is(prepErr, batchinput.ErrTooManyLines):
+			maxLines := c.config.FileAPI.GetMaxLineCount()
+			logger.V(logging.DEBUG).Info("file line count exceeds limit", "limit", maxLines)
+			common.WriteAPIError(w, r, openai.NewAPIError(
+				http.StatusBadRequest, "",
+				fmt.Sprintf("File exceeds the maximum allowed line count of %d", maxLines), nil,
+			))
+			return
+		case prepErr != nil:
+			logger.Error(prepErr, "failed to prepare batch input for storage", "file_id", fileID)
+			common.WriteInternalServerError(w, r)
+			return
+		}
+		storeReader = prepared.reader
+		storeSizeLimit = prepared.sizeLimit
+		inputMeta = prepared.meta
+		logger.V(logging.DEBUG).Info("batch input prepared",
+			"file_id", fileID, "policy", inputMeta.Policy,
+			"lines", inputMeta.LineCount, "valid", inputMeta.Invalid == nil)
+	}
+
+	fileMeta, err := c.clients.File.Store(ctx, storageName, folderName, storeSizeLimit, c.config.FileAPI.GetMaxLineCount(), storeReader)
 	if err != nil {
 		switch {
 		case errors.Is(err, fsapi.ErrFileTooLarge):
@@ -409,8 +447,24 @@ func (c *FileAPIHandler) CreateFile(w http.ResponseWriter, r *http.Request) {
 		Status:    openai.FileObjectStatusUploaded,
 	}
 
+	// Carry the ordering policy and validation outcome with the file record.
+	// The processor reads them to decide how to consume the object; a record
+	// without them (or with a policy it does not know) makes it fall back to
+	// inspecting the object itself.
+	tags := dbapi.Tags{}
+	if inputMeta != nil {
+		inputMeta.Bytes = fileMeta.Size
+		encoded, encErr := inputMeta.Encode()
+		if encErr != nil {
+			logger.Error(encErr, "failed to encode batch input metadata", "file_id", fileID)
+			common.WriteInternalServerError(w, r)
+			return
+		}
+		tags[batchinput.TagKey] = encoded
+	}
+
 	// Save file metadata to database
-	dbItem, err := converter.FileToDBItem(&fileObj, tenantID, dbapi.Tags{})
+	dbItem, err := converter.FileToDBItem(&fileObj, tenantID, tags)
 	if err != nil {
 		logger.Error(err, "failed to convert file to database item", "file_id", fileID)
 		common.WriteInternalServerError(w, r)

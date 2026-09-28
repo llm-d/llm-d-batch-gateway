@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/llm-d/llm-d-batch-gateway/internal/shared/batchinput"
 	sharedcfg "github.com/llm-d/llm-d-batch-gateway/internal/shared/config"
 	"gopkg.in/yaml.v3"
 	"k8s.io/klog/v2"
@@ -59,6 +60,12 @@ const (
 	DefaultObservabilityShutdownTimeoutSeconds = 60
 )
 
+// DefaultBatchInputOrderPolicy is applied to purpose=batch uploads unless
+// file_api.batch_input_order_policy overrides it. Grouping by model and
+// system-prompt prefix lets the processor dispatch cache-friendly runs of
+// requests straight from storage order.
+const DefaultBatchInputOrderPolicy = batchinput.PolicyModelPrefixV1
+
 type BatchAPIConfig struct {
 	BatchEventTTLSeconds int      `yaml:"batch_event_ttl_seconds"`
 	PassThroughHeaders   []string `yaml:"pass_through_headers"`
@@ -78,6 +85,13 @@ type FileAPIConfig struct {
 	DefaultExpirationSeconds int64 `yaml:"default_expiration_seconds"`
 	MaxSizeBytes             int64 `yaml:"max_size_bytes"`
 	MaxLineCount             int64 `yaml:"max_line_count"`
+
+	// BatchInputOrderPolicy names the ordering policy applied to purpose=batch
+	// uploads before they are stored. The chosen policy's ID is recorded with
+	// each stored object, so changing this setting only affects new uploads:
+	// objects already in storage keep being read under the policy that wrote
+	// them.
+	BatchInputOrderPolicy string `yaml:"batch_input_order_policy"`
 }
 
 func (f *FileAPIConfig) applyDefaults() {
@@ -90,6 +104,30 @@ func (f *FileAPIConfig) applyDefaults() {
 	if f.MaxLineCount <= 0 {
 		f.MaxLineCount = DefaultMaxFileLineCount
 	}
+	if f.BatchInputOrderPolicy == "" {
+		f.BatchInputOrderPolicy = string(DefaultBatchInputOrderPolicy)
+	}
+}
+
+// GetBatchInputOrderPolicy resolves the configured ordering policy. Validate
+// rejects unknown names at startup, so the fallback here only covers configs
+// built in-process without Load.
+func (f *FileAPIConfig) GetBatchInputOrderPolicy() batchinput.OrderPolicy {
+	if policy, ok := batchinput.Lookup(batchinput.PolicyID(f.BatchInputOrderPolicy)); ok {
+		return policy
+	}
+	policy, _ := batchinput.Lookup(DefaultBatchInputOrderPolicy)
+	return policy
+}
+
+func (f *FileAPIConfig) validate() error {
+	if f.BatchInputOrderPolicy != "" {
+		if _, ok := batchinput.Lookup(batchinput.PolicyID(f.BatchInputOrderPolicy)); !ok {
+			return fmt.Errorf("file_api.batch_input_order_policy %q is not a known ordering policy (available: %v)",
+				f.BatchInputOrderPolicy, batchinput.RegisteredPolicies())
+		}
+	}
+	return nil
 }
 
 func (f *FileAPIConfig) GetDefaultExpirationSeconds() int64 {
@@ -195,6 +233,10 @@ func (c *ServerConfig) Validate() error {
 
 	if err := c.FileClientCfg.Retry.Validate(); err != nil {
 		return fmt.Errorf("file_client.retry: %w", err)
+	}
+
+	if err := c.FileAPI.validate(); err != nil {
+		return err
 	}
 
 	return nil

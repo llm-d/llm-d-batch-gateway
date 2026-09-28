@@ -130,6 +130,27 @@ tests:
           path: data["config.yaml"]
           pattern: 'input_file_max_size_bytes: 209715200'
 
+  - it: should render the ordered-input read budget
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'input_chunk_size_bytes: 8388608'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'input_prefetch_bytes: 33554432'
+
+  - it: should allow tuning the ordered-input read budget
+    set:
+      processor.config.inputChunkSizeBytes: 4194304
+      processor.config.inputPrefetchBytes: 8388608
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'input_chunk_size_bytes: 4194304'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'input_prefetch_bytes: 8388608'
+
   - it: should use the global maximum input-file size
     set:
       global.maxInputFileSizeBytes: 524288000

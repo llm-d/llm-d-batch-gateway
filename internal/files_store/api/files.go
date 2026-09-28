@@ -52,6 +52,9 @@ type BatchFilesClient interface {
 	// Retrieve retrieves a file from the files storage.
 	Retrieve(ctx context.Context, fileName, folderName string) (reader io.ReadCloser, fileMd *BatchFileMetadata, err error)
 
+	// RetrieveRange retrieves a byte range [offset, offset+length) from a file in storage.
+	RetrieveRange(ctx context.Context, fileName, folderName string, offset int64, length int64) (io.ReadCloser, error)
+
 	// Delete deletes the file in the specified location.
 	Delete(ctx context.Context, fileName, folderName string) (err error)
 }

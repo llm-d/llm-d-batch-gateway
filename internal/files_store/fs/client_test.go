@@ -276,6 +276,41 @@ func TestRetrieve(t *testing.T) {
 
 }
 
+func TestRetrieveRange(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("retrieves byte range", func(t *testing.T) {
+		client := newTestClient(t)
+		content := []byte("hello world range test")
+
+		if _, err := client.Store(ctx, "range.txt", testFolder, 1024, 0, bytes.NewReader(content)); err != nil {
+			t.Fatalf("failed to store: %v", err)
+		}
+
+		rc, err := client.RetrieveRange(ctx, "range.txt", testFolder, 6, 5)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		defer rc.Close()
+
+		data, _ := io.ReadAll(rc)
+		if string(data) != "world" {
+			t.Errorf("expected %q, got %q", "world", string(data))
+		}
+	})
+
+	t.Run("returns error for non-existent file", func(t *testing.T) {
+		client := newTestClient(t)
+
+		_, err := client.RetrieveRange(ctx, "nonexistent.txt", testFolder, 0, 10)
+		if err != nil {
+			// Expect an error (file not found).
+			return
+		}
+		t.Error("expected error for non-existent file")
+	})
+}
+
 func TestDelete(t *testing.T) {
 	ctx := context.Background()
 

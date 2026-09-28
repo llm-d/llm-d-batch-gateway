@@ -274,6 +274,31 @@ func (c *Client) Retrieve(ctx context.Context, fileName, folderName string) (io.
 	return out.Body, metadata, nil
 }
 
+// RetrieveRange retrieves a byte range [offset, offset+length) from a file in S3.
+func (c *Client) RetrieveRange(ctx context.Context, fileName, folderName string, offset int64, length int64) (io.ReadCloser, error) {
+	key := c.buildKey(folderName, fileName)
+	rangeHeader := fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)
+
+	out, err := c.s3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+		Range:  aws.String(rangeHeader),
+	})
+	if err != nil {
+		var noSuchKey *types.NoSuchKey
+		var noSuchBucket *types.NoSuchBucket
+		if errors.As(err, &noSuchKey) || errors.As(err, &noSuchBucket) {
+			return nil, os.ErrNotExist
+		}
+		return nil, err
+	}
+
+	logr.FromContextOrDiscard(ctx).V(logging.TRACE).Info("Range retrieved",
+		"bucket", c.bucket, "key", key, "offset", offset, "length", length)
+
+	return out.Body, nil
+}
+
 // Delete deletes a file from S3.
 // The folderName parameter is used as a key prefix for tenant isolation.
 func (c *Client) Delete(ctx context.Context, fileName, folderName string) error {

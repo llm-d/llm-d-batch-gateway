@@ -660,6 +660,9 @@ func (c *concurrentFilesClient) Retrieve(_ context.Context, _, _ string) (io.Rea
 func (c *concurrentFilesClient) List(_ context.Context, _ string) ([]filesapi.BatchFileMetadata, error) {
 	return nil, nil
 }
+func (c *concurrentFilesClient) RetrieveRange(_ context.Context, _, _ string, _ int64, _ int64) (io.ReadCloser, error) {
+	return nil, nil
+}
 func (c *concurrentFilesClient) Delete(_ context.Context, _, _ string) error { return nil }
 func (c *concurrentFilesClient) GetContext(p context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithCancel(p)

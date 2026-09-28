@@ -14,9 +14,18 @@ import (
 // NOTE: parse-error handling could also be implemented as a filter dispatcher
 // in the chain, keeping the core dispatchers unaware of parse errors.
 type RequestItem struct {
-	RequestID   string
-	CustomID    string
-	ModelID     string
+	RequestID string
+	CustomID  string
+
+	// ModelID is the routing key used to resolve a client. Under tenant-scoped
+	// routing it is "<tenantID>/<model>", so it is an internal identifier and
+	// must never reach customer-visible output.
+	ModelID string
+
+	// ModelName is the model exactly as the client wrote it, used for error
+	// messages. Falls back to ModelID when unset.
+	ModelName string
+
 	Endpoint    string
 	Body        map[string]any
 	Headers     map[string]string
@@ -39,8 +48,17 @@ func (r *RequestItem) Canceled() *ResultItem {
 	return r.Error("batch_cancelled", "request cancelled")
 }
 
+// ModelNotFound reports a request whose model resolves to no inference client.
+// The message names the client's own model rather than the routing key, and
+// matches the wording ingestion uses when it rejects the same condition, so
+// the error file reads the same whichever path produced it.
 func (r *RequestItem) ModelNotFound() *ResultItem {
-	return r.Error(inference.ErrCodeModelNotFound, fmt.Sprintf("model %q not configured", r.ModelID))
+	name := r.ModelName
+	if name == "" {
+		name = r.ModelID
+	}
+	return r.Error(inference.ErrCodeModelNotFound,
+		fmt.Sprintf("model %q is not configured in any gateway", name))
 }
 
 func (r *RequestItem) Error(code, message string) *ResultItem {

@@ -154,6 +154,10 @@ func (c *errStoreFileClient) Retrieve(ctx context.Context, fileName, folderName 
 	return nil, nil, errors.New("not implemented")
 }
 
+func (c *errStoreFileClient) RetrieveRange(_ context.Context, _, _ string, _ int64, _ int64) (io.ReadCloser, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (c *errStoreFileClient) Delete(ctx context.Context, fileName, folderName string) error {
 	return nil
 }

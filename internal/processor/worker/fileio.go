@@ -24,6 +24,7 @@ import (
 
 	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	filesapi "github.com/llm-d/llm-d-batch-gateway/internal/files_store/api"
+	"github.com/llm-d/llm-d-batch-gateway/internal/shared/batchinput"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/converter"
 	ucom "github.com/llm-d/llm-d-batch-gateway/internal/util/com"
 
@@ -37,7 +38,6 @@ const (
 	plansDirName = "plans"
 
 	// local job artifact file names
-	inputFileName  = "input.jsonl"
 	outputFileName = "output.jsonl"
 	errorFileName  = "error.jsonl"
 
@@ -46,20 +46,24 @@ const (
 	errorStorageNameFmt  = "batch_error_%s.jsonl"
 )
 
+// inputFileRef identifies an input file in shared storage.
+// Resolved once per job from the input file's DB record.
+type inputFileRef struct {
+	storageName string
+	folderName  string
+
+	// meta is the ordering metadata the API server recorded when it stored the
+	// object. It is nil for files uploaded before that metadata existed, which
+	// callers must treat as "layout unknown" rather than as an error.
+	meta *batchinput.Metadata
+}
+
 func (p *Processor) jobRootDir(jobID, tenantID string) (string, error) {
 	folderName, err := ucom.GetFolderNameByTenantID(tenantID)
 	if err != nil {
 		return "", fmt.Errorf("failed to sanitize tenant id for job path: %w", err)
 	}
 	return filepath.Join(p.cfg.WorkDir, folderName, jobsDirName, jobID), nil
-}
-
-func (p *Processor) jobInputFilePath(jobID, tenantID string) (string, error) {
-	jobRootDir, err := p.jobRootDir(jobID, tenantID)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(jobRootDir, inputFileName), nil
 }
 
 func (p *Processor) jobOutputFilePath(jobID, tenantID string) (string, error) {
@@ -96,20 +100,6 @@ func (p *Processor) jobPlansDir(jobID, tenantID string) (string, error) {
 	return filepath.Join(jobRootDir, plansDirName), nil
 }
 
-// createLocalInputFile creates or truncates the local input file for a job.
-func (p *Processor) createLocalInputFile(jobID, tenantID string) (*os.File, string, error) {
-	localInputFilePath, err := p.jobInputFilePath(jobID, tenantID)
-	if err != nil {
-		return nil, "", err
-	}
-
-	localInputFile, err := os.OpenFile(localInputFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return nil, localInputFilePath, fmt.Errorf("failed to create local input file: %w", err)
-	}
-	return localInputFile, localInputFilePath, nil
-}
-
 // cleanupJobArtifacts removes the local job artifacts directory as best-effort.
 func (p *Processor) cleanupJobArtifacts(ctx context.Context, jobID, tenantID string) {
 	logger := logr.FromContextOrDiscard(ctx)
@@ -127,31 +117,50 @@ func (p *Processor) cleanupJobArtifacts(ctx context.Context, jobID, tenantID str
 	logger.V(logging.INFO).Info("Removed job directory", "path", jobDir)
 }
 
-// openInputFileStream opens the input file stream
-func (p *Processor) openInputFileStream(ctx context.Context, inputFileID string) (io.ReadCloser, *filesapi.BatchFileMetadata, error) {
-	// get file metadata from database
+// resolveInputFileCoords looks up the storage name and folder for an input file ID.
+func (p *Processor) resolveInputFileCoords(ctx context.Context, inputFileID string) (*inputFileRef, error) {
 	items, _, _, err := p.files.db.DBGet(ctx, &db.FileQuery{BaseQuery: db.BaseQuery{IDs: []string{inputFileID}}}, true, 0, 1)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get input file metadata: %w", err)
+		return nil, fmt.Errorf("failed to get input file metadata: %w", err)
 	}
 	if len(items) == 0 {
-		return nil, nil, fmt.Errorf("input file %q not found in db", inputFileID)
+		return nil, fmt.Errorf("input file %q not found in db", inputFileID)
 	}
 
-	// convert file db item to file object
 	fileItem := items[0]
 	fileObj, err := converter.DBItemToFile(fileItem)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to convert file db item to file: %w", err)
+		return nil, fmt.Errorf("failed to convert file db item to file: %w", err)
 	}
 
-	// retrieve input jsonl file from storage
 	folderName, err := ucom.GetFolderNameByTenantID(fileItem.TenantID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get folder name by tenant id: %w", err)
+		return nil, fmt.Errorf("failed to get folder name by tenant id: %w", err)
 	}
-	storageName := ucom.FileStorageName(fileItem.ID, fileObj.Filename)
-	reader, metadata, err := p.files.storage.Retrieve(ctx, storageName, folderName)
+
+	// Unreadable metadata must not fail the job: the fallback path can always
+	// rebuild everything from the object itself, so log and carry on.
+	meta, err := batchinput.DecodeMetadata(fileItem.Tags)
+	if err != nil {
+		logr.FromContextOrDiscard(ctx).Error(err,
+			"Ignoring unreadable batch input metadata", "fileID", inputFileID)
+		meta = nil
+	}
+
+	return &inputFileRef{
+		storageName: ucom.FileStorageName(fileItem.ID, fileObj.Filename),
+		folderName:  folderName,
+		meta:        meta,
+	}, nil
+}
+
+// openInputFileStream opens the input file stream from shared storage.
+func (p *Processor) openInputFileStream(ctx context.Context, inputFileID string) (io.ReadCloser, *filesapi.BatchFileMetadata, error) {
+	ref, err := p.resolveInputFileCoords(ctx, inputFileID)
+	if err != nil {
+		return nil, nil, err
+	}
+	reader, metadata, err := p.files.storage.Retrieve(ctx, ref.storageName, ref.folderName)
 	if err != nil {
 		return nil, metadata, fmt.Errorf("failed to open input file stream: %w", err)
 	}

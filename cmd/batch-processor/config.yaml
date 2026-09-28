@@ -10,6 +10,11 @@ work_dir_size_limit: "10Gi"
 input_file_disk_budget_percent: 10
 # Must match file_api.max_size_bytes in the API server configuration.
 input_file_max_size_bytes: 209715200
+# Reading an input that the API server already stored in dispatch order: the
+# span of one ranged read, and the cap on fetched-but-undispatched bytes per
+# job. Budget num_workers * input_prefetch_bytes of memory.
+input_chunk_size_bytes: 8388608
+input_prefetch_bytes: 33554432
 queue_time_bucket:
   start: 0.1
   factor: 2

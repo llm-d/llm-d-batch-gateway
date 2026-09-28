@@ -92,6 +92,7 @@ var (
 	processorInflightRequests     prometheus.Gauge
 	processorMaxInflightConc      prometheus.Gauge
 	planBuildDuration             *prometheus.HistogramVec
+	inputIngestTotal              *prometheus.CounterVec
 	modelInflightRequests         *prometheus.GaugeVec
 	modelRequestExecutionDuration *prometheus.HistogramVec
 	startupRecoveryTotal          *prometheus.CounterVec
@@ -181,6 +182,17 @@ func InitMetrics(cfg config.ProcessorConfig) error {
 				cfg.ProcessTimeBucket.BucketCount,
 			),
 		}, []string{"size_bucket"},
+	)
+
+	// how each job's input was ingested, and under which stored ordering
+	// policy. A rising "scan" count after an upgrade means the API server and
+	// the processor disagree about the layout and jobs are taking the costly
+	// fallback path.
+	inputIngestTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "input_ingest_total",
+			Help: "Number of job inputs ingested, by ingestion mode and stored ordering policy",
+		}, []string{"mode", "policy"},
 	)
 
 	// per-model in-flight requests during execution
@@ -325,6 +337,7 @@ func InitMetrics(cfg config.ProcessorConfig) error {
 		processorInflightRequests,
 		processorMaxInflightConc,
 		planBuildDuration,
+		inputIngestTotal,
 		modelInflightRequests,
 		modelRequestExecutionDuration,
 		startupRecoveryTotal,
@@ -389,6 +402,30 @@ func IncProcessorInflightRequests() {
 // DecProcessorInflightRequests decrements the processor global in-flight request gauge.
 func DecProcessorInflightRequests() {
 	processorInflightRequests.Dec()
+}
+
+// Ingestion modes reported by RecordInputIngest.
+const (
+	// IngestModeSequential: the stored layout was understood, so the input was
+	// not downloaded and execution streams it in order.
+	IngestModeSequential = "sequential"
+	// IngestModeScan: the stored layout was unknown, so the input was
+	// downloaded and scanned to rebuild per-request plans.
+	IngestModeScan = "scan"
+	// IngestModeRejected: the stored metadata recorded a validation failure,
+	// so the batch fails without any input read at all.
+	IngestModeRejected = "rejected"
+)
+
+// InputPolicyNone labels inputs stored before ordering metadata existed.
+const InputPolicyNone = "none"
+
+// RecordInputIngest counts one job input ingestion.
+func RecordInputIngest(mode, policy string) {
+	if policy == "" {
+		policy = InputPolicyNone
+	}
+	inputIngestTotal.WithLabelValues(mode, policy).Inc()
 }
 
 // RecordPlanBuildDuration observes ingestion plan build duration.

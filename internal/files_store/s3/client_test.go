@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"testing"
@@ -98,9 +99,20 @@ func (m *mockS3Client) GetObject(_ context.Context, params *s3.GetObjectInput, _
 	if !ok {
 		return nil, &types.NoSuchKey{}
 	}
+	data := obj.data
+	if params.Range != nil {
+		// Parse "bytes=start-end" range header.
+		var start, end int64
+		if _, err := fmt.Sscanf(*params.Range, "bytes=%d-%d", &start, &end); err == nil {
+			if end >= int64(len(data)) {
+				end = int64(len(data)) - 1
+			}
+			data = data[start : end+1]
+		}
+	}
 	return &s3.GetObjectOutput{
-		Body:          io.NopCloser(bytes.NewReader(obj.data)),
-		ContentLength: aws.Int64(int64(len(obj.data))),
+		Body:          io.NopCloser(bytes.NewReader(data)),
+		ContentLength: aws.Int64(int64(len(data))),
 		LastModified:  aws.Time(obj.lastModTime),
 	}, nil
 }
@@ -331,6 +343,41 @@ func TestRetrieve(t *testing.T) {
 		client := newTestClient(mock)
 
 		_, _, err := client.Retrieve(ctx, "nonexistent.txt", testFolderName)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("expected os.ErrNotExist, got %v", err)
+		}
+	})
+}
+
+func TestRetrieveRange(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("retrieves byte range", func(t *testing.T) {
+		mock := newMockS3Client()
+		client := newTestClient(mock)
+		content := []byte("hello world range test")
+
+		if _, err := client.Store(ctx, "range.txt", testBucketName, 1024, 0, bytes.NewReader(content)); err != nil {
+			t.Fatalf("failed to store: %v", err)
+		}
+
+		rc, err := client.RetrieveRange(ctx, "range.txt", testBucketName, 6, 5)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		defer rc.Close()
+
+		data, _ := io.ReadAll(rc)
+		if string(data) != "world" {
+			t.Errorf("expected %q, got %q", "world", string(data))
+		}
+	})
+
+	t.Run("returns error for non-existent file", func(t *testing.T) {
+		mock := newMockS3Client()
+		client := newTestClient(mock)
+
+		_, err := client.RetrieveRange(ctx, "nonexistent.txt", testBucketName, 0, 10)
 		if !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("expected os.ErrNotExist, got %v", err)
 		}
