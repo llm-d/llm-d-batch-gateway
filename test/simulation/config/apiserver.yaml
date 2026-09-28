@@ -1,5 +1,5 @@
 # Simulation harness apiserver config: real Postgres records, Redis exchange,
-# MinIO object storage. See docs/design/consistency-harness.md.
+# SeaweedFS object storage. See docs/design/consistency-harness.md.
 host: ""
 port: "8000"
 

@@ -2,7 +2,7 @@
 
 Executable reproductions of the cross-store consistency bugs cataloged in
 [docs/design/consistency-harness.md](../../docs/design/consistency-harness.md).
-Real Postgres, Redis, and MinIO; real gateway binaries built with the
+Real Postgres, Redis, and SeaweedFS; real gateway binaries built with the
 `failpoints` tag; inference served by
 [vllm-vcr](https://github.com/neuralmagic/vllm-vcr) (real vLLM Rust frontend,
 simulated engine-core, no GPU).
@@ -27,7 +27,7 @@ flowchart LR
     subgraph stores
         postgres[(postgres)]
         redis[(redis)]
-        minio[(minio)]
+        seaweedfs[(seaweedfs)]
     end
 
     vcr["vllm frontend<br/>+ vcr engine"]
@@ -44,7 +44,7 @@ flowchart LR
     gc -->|"45432 · 46379 · 49000"| tox
     tox --> postgres
     tox --> redis
-    tox --> minio
+    tox --> seaweedfs
     processor -->|inference| vcr
     gateway -->|OTLP| tempo
 ```

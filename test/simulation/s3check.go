@@ -34,13 +34,13 @@ import (
 // for compose, the dev-deploy chart's for kind.
 func s3Credentials() (accessKey, secretKey string) {
 	if backendName() == "kind" {
-		return "minioadmin", "minioadmin"
+		return "s3admin", "s3secret"
 	}
 	return simS3AccessKeyID, simCreds.s3SecretKey
 }
 
 // The bucket and its host-reachable endpoint differ per backend: compose
-// exposes MinIO on 19000 with bucket "batch-gateway"; dev-deploy uses
+// exposes SeaweedFS on 19000 with bucket "batch-gateway"; dev-deploy uses
 // NodePort 30009 and bucket "llm-d-batch-gateway".
 func simBucket() string {
 	if backendName() == "kind" {
@@ -49,7 +49,7 @@ func simBucket() string {
 	return "batch-gateway"
 }
 
-func minioEndpoint() string {
+func s3Endpoint() string {
 	if backendName() == "kind" {
 		return "http://127.0.0.1:9002"
 	}
@@ -68,7 +68,7 @@ func listBucketKeys(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(minioEndpoint())
+		o.BaseEndpoint = aws.String(s3Endpoint())
 		o.UsePathStyle = true
 	})
 
@@ -142,7 +142,7 @@ func clearBucket(ctx context.Context) error {
 		return fmt.Errorf("load aws config: %w", err)
 	}
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(minioEndpoint())
+		o.BaseEndpoint = aws.String(s3Endpoint())
 		o.UsePathStyle = true
 	})
 	keys, err := listBucketKeys(ctx)

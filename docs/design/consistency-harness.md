@@ -30,7 +30,7 @@ One compose file (`test/simulation/compose.yaml`) running real components agains
                     ┌──────────┐
    sim runner ──────► toxiproxy ├──┬──► postgres
    (Go test)        └──────────┘  ├──► redis
-        │                         └──► minio
+        │                         └──► seaweedfs
         │  failpoint HTTP
         ▼
   apiserver · batch-processor · batch-gc     (failpoints build)
@@ -39,7 +39,7 @@ One compose file (`test/simulation/compose.yaml`) running real components agains
   vllm frontend ──► vllm-vcr play            (simulated engine-core)
 ```
 
-- **Stores**: postgres, redis, minio.
+- **Stores**: postgres, redis, seaweedfs.
 - **Gateway binaries**: built with `-tags failpoints` (see below). All store connections routed through toxiproxy so the runner can inject network faults per component per store.
 - **Inference**: a vLLM frontend container with `vllm-vcr play` as its engine-core. The latency model is configured so each request takes 2 to 5 seconds, holding jobs in `in_progress` long enough to kill processes mid-execution deterministically. This requires no GPUs to run.
 - **Time compression**: config overrides only, no code changes. Reconciler interval 5s, collector interval 5s, poll interval 500ms, completion windows of tens of seconds.
