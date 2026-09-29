@@ -153,7 +153,11 @@ func InitTracer(ctx context.Context) (shutdown func(context.Context) error, err 
 		if err != nil {
 			return nil, err
 		}
-		opt = append(opt, sdktrace.WithBatcher(exporter))
+		if os.Getenv("OTEL_SYNC_SPAN_EXPORT") == "true" {
+			opt = append(opt, sdktrace.WithSyncer(exporter))
+		} else {
+			opt = append(opt, sdktrace.WithBatcher(exporter))
+		}
 	}
 
 	tp := sdktrace.NewTracerProvider(opt...)

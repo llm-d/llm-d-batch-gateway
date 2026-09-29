@@ -1,0 +1,22 @@
+# Ratchet manifest for the consistency simulation harness.
+# See docs/design/consistency-harness.md.
+#
+# broken  the bug exists; the scenario must reproduce its invariant violation
+# fixed   the bug is fixed; any violation is a regression and fails CI
+#
+# Promote broken -> fixed as rearchitecture phases land. Demoting fixed ->
+# broken is a reviewable change that requires justification in the PR.
+scenarios:
+  create_crash_after_store: broken
+  duplicate_execution: fixed
+  terminal_overwrite: fixed
+  worker_crash_strands_job: fixed
+  cancel_reverted: fixed
+  cancel_event_lost: broken
+  orphaned_blob: broken
+  finalization_strand: broken
+  async_result_destruction: broken
+  recovery_crash_loop: fixed
+  cancel_racing_completion: fixed
+  zombie_owner_burns_inference: broken
+  replicas_execute_once: fixed
