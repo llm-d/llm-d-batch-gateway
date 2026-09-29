@@ -203,7 +203,7 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 				if manifestErr != nil {
 					transitionErr = manifestErr
 				} else {
-					transitionErr = params.updater.ActivateResumable(ctx, params.jobItem, manifest)
+					transitionErr = params.updater.ActivateResumable(ctx, params.jobItem, manifest, p.ownerInstanceID, resumableLeaseDuration)
 				}
 			}
 		}
@@ -220,6 +220,39 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 		return
 	}
 	transitionedToInProgress = true
+	if p.cfg.ResumableRecovery {
+		leaseStore, ok := p.batchDB.(db.ResumableBatchLeaseStore)
+		if !ok {
+			p.handleJobError(ctx, params, fmt.Errorf("%w: lease store unavailable", errResumableRecoveryUnavailable))
+			return
+		}
+		leaseDone := make(chan struct{})
+		var leaseWG sync.WaitGroup
+		leaseWG.Add(1)
+		go func() {
+			defer leaseWG.Done()
+			ticker := time.NewTicker(resumableLeaseDuration / 2)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-leaseDone:
+					return
+				case <-ticker.C:
+					if err := leaseStore.RenewResumableBatchLease(ctx, &db.ResumableBatchLease{
+						BatchID: params.jobItem.ID, OwnerInstanceID: p.ownerInstanceID,
+						Epoch: params.jobItem.Epoch, LeaseDuration: resumableLeaseDuration,
+					}); err != nil {
+						abortCause(err)
+						return
+					}
+				}
+			}
+		}()
+		defer func() {
+			close(leaseDone)
+			leaseWG.Wait()
+		}()
+	}
 
 	// execution: execute inference requests
 	execCtx, execSpan := uotel.StartSpan(abortCtx, "execute-job")
