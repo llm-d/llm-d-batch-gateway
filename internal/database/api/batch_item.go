@@ -36,6 +36,9 @@ type BatchItem struct {
 	// renews or a replacement takes over.
 	OwnerLeaseExpiresAt *time.Time
 
+	// OwnerLeaseDuration is an activation input, not persisted state.
+	OwnerLeaseDuration time.Duration
+
 	// Priority determines dequeue order (lower = higher priority).
 	// Stores SLO.UnixMicro() — jobs with earlier deadlines are dequeued first.
 	Priority int64

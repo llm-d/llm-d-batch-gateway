@@ -52,11 +52,13 @@ func TestActivateResumableBatch(t *testing.T) {
 
 		item := newTestBatchItem("batch-1", testTenantID)
 		item.ProcessorID = "processor-0"
+		item.OwnerInstanceID = "owner-a"
+		item.OwnerLeaseDuration = 30 * time.Second
 		item.Epoch = 7
 		item.Status = newStatus
 
 		mock.ExpectQuery("(?s)WITH candidate AS.*INSERT INTO batch_manifests.*UPDATE batch_items").
-			WithArgs(newStatus, item.ID, item.ProcessorID, item.Epoch, oldStatus, api.BatchManifestVersion, pgxmock.AnyArg()).
+			WithArgs(newStatus, item.ID, item.ProcessorID, item.Epoch, oldStatus, api.BatchManifestVersion, pgxmock.AnyArg(), item.OwnerInstanceID, "30s").
 			WillReturnRows(pgxmock.NewRows([]string{"batch_id"}).AddRow(item.ID))
 
 		if err := client.ActivateResumableBatch(ctx, item, oldStatus, testManifest()); err != nil {
@@ -73,11 +75,13 @@ func TestActivateResumableBatch(t *testing.T) {
 
 		item := newTestBatchItem("batch-1", testTenantID)
 		item.ProcessorID = "processor-0"
+		item.OwnerInstanceID = "owner-a"
+		item.OwnerLeaseDuration = 30 * time.Second
 		item.Epoch = 7
 		item.Status = newStatus
 
 		mock.ExpectQuery("(?s)WITH candidate AS.*INSERT INTO batch_manifests.*UPDATE batch_items").
-			WithArgs(newStatus, item.ID, item.ProcessorID, item.Epoch, oldStatus, api.BatchManifestVersion, pgxmock.AnyArg()).
+			WithArgs(newStatus, item.ID, item.ProcessorID, item.Epoch, oldStatus, api.BatchManifestVersion, pgxmock.AnyArg(), item.OwnerInstanceID, "30s").
 			WillReturnRows(pgxmock.NewRows([]string{"batch_id"}))
 
 		err := client.ActivateResumableBatch(ctx, item, oldStatus, testManifest())

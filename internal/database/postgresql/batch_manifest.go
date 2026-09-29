@@ -47,6 +47,9 @@ func (c *PostgresBatchDBClient) ActivateResumableBatch(
 	if item.ProcessorID == "" {
 		return fmt.Errorf("processor ID is required")
 	}
+	if item.OwnerInstanceID == "" || item.OwnerLeaseDuration <= 0 {
+		return fmt.Errorf("resumable owner lease is required")
+	}
 	if item.Epoch < 0 {
 		return fmt.Errorf("epoch must not be negative")
 	}
@@ -80,7 +83,9 @@ WITH candidate AS (
 ), activated AS (
 		UPDATE batch_items
 			 SET status = $1,
-					 resumable = TRUE
+					 resumable = TRUE,
+					 owner_instance_id = $8,
+					 owner_lease_expires_at = NOW() + $9::interval
 			FROM manifested
 		 WHERE batch_items.id = manifested.batch_id
 		RETURNING batch_items.id
@@ -90,7 +95,7 @@ SELECT id FROM activated`
 	var activatedID string
 	if err := c.pool.QueryRow(ctx, query,
 		item.Status, item.ID, item.ProcessorID, item.Epoch, expectedStatus,
-		manifest.Version, entries,
+		manifest.Version, entries, item.OwnerInstanceID, item.OwnerLeaseDuration.String(),
 	).Scan(&activatedID); err != nil {
 		if err == pgx.ErrNoRows {
 			return fmt.Errorf("ActivateResumableBatch: %w", api.ErrConflict)
