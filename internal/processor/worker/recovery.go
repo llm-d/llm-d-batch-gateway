@@ -46,6 +46,7 @@ const (
 	recoveryActionError     = "error"
 
 	recoveryUnknownStatus openai.BatchStatus = "unknown"
+	resumableLeaseDuration                = 30 * time.Second
 )
 
 var errResumableRecoveryUnavailable = errors.New("resumable recovery is not enabled")
@@ -78,6 +79,31 @@ func (p *Processor) recoverOwnedJobs(ctx context.Context) error {
 	tasks, err := p.poller.claimOwned(ctx)
 	if err != nil {
 		return fmt.Errorf("claim owned jobs: %w", err)
+	}
+	if p.cfg.ResumableRecovery {
+		leaseStore, ok := p.batchDB.(db.ResumableBatchLeaseStore)
+		if !ok {
+			return fmt.Errorf("%w: lease store unavailable", errResumableRecoveryUnavailable)
+		}
+		claimed, err := leaseStore.ClaimExpiredResumableBatches(ctx, p.ownerInstanceID, resumableLeaseDuration)
+		if err != nil {
+			return fmt.Errorf("claim expired resumable jobs: %w", err)
+		}
+		seen := make(map[string]bool, len(tasks))
+		for _, task := range tasks {
+			seen[task.ID] = true
+		}
+		for _, item := range claimed {
+			if seen[item.ID] {
+				continue
+			}
+			tasks = append(tasks, &db.BatchJobPriority{
+				ID:               item.ID,
+				Epoch:            item.Epoch,
+				RecoveryAttempts: item.RecoveryAttempts,
+				Resumable:        true,
+			})
+		}
 	}
 	if len(tasks) == 0 {
 		logger.V(logging.DEBUG).Info("Startup recovery: no owned jobs found")
