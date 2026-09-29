@@ -92,6 +92,11 @@ var (
 	// subtests incompatible with async dispatch mode are skipped.
 	testDispatcherDeployed bool
 
+	// testResumableRecovery is set from the deployed processor configuration.
+	// It gates the pod-loss recovery scenario because the legacy path has
+	// different recovery semantics.
+	testResumableRecovery bool
+
 	// testPassThroughHeaders maps header names (matching apiserver pass_through_headers
 	// configured by dev-deploy.sh) to the values the e2e client sends when asserting
 	// pass-through behavior.
@@ -110,6 +115,7 @@ var (
 
 func TestE2E(t *testing.T) {
 	testDispatcherDeployed = detectDispatcherDeployed(t)
+	testResumableRecovery = detectResumableRecovery(t)
 
 	if out, err := exec.Command("kubectl", "cluster-info").CombinedOutput(); err != nil {
 		t.Logf("kubectl not available, some checks will be skipped: %v\n%s", err, out)
@@ -141,4 +147,13 @@ func TestE2E(t *testing.T) {
 	skipIf(t, testDispatcherDeployed, "requires sync processor", "FlowControl", testFlowControl)
 	skipIf(t, testDispatcherDeployed, "requires sync processor", "AIMD", testAIMD)
 	skipIf(t, testDispatcherDeployed, "requires sync processor", "HelmUpgrade", testHelmUpgrade)
+	t.Run("ResumableRecoveryPodLoss", func(t *testing.T) {
+		if !testDispatcherDeployed {
+			t.Skip("requires async processor")
+		}
+		if !testResumableRecovery {
+			t.Skip("requires resumable_recovery processor configuration")
+		}
+		doTestResumableRecoveryPodLoss(t)
+	})
 }
