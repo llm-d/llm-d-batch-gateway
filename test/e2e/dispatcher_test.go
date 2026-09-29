@@ -116,6 +116,26 @@ func detectDispatcherDeployed(t *testing.T) bool {
 	return dispatchMode == "async"
 }
 
+func detectResumableRecovery(t *testing.T) bool {
+	t.Helper()
+
+	configMap := fmt.Sprintf("%s-processor-config", testHelmRelease)
+	out, err := exec.Command("kubectl", "get", "configmap", configMap,
+		"-n", testNamespace,
+		"-o", "jsonpath={.data.config\\.yaml}",
+	).CombinedOutput()
+	if err != nil {
+		t.Logf("kubectl get processor config failed: %v\n%s", err, out)
+		return false
+	}
+	resumableRecovery, err := processorResumableRecovery(out)
+	if err != nil {
+		t.Logf("parse processor config failed: %v", err)
+		return false
+	}
+	return resumableRecovery
+}
+
 func processorDispatchMode(data []byte) (string, error) {
 	var cfg struct {
 		DispatchMode string `yaml:"dispatch_mode"`
@@ -124,6 +144,16 @@ func processorDispatchMode(data []byte) (string, error) {
 		return "", err
 	}
 	return cfg.DispatchMode, nil
+}
+
+func processorResumableRecovery(data []byte) (bool, error) {
+	var cfg struct {
+		ResumableRecovery bool `yaml:"resumable_recovery"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return false, err
+	}
+	return cfg.ResumableRecovery, nil
 }
 
 func TestProcessorDispatchMode(t *testing.T) {
@@ -144,6 +174,29 @@ func TestProcessorDispatchMode(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Fatalf("processorDispatchMode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProcessorResumableRecovery(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{name: "enabled", data: "resumable_recovery: true", want: true},
+		{name: "disabled", data: "resumable_recovery: false", want: false},
+		{name: "omitted", data: `poll_interval: "5s"`, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := processorResumableRecovery([]byte(tt.data))
+			if err != nil {
+				t.Fatalf("processorResumableRecovery() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("processorResumableRecovery() = %t, want %t", got, tt.want)
 			}
 		})
 	}
