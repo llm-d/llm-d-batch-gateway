@@ -79,7 +79,6 @@ func (p *Processor) recoverOwnedJobs(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("claim owned jobs: %w", err)
 	}
-
 	if len(tasks) == 0 {
 		logger.V(logging.DEBUG).Info("Startup recovery: no owned jobs found")
 		return nil
