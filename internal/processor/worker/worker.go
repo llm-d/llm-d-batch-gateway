@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
 
 	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
@@ -51,6 +52,7 @@ type Processor struct {
 	cfg               *config.ProcessorConfig
 	endpointAllowlist openai.EndpointAllowlist
 	processorID       string
+	ownerInstanceID   string
 	tokens            semaphore.Semaphore
 	wg                sync.WaitGroup
 
@@ -100,6 +102,7 @@ func NewProcessor(
 		cfg:               cfg,
 		endpointAllowlist: endpointAllowlist,
 		processorID:       processorID,
+		ownerInstanceID:   uuid.NewString(),
 		poller:            poller,
 		updater:           updater,
 		batchDB:           clients.BatchDB,

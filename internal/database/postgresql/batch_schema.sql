@@ -84,3 +84,7 @@ CREATE TABLE IF NOT EXISTS batch_events (
 );
 CREATE INDEX IF NOT EXISTS idx_batch_events_job_id ON batch_events (job_id, id);
 CREATE INDEX IF NOT EXISTS idx_batch_events_expires_at ON batch_events (expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_batch_items_resumable_lease
+    ON batch_items (owner_lease_expires_at)
+    WHERE resumable = TRUE;

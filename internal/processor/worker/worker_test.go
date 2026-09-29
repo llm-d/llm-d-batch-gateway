@@ -86,6 +86,21 @@ func TestNewProcessor_InvalidGlobalConcurrency(t *testing.T) {
 	}
 }
 
+func TestNewProcessor_AssignsDistinctOwnerInstanceID(t *testing.T) {
+	cfg := config.NewConfig()
+	first, err := NewProcessor(cfg, &clientset.Clientset{}, "processor-0", testLogger(t))
+	if err != nil {
+		t.Fatalf("NewProcessor first: %v", err)
+	}
+	second, err := NewProcessor(cfg, &clientset.Clientset{}, "processor-0", testLogger(t))
+	if err != nil {
+		t.Fatalf("NewProcessor second: %v", err)
+	}
+	if first.ownerInstanceID == "" || first.ownerInstanceID == second.ownerInstanceID {
+		t.Fatalf("owner instance IDs must be distinct: %q, %q", first.ownerInstanceID, second.ownerInstanceID)
+	}
+}
+
 func TestInitConcurrencyControls_CapsWorkersByInputDiskBudget(t *testing.T) {
 	cfg := config.NewConfig()
 	cfg.NumWorkers = 20

@@ -20,12 +20,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 )
 
 var _ api.ResumableBatchStore = (*PostgresBatchDBClient)(nil)
+var _ api.ResumableBatchLeaseStore = (*PostgresBatchDBClient)(nil)
 
 // ActivateResumableBatch commits the immutable dispatch manifest and activates
 // recovery in one PostgreSQL statement. The eligible row lock makes the manifest
@@ -116,4 +118,87 @@ func (c *PostgresBatchDBClient) GetBatchManifest(ctx context.Context, batchID st
 		return nil, fmt.Errorf("decode manifest entries: %w", err)
 	}
 	return &api.BatchManifest{BatchID: batchID, Version: version, Entries: entries}, nil
+}
+
+// ClaimExpiredResumableBatches atomically transfers every expired resumable
+// lease to one replacement Processor. The returned epoch fences the old owner.
+func (c *PostgresBatchDBClient) ClaimExpiredResumableBatches(
+	ctx context.Context,
+	ownerInstanceID string,
+	leaseDuration time.Duration,
+) ([]*api.BatchItem, error) {
+	if ownerInstanceID == "" {
+		return nil, fmt.Errorf("owner instance ID is required")
+	}
+	if leaseDuration <= 0 {
+		return nil, fmt.Errorf("lease duration must be positive")
+	}
+
+	rows, err := c.pool.Query(ctx, `
+UPDATE batch_items
+   SET owner_instance_id = $1,
+       owner_lease_expires_at = NOW() + $2::interval,
+       epoch = epoch + 1,
+       recovery_attempts = recovery_attempts + 1
+ WHERE resumable = TRUE
+   AND status IS NOT NULL
+   AND `+nonTerminalCondition+`
+   AND (owner_lease_expires_at IS NULL OR owner_lease_expires_at <= NOW())
+ RETURNING id, processor_id, owner_instance_id, owner_lease_expires_at, epoch,
+           recovery_attempts, status`, ownerInstanceID, leaseDuration.String())
+	if err != nil {
+		return nil, fmt.Errorf("claim expired resumable batches: %w", err)
+	}
+	defer rows.Close()
+
+	var batches []*api.BatchItem
+	for rows.Next() {
+		var batch api.BatchItem
+		var leaseExpiry time.Time
+		if err := rows.Scan(
+			&batch.ID,
+			&batch.ProcessorID,
+			&batch.OwnerInstanceID,
+			&leaseExpiry,
+			&batch.Epoch,
+			&batch.RecoveryAttempts,
+			&batch.Status,
+		); err != nil {
+			return nil, fmt.Errorf("scan claimed resumable batch: %w", err)
+		}
+		batch.OwnerLeaseExpiresAt = &leaseExpiry
+		batch.Resumable = true
+		batches = append(batches, &batch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim expired resumable batches rows: %w", err)
+	}
+	return batches, nil
+}
+
+// RenewResumableBatchLease extends the caller's lease only while it remains
+// the current owner at the supplied fencing epoch.
+func (c *PostgresBatchDBClient) RenewResumableBatchLease(ctx context.Context, lease *api.ResumableBatchLease) error {
+	if lease == nil || lease.BatchID == "" || lease.OwnerInstanceID == "" || lease.Epoch <= 0 {
+		return fmt.Errorf("valid resumable batch lease is required")
+	}
+	if lease.LeaseDuration <= 0 {
+		return fmt.Errorf("lease duration must be positive")
+	}
+	tag, err := c.pool.Exec(ctx, `
+UPDATE batch_items
+   SET owner_lease_expires_at = NOW() + $4::interval
+ WHERE id = $1
+   AND owner_instance_id = $2
+   AND epoch = $3
+   AND resumable = TRUE
+   AND owner_lease_expires_at > NOW()`,
+		lease.BatchID, lease.OwnerInstanceID, lease.Epoch, lease.LeaseDuration.String())
+	if err != nil {
+		return fmt.Errorf("renew resumable batch lease: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("renew resumable batch lease: %w", api.ErrConflict)
+	}
+	return nil
 }
