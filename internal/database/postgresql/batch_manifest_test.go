@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/pashagolub/pgxmock/v5"
 
@@ -115,4 +116,50 @@ func TestGetBatchManifest(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
 	}
+}
+
+func TestResumableBatchLease(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("claims expired resumable batch with a new epoch", func(t *testing.T) {
+		client, mock := newTestBatchClient(t)
+		defer mock.Close()
+
+		leaseExpiry := time.Now().Add(time.Minute)
+		mock.ExpectQuery("(?s)UPDATE batch_items.*owner_instance_id.*owner_lease_expires_at.*epoch = epoch \\+ 1").
+			WithArgs("owner-b", "30s").
+			WillReturnRows(pgxmock.NewRows([]string{
+				"id", "processor_id", "owner_instance_id", "owner_lease_expires_at", "epoch", "recovery_attempts", "status",
+			}).AddRow("batch-1", "processor-a", "owner-b", leaseExpiry, int64(8), int64(1), []byte(`{"status":"in_progress"}`)))
+
+		batches, err := client.ClaimExpiredResumableBatches(ctx, "owner-b", 30*time.Second)
+		if err != nil {
+			t.Fatalf("ClaimExpiredResumableBatches: %v", err)
+		}
+		if len(batches) != 1 || batches[0].OwnerInstanceID != "owner-b" || batches[0].Epoch != 8 {
+			t.Fatalf("unexpected claimed batches: %#v", batches)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("rejects renewal after ownership is lost", func(t *testing.T) {
+		client, mock := newTestBatchClient(t)
+		defer mock.Close()
+
+		mock.ExpectExec("(?s)UPDATE batch_items.*owner_instance_id = \\$2.*epoch = \\$3").
+			WithArgs("batch-1", "owner-a", int64(7), "30s").
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		err := client.RenewResumableBatchLease(ctx, &api.ResumableBatchLease{
+			BatchID: "batch-1", OwnerInstanceID: "owner-a", Epoch: 7, LeaseDuration: 30 * time.Second,
+		})
+		if !errors.Is(err, api.ErrConflict) {
+			t.Fatalf("expected ErrConflict, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
 }

@@ -19,6 +19,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"time"
 )
 
 const BatchManifestVersion = 1
@@ -49,4 +50,20 @@ type BatchManifest struct {
 type ResumableBatchStore interface {
 	ActivateResumableBatch(ctx context.Context, item *BatchItem, expectedStatus []byte, manifest *BatchManifest) error
 	GetBatchManifest(ctx context.Context, batchID string) (*BatchManifest, error)
+}
+
+// ResumableBatchLease identifies a resumable batch owner and its fencing epoch.
+// Lease expiry is evaluated by PostgreSQL, not by a Processor clock.
+type ResumableBatchLease struct {
+	BatchID         string
+	OwnerInstanceID string
+	Epoch           int64
+	LeaseDuration   time.Duration
+}
+
+// ResumableBatchLeaseStore is the recovery-only ownership capability. It is
+// intentionally separate from ProcessorID, which legacy GC matches to pod names.
+type ResumableBatchLeaseStore interface {
+	ClaimExpiredResumableBatches(ctx context.Context, ownerInstanceID string, leaseDuration time.Duration) ([]*BatchItem, error)
+	RenewResumableBatchLease(ctx context.Context, lease *ResumableBatchLease) error
 }
