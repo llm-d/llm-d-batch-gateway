@@ -218,7 +218,7 @@ func TestUpdatePersistentStatus_Success(t *testing.T) {
 func TestUpdatePersistentStatus_ConflictPreservesNewerStatus(t *testing.T) {
 	ctx := context.Background()
 	dbClient := newMockBatchDBClient()
-	updater := NewStatusUpdater(dbClient, mockdb.NewMockBatchStatusClient(), 86400)
+	updater := NewStatusUpdater(dbClient)
 	jobID := "job-update-conflict"
 
 	seed := &db.BatchItem{
