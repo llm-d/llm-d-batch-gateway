@@ -106,7 +106,7 @@ func TestCancelBatchDoesNotRegressTerminalStatus(t *testing.T) {
 	}
 }
 
-func TestCancelBatchDoesNotMutateQueuedResumableBatch(t *testing.T) {
+func TestCancelBatchTransitionsQueuedResumableBatch(t *testing.T) {
 	handler := setupTestHandler()
 	batchID := "batch-cancel-resumable"
 	batch := openai.Batch{
@@ -133,8 +133,8 @@ func TestCancelBatchDoesNotMutateQueuedResumableBatch(t *testing.T) {
 	req.SetPathValue("batch_id", batchID)
 	rr := httptest.NewRecorder()
 	handler.CancelBatch(rr, req)
-	if rr.Code != http.StatusConflict {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rr.Code, rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
 	}
 
 	items, _, _, err := handler.clients.BatchDB.DBGet(context.Background(),
@@ -146,7 +146,7 @@ func TestCancelBatchDoesNotMutateQueuedResumableBatch(t *testing.T) {
 	if err := json.Unmarshal(items[0].Status, &stored); err != nil {
 		t.Fatalf("unmarshal stored status: %v", err)
 	}
-	if stored.Status != openai.BatchStatusValidating {
-		t.Errorf("stored status changed to %q", stored.Status)
+	if stored.Status != openai.BatchStatusCancelling {
+		t.Errorf("stored status = %q, want %q", stored.Status, openai.BatchStatusCancelling)
 	}
 }
