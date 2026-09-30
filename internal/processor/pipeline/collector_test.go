@@ -135,6 +135,91 @@ func TestResultCollector_CheckpointsBeforeAck(t *testing.T) {
 	}
 }
 
+func TestResultCollector_RenewsLeaseDuringCheckpoint(t *testing.T) {
+	outputFile := tempFile(t)
+	errorFile := tempFile(t)
+	pending := NewPendingRequests(0)
+	tracker := NewProgressTracker(1, nil, "test-job", 0, logr.Discard())
+	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+
+	renewed := make(chan struct{})
+	collector.SetCheckpoint(func(_ context.Context, _ string, _ []byte) error {
+		select {
+		case <-renewed:
+			return nil
+		case <-time.After(time.Second):
+			return fmt.Errorf("timed out waiting for result lease renewal")
+		}
+	})
+	pending.Store(RequestItem{RequestID: "req-1", CustomID: "c-1"})
+	ch := make(chan ResultItem, 1)
+	ch <- ResultItem{
+		RequestID: "req-1",
+		CustomID:  "c-1",
+		Response:  &batch_types.ResponseData{StatusCode: 200, RequestID: "req-1", Body: map[string]any{"ok": true}},
+		LeaseTTL:  10 * time.Millisecond,
+		Renew: func(context.Context) error {
+			close(renewed)
+			return nil
+		},
+	}
+	close(ch)
+
+	if err := collector.Drain(context.Background(), ch); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+}
+
+func TestResultCollector_RenewalFailureCancelsCheckpointAndSkipsAck(t *testing.T) {
+	outputFile := tempFile(t)
+	errorFile := tempFile(t)
+	pending := NewPendingRequests(0)
+	tracker := NewProgressTracker(1, nil, "test-job", 0, logr.Discard())
+	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+
+	checkpointCancelled := make(chan struct{})
+	collector.SetCheckpoint(func(ctx context.Context, _ string, _ []byte) error {
+		<-ctx.Done()
+		close(checkpointCancelled)
+		return nil
+	})
+	pending.Store(RequestItem{RequestID: "req-1", CustomID: "c-1"})
+	ackCalled := false
+	ch := make(chan ResultItem, 1)
+	ch <- ResultItem{
+		RequestID: "req-1",
+		CustomID:  "c-1",
+		Response:  &batch_types.ResponseData{StatusCode: 200, RequestID: "req-1", Body: map[string]any{"ok": true}},
+		LeaseTTL:  10 * time.Millisecond,
+		Renew: func(context.Context) error {
+			return fmt.Errorf("renew result lease")
+		},
+		Ack: func(context.Context) error {
+			ackCalled = true
+			return nil
+		},
+	}
+	close(ch)
+
+	if err := collector.Drain(context.Background(), ch); err == nil {
+		t.Fatal("Drain error = nil, want renewal failure")
+	}
+	select {
+	case <-checkpointCancelled:
+	default:
+		t.Fatal("checkpoint was not cancelled after renewal failure")
+	}
+	if ackCalled {
+		t.Fatal("Ack called after renewal failure")
+	}
+}
+
+func TestResultLeaseRenewalInterval(t *testing.T) {
+	if interval := resultLeaseRenewalInterval(time.Nanosecond); interval != time.Nanosecond {
+		t.Fatalf("renewal interval = %s, want %s", interval, time.Nanosecond)
+	}
+}
+
 func TestResultCollector_DrainProcessesAllResultsAfterCancel(t *testing.T) {
 	outputFile := tempFile(t)
 	errorFile := tempFile(t)
