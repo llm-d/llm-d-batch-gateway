@@ -277,6 +277,36 @@ func waitForCompletedRequests(t *testing.T, batchID string, minCompleted int64, 
 	t.Fatalf("batch %s did not reach %d completed requests within %v", batchID, minCompleted, timeout)
 }
 
+// waitForPartialCompletedRequests waits until a nonzero proper subset of a
+// batch's requests has completed, so disruption tests do not rely on timing.
+func waitForPartialCompletedRequests(t *testing.T, batchID string, total int64, timeout time.Duration) {
+	t.Helper()
+
+	client := newClient()
+	const pollInterval = 500 * time.Millisecond
+
+	deadline := time.Now().Add(timeout)
+	if d, ok := t.Deadline(); ok && d.Before(deadline) {
+		deadline = d.Add(-5 * time.Second)
+	}
+	for time.Now().Before(deadline) {
+		batch, err := client.Batches.Get(context.Background(), batchID)
+		if err != nil {
+			t.Fatalf("retrieve batch failed: %v", err)
+		}
+		if batch.RequestCounts.Completed > 0 && batch.RequestCounts.Completed < total {
+			t.Logf("batch %s has a partial completed set: %d of %d", batchID, batch.RequestCounts.Completed, total)
+			return
+		}
+		if terminalBatchStatuses[batch.Status] {
+			t.Fatalf("batch %s reached terminal status %q before a partial completed set (completed=%d total=%d)",
+				batchID, batch.Status, batch.RequestCounts.Completed, total)
+		}
+		time.Sleep(pollInterval)
+	}
+	t.Fatalf("batch %s did not reach a partial completed set within %v", batchID, timeout)
+}
+
 // waitForIngestionFailure polls a batch until it reaches "failed" status.
 // Unlike waitForBatchStatus, it skips validateBatchResults (which rejects
 // Total==0 for non-cancelled batches) and result-file fetching, since
