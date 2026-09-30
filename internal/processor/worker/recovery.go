@@ -276,7 +276,7 @@ func (p *Processor) recoverResumable(ctx context.Context, dbItem *db.BatchItem) 
 	if err != nil {
 		return err
 	}
-	if err := p.restoreManifestArtifacts(manifest, dbItem.TenantID); err != nil {
+	if err := p.restoreManifestArtifacts(manifest, dbItem.TenantID, string(jobInfo.BatchJob.Endpoint)); err != nil {
 		return fmt.Errorf("restore manifest: %w", err)
 	}
 
