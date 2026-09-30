@@ -164,7 +164,7 @@ type ProcessorConfig struct {
 
 	// ResumableLeaseDuration bounds how long a processor owns a resumable batch
 	// before another processor may recover it. The default matches llm-d Async's
-	// 300-second claim lease, which must exceed the longest inference time.
+	// 300-second claim lease; Async documents that claim as exceeding inference time.
 	ResumableLeaseDuration time.Duration `yaml:"resumable_lease_duration"`
 
 	// TaskWaitTime is the timeout parameter used when dequeueing from the priority queue
