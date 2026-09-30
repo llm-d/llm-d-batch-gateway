@@ -162,6 +162,11 @@ type ProcessorConfig struct {
 	// Milestone 1 is intentionally limited to one worker and one Async model.
 	ResumableRecovery bool `yaml:"resumable_recovery"`
 
+	// ResumableLeaseDuration bounds how long a processor owns a resumable batch
+	// before another processor may recover it. The default matches llm-d Async's
+	// 300-second claim lease, which must exceed the longest inference time.
+	ResumableLeaseDuration time.Duration `yaml:"resumable_lease_duration"`
+
 	// TaskWaitTime is the timeout parameter used when dequeueing from the priority queue
 	// This should be shorter than PollInterval
 	TaskWaitTime time.Duration `yaml:"task_wait_time"`
@@ -356,8 +361,9 @@ func (pc *ProcessorConfig) LoadFromYAML(filePath string) error {
 // TaskWaitTime has to be shorter than poll interval.
 func NewConfig() *ProcessorConfig {
 	return &ProcessorConfig{
-		PollInterval: 5 * time.Second,
-		TaskWaitTime: 1 * time.Second,
+		PollInterval:           5 * time.Second,
+		TaskWaitTime:           1 * time.Second,
+		ResumableLeaseDuration: 5 * time.Minute,
 		ProcessTimeBucket: BucketConfig{
 			BucketStart:  0.1,
 			BucketFactor: 2,
@@ -473,6 +479,9 @@ func (c *ProcessorConfig) Validate() error {
 		return err
 	}
 	if c.ResumableRecovery {
+		if c.ResumableLeaseDuration <= 0 {
+			return fmt.Errorf("resumable_lease_duration must be > 0 when resumable_recovery is enabled")
+		}
 		if c.DBClientCfg.Type != sharedcfg.DBTypePostgreSQL {
 			return fmt.Errorf("resumable_recovery requires a PostgreSQL database")
 		}

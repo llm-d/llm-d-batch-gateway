@@ -46,7 +46,6 @@ const (
 	recoveryActionError     = "error"
 
 	recoveryUnknownStatus openai.BatchStatus = "unknown"
-	resumableLeaseDuration                = 30 * time.Second
 )
 
 var errResumableRecoveryUnavailable = errors.New("resumable recovery is not enabled")
@@ -85,7 +84,7 @@ func (p *Processor) recoverOwnedJobs(ctx context.Context) error {
 		if !ok {
 			return fmt.Errorf("%w: lease store unavailable", errResumableRecoveryUnavailable)
 		}
-		claimed, err := leaseStore.ClaimExpiredResumableBatches(ctx, p.ownerInstanceID, resumableLeaseDuration)
+		claimed, err := leaseStore.ClaimExpiredResumableBatches(ctx, p.ownerInstanceID, p.cfg.ResumableLeaseDuration)
 		if err != nil {
 			return fmt.Errorf("claim expired resumable jobs: %w", err)
 		}

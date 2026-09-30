@@ -16,6 +16,18 @@ tests:
           path: data["config.yaml"]
           pattern: 'dispatch_mode: "sync"'
 
+  - it: should render resumable recovery when enabled
+    set:
+      processor.config.resumableRecovery: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'resumable_recovery: true'
+
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'resumable_lease_duration: "300s"'
+
   - it: should render shared extra endpoints
     set:
       global.extraEndpoints:

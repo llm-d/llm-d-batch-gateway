@@ -203,7 +203,7 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 				if manifestErr != nil {
 					transitionErr = manifestErr
 				} else {
-					transitionErr = params.updater.ActivateResumable(ctx, params.jobItem, manifest, p.ownerInstanceID, resumableLeaseDuration)
+					transitionErr = params.updater.ActivateResumable(ctx, params.jobItem, manifest, p.ownerInstanceID, p.cfg.ResumableLeaseDuration)
 				}
 			}
 		}
@@ -231,7 +231,7 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 		leaseWG.Add(1)
 		go func() {
 			defer leaseWG.Done()
-			ticker := time.NewTicker(resumableLeaseDuration / 2)
+			ticker := time.NewTicker(p.cfg.ResumableLeaseDuration / 2)
 			defer ticker.Stop()
 			for {
 				select {
@@ -240,7 +240,7 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 				case <-ticker.C:
 					if err := leaseStore.RenewResumableBatchLease(ctx, &db.ResumableBatchLease{
 						BatchID: params.jobItem.ID, OwnerInstanceID: p.ownerInstanceID,
-						Epoch: params.jobItem.Epoch, LeaseDuration: resumableLeaseDuration,
+						Epoch: params.jobItem.Epoch, LeaseDuration: p.cfg.ResumableLeaseDuration,
 					}); err != nil {
 						abortCause(err)
 						return

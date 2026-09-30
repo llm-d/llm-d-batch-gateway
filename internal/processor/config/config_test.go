@@ -203,6 +203,24 @@ func TestProcessorConfig_Validate_TaskWaitTimeMustBeShorterThanPollInterval(t *t
 	}
 }
 
+func TestProcessorConfig_Validate_ResumableLeaseDuration(t *testing.T) {
+	c := NewConfig()
+	c.DispatchMode = DispatchModeAsync
+	c.ResumableRecovery = true
+	c.NumWorkers = 1
+	c.AsyncDispatchConfig.Models = map[string]AsyncModelConfig{
+		"model": {InferencePoolName: "pool"},
+	}
+	if c.ResumableLeaseDuration != 5*time.Minute {
+		t.Fatalf("ResumableLeaseDuration = %v, want %v", c.ResumableLeaseDuration, 5*time.Minute)
+	}
+
+	c.ResumableLeaseDuration = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate() expected error for zero resumable_lease_duration")
+	}
+}
+
 func TestProcessorConfig_LoadFromYAML_ExplicitZeroMaxRetries(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
