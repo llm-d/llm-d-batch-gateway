@@ -25,9 +25,9 @@ func NewBroadcasterGroup(broadcasters []*ResultBroadcaster) *BroadcasterGroup {
 	return &BroadcasterGroup{broadcasters: broadcasters}
 }
 
-func (bs *BroadcasterGroup) Subscribe(ch chan<- ResultItem) {
+func (bs *BroadcasterGroup) Subscribe(ch chan<- ResultItem, pending *PendingRequests) {
 	for _, b := range bs.broadcasters {
-		b.Subscribe(ch)
+		b.Subscribe(ch, pending)
 	}
 }
 
@@ -41,22 +41,26 @@ func (bs *BroadcasterGroup) Unsubscribe(ch chan<- ResultItem) {
 // broadcasts to all subscribed channels.
 type ResultBroadcaster struct {
 	client      inference.AsyncInferenceClient
-	subscribers *syncutil.MutexMap[chan<- ResultItem, struct{}]
+	subscribers *syncutil.MutexMap[chan<- ResultItem, *PendingRequests]
 	logger      logr.Logger
 }
 
 func NewResultBroadcaster(client inference.AsyncInferenceClient, logger logr.Logger) *ResultBroadcaster {
 	return &ResultBroadcaster{
 		client:      client,
-		subscribers: syncutil.NewMutexMap[chan<- ResultItem, struct{}](),
+		subscribers: syncutil.NewMutexMap[chan<- ResultItem, *PendingRequests](),
 		logger:      logger,
 	}
 }
 
 // Subscribe registers dest to receive all results.
 // dest should be buffered to avoid blocking the broadcaster.
-func (b *ResultBroadcaster) Subscribe(dest chan<- ResultItem) {
-	b.subscribers.Store(dest, struct{}{})
+func (b *ResultBroadcaster) Subscribe(dest chan<- ResultItem, pending ...*PendingRequests) {
+	var owner *PendingRequests
+	if len(pending) > 0 {
+		owner = pending[0]
+	}
+	b.subscribers.Store(dest, owner)
 }
 
 // Unsubscribe removes dest from the broadcast list.
@@ -69,6 +73,8 @@ func (b *ResultBroadcaster) Run(ctx context.Context) {
 	type incomingResult struct {
 		response *inference.GenerateResponse
 		ack      func(context.Context) error
+		renew    func(context.Context) error
+		leaseTTL time.Duration
 	}
 	incomingCh := make(chan incomingResult)
 
@@ -78,9 +84,11 @@ func (b *ResultBroadcaster) Run(ctx context.Context) {
 		const maxBackoff = 10 * time.Second
 		for ctx.Err() == nil {
 			var (
-				resp *inference.GenerateResponse
-				ack  func(context.Context) error
-				err  error
+				resp     *inference.GenerateResponse
+				ack      func(context.Context) error
+				renew    func(context.Context) error
+				leaseTTL time.Duration
+				err      error
 			)
 			if durable, ok := b.client.(inference.DurableAsyncInferenceClient); ok && durable.SupportsDurableResults() {
 				var delivery *inference.DurableGenerateResult
@@ -88,6 +96,8 @@ func (b *ResultBroadcaster) Run(ctx context.Context) {
 				if err == nil {
 					resp = delivery.Response
 					ack = delivery.Ack
+					renew = delivery.Renew
+					leaseTTL = delivery.LeaseTTL()
 				}
 			} else {
 				resp, err = b.client.GetResult(ctx)
@@ -107,7 +117,7 @@ func (b *ResultBroadcaster) Run(ctx context.Context) {
 			}
 			backoff = 100 * time.Millisecond
 			select {
-			case incomingCh <- incomingResult{response: resp, ack: ack}:
+			case incomingCh <- incomingResult{response: resp, ack: ack, renew: renew, leaseTTL: leaseTTL}:
 			case <-ctx.Done():
 				return
 			}
@@ -125,9 +135,20 @@ func (b *ResultBroadcaster) Run(ctx context.Context) {
 			}
 			result := asyncResult(incoming.response, b.logger)
 			result.Ack = incoming.ack
+			result.Renew = incoming.renew
+			result.LeaseTTL = incoming.leaseTTL
 
-			for _, ch := range b.subscribers.Keys() {
+			matched := false
+			b.subscribers.Range(func(ch chan<- ResultItem, pending *PendingRequests) bool {
+				if pending != nil && !pending.Has(result.RequestID) {
+					return true
+				}
+				matched = true
 				b.safeChannelSend(result, ch)
+				return true
+			})
+			if !matched {
+				b.logger.Info("Retaining unknown durable result", "requestID", result.RequestID)
 			}
 		}
 	}

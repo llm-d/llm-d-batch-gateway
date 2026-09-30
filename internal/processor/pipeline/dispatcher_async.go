@@ -44,7 +44,7 @@ func NewAsyncDispatcher(
 }
 
 func (d *AsyncDispatcher) Run(ctx context.Context, requestCh <-chan RequestItem, resultCh chan<- ResultItem) error {
-	d.broadcasters.Subscribe(resultCh)
+	d.broadcasters.Subscribe(resultCh, d.pending)
 
 	// Submit phase — fast queue writes.
 	for msg := range requestCh {

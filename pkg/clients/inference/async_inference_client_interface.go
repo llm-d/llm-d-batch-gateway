@@ -1,6 +1,9 @@
 package inference
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // AsyncInferenceClient defines the interface for non-blocking async dispatch.
 type AsyncInferenceClient interface {
@@ -18,10 +21,20 @@ type AsyncInferenceClient interface {
 type DurableGenerateResult struct {
 	Response *GenerateResponse
 	ack      func(context.Context) error
+	renew    func(context.Context) error
+	leaseTTL time.Duration
 }
 
 func (r *DurableGenerateResult) Ack(ctx context.Context) error {
 	return r.ack(ctx)
+}
+
+func (r *DurableGenerateResult) Renew(ctx context.Context) error {
+	return r.renew(ctx)
+}
+
+func (r *DurableGenerateResult) LeaseTTL() time.Duration {
+	return r.leaseTTL
 }
 
 // DurableAsyncInferenceClient is an additive capability backed by

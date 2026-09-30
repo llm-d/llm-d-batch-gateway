@@ -145,10 +145,11 @@ func (p *Processor) executeJobAsync(ctx context.Context, params *jobExecutionPar
 		}
 		resultCollector.SetCheckpoint(func(checkpointCtx context.Context, requestID string, result []byte) error {
 			return checkpointStore.CheckpointBatchResult(checkpointCtx, &db.BatchResultCheckpoint{
-				BatchID:    params.jobItem.ID,
-				RequestID:  requestID,
-				OwnerEpoch: params.jobItem.Epoch,
-				Result:     append([]byte(nil), result...),
+				BatchID:         params.jobItem.ID,
+				RequestID:       requestID,
+				OwnerInstanceID: p.ownerInstanceID,
+				OwnerEpoch:      params.jobItem.Epoch,
+				Result:          append([]byte(nil), result...),
 			})
 		})
 	}
@@ -201,10 +202,11 @@ func (p *Processor) buildRequestDispatcher(modelMap *modelMapFile, pending *pipe
 			attemptNumber := int(params.jobItem.RecoveryAttempts) + 1
 			async.SetBeforeSubmit(func(submitCtx context.Context, item pipeline.RequestItem) error {
 				return checkpointStore.RecordBatchRequestAttempt(submitCtx, &db.BatchRequestAttempt{
-					BatchID:    params.jobItem.ID,
-					RequestID:  item.RequestID,
-					Attempt:    attemptNumber,
-					OwnerEpoch: params.jobItem.Epoch,
+					BatchID:         params.jobItem.ID,
+					RequestID:       item.RequestID,
+					Attempt:         attemptNumber,
+					OwnerInstanceID: p.ownerInstanceID,
+					OwnerEpoch:      params.jobItem.Epoch,
 				})
 			})
 		}

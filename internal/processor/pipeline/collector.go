@@ -63,7 +63,7 @@ func (c *ResultCollector) SetCheckpoint(checkpoint func(context.Context, string,
 func (c *ResultCollector) Drain(ctx context.Context, resultCh <-chan ResultItem) error {
 	var firstErr error
 	for msg := range resultCh {
-		if !c.pending.Resolve(&msg) {
+		if !c.pending.Enrich(&msg) {
 			continue
 		}
 		if !msg.SubmittedAt.IsZero() {
@@ -80,7 +80,9 @@ func (c *ResultCollector) Drain(ctx context.Context, resultCh <-chan ResultItem)
 			if c.onPersistenceFailure != nil {
 				c.onPersistenceFailure()
 			}
+			continue
 		}
+		c.pending.Resolve(&msg)
 	}
 	if flushErr := c.flushFiles(); flushErr != nil {
 		return flushErr
@@ -95,6 +97,9 @@ func (c *ResultCollector) Drain(ctx context.Context, resultCh <-chan ResultItem)
 }
 
 func (c *ResultCollector) Receive(ctx context.Context, msg ResultItem) error {
+	leaseCtx, stopRenewal := c.renewResultLease(ctx, msg)
+	defer stopRenewal()
+
 	line := &outputLine{
 		ID:       msg.RequestID,
 		CustomID: msg.CustomID,
@@ -109,11 +114,11 @@ func (c *ResultCollector) Receive(ctx context.Context, msg ResultItem) error {
 	lineBytes = append(lineBytes, '\n')
 
 	if c.checkpoint != nil {
-		if err := c.checkpoint(ctx, msg.RequestID, lineBytes); err != nil {
+		if err := c.checkpoint(leaseCtx, msg.RequestID, lineBytes); err != nil {
 			return fmt.Errorf("checkpoint output for %s: %w", msg.RequestID, err)
 		}
 		if msg.Ack != nil {
-			if err := msg.Ack(ctx); err != nil {
+			if err := msg.Ack(leaseCtx); err != nil {
 				return fmt.Errorf("ack output for %s: %w", msg.RequestID, err)
 			}
 		}
@@ -127,7 +132,7 @@ func (c *ResultCollector) Receive(ctx context.Context, msg ResultItem) error {
 		return fmt.Errorf("write output for %s: %w", msg.RequestID, err)
 	}
 	if c.checkpoint == nil && msg.Ack != nil {
-		if err := msg.Ack(ctx); err != nil {
+		if err := msg.Ack(leaseCtx); err != nil {
 			return fmt.Errorf("ack output for %s: %w", msg.RequestID, err)
 		}
 	}
@@ -149,6 +154,36 @@ func (c *ResultCollector) Receive(ctx context.Context, msg ResultItem) error {
 	}
 
 	return nil
+}
+
+func (c *ResultCollector) renewResultLease(ctx context.Context, msg ResultItem) (context.Context, func()) {
+	if msg.Renew == nil || msg.LeaseTTL <= 0 {
+		return ctx, func() {}
+	}
+	renewCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(msg.LeaseTTL / 2)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-renewCtx.Done():
+				return
+			case <-ticker.C:
+				if err := msg.Renew(renewCtx); err != nil {
+					c.logger.Error(err, "Failed to renew durable result lease", "requestID", msg.RequestID)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return renewCtx, func() {
+		close(done)
+		cancel()
+	}
 }
 
 func recordTokenUsage(body map[string]any, model string, logger logr.Logger) {
