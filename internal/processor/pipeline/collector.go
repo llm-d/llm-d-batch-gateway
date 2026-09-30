@@ -117,6 +117,9 @@ func (c *ResultCollector) Receive(ctx context.Context, msg ResultItem) error {
 		if err := c.checkpoint(leaseCtx, msg.RequestID, lineBytes); err != nil {
 			return fmt.Errorf("checkpoint output for %s: %w", msg.RequestID, err)
 		}
+		if err := leaseCtx.Err(); err != nil {
+			return fmt.Errorf("result lease cancelled for %s: %w", msg.RequestID, err)
+		}
 		if msg.Ack != nil {
 			if err := msg.Ack(leaseCtx); err != nil {
 				return fmt.Errorf("ack output for %s: %w", msg.RequestID, err)
@@ -163,7 +166,7 @@ func (c *ResultCollector) renewResultLease(ctx context.Context, msg ResultItem) 
 	renewCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(msg.LeaseTTL / 2)
+		ticker := time.NewTicker(resultLeaseRenewalInterval(msg.LeaseTTL))
 		defer ticker.Stop()
 		for {
 			select {
@@ -184,6 +187,14 @@ func (c *ResultCollector) renewResultLease(ctx context.Context, msg ResultItem) 
 		close(done)
 		cancel()
 	}
+}
+
+func resultLeaseRenewalInterval(leaseTTL time.Duration) time.Duration {
+	interval := leaseTTL / 2
+	if interval <= 0 {
+		return leaseTTL
+	}
+	return interval
 }
 
 func recordTokenUsage(body map[string]any, model string, logger logr.Logger) {

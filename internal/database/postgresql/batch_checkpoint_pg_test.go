@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package postgresql
 
 import (
@@ -5,6 +21,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 )
@@ -20,7 +37,7 @@ func TestCheckpointWritesRequireLiveOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresBatchDBClient: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	const batchID = "checkpoint-live-owner-batch"
 	if _, err := client.pool.Exec(ctx, "DELETE FROM batch_items WHERE id = $1", batchID); err != nil {
@@ -66,8 +83,12 @@ func TestCheckpointWritesRequireLiveOwner(t *testing.T) {
 		t.Fatalf("expired owner attempt = %v, want ErrConflict", err)
 	}
 
-	if _, err := client.pool.Exec(ctx, "UPDATE batch_items SET owner_instance_id = 'owner-b', owner_lease_expires_at = NOW() + interval '1 minute', epoch = 8 WHERE id = $1", batchID); err != nil {
-		t.Fatalf("take over batch: %v", err)
+	claimed, err := client.ClaimExpiredResumableBatches(ctx, "owner-b", time.Minute)
+	if err != nil {
+		t.Fatalf("claim expired batch: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].ID != batchID || claimed[0].OwnerInstanceID != "owner-b" || claimed[0].Epoch != 8 {
+		t.Fatalf("claimed = %#v, want %q owned by owner-b at epoch 8", claimed, batchID)
 	}
 	if err := checkpoint("owner-a", 7, "request-takeover", `{"id":"stale"}`); !errors.Is(err, api.ErrConflict) {
 		t.Fatalf("previous owner checkpoint = %v, want ErrConflict", err)
