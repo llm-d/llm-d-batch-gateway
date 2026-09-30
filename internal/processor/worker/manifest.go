@@ -37,7 +37,7 @@ func stableBatchRequestID(batchID, customID string) string {
 
 // restoreManifestArtifacts recreates only the deterministic local execution
 // inputs. Result artifacts are rebuilt from durable checkpoints separately.
-func (p *Processor) restoreManifestArtifacts(manifest *db.BatchManifest, tenantID string) error {
+func (p *Processor) restoreManifestArtifacts(manifest *db.BatchManifest, tenantID, batchEndpoint string) error {
 	if manifest == nil {
 		return fmt.Errorf("manifest is required")
 	}
@@ -60,7 +60,7 @@ func (p *Processor) restoreManifestArtifacts(manifest *db.BatchManifest, tenantI
 	var offset int64
 	for i, entry := range manifest.Entries {
 		line := append(append([]byte(nil), entry.Payload...), '\n')
-		meta, err := extractAndValidateLine(line)
+		meta, err := extractAndValidateLine(line, p.endpointAllowlist, batchEndpoint)
 		if err != nil {
 			return fmt.Errorf("validate manifest entry %d: %w", i, err)
 		}
