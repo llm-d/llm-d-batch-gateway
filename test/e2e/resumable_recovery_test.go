@@ -34,8 +34,9 @@ func doTestResumableRecoveryPodLoss(t *testing.T) {
 		t.Skip("kubectl not available, skipping resumable recovery pod-loss test")
 	}
 
+	const requestCount = 64
 	var lines []string
-	for i := 1; i <= 10; i++ {
+	for i := 1; i <= requestCount; i++ {
 		lines = append(lines, fmt.Sprintf(
 			`{"custom_id":"resumable-pod-loss-%d","method":"POST","url":"/v1/chat/completions","body":{"model":"%s","max_tokens":200,"messages":[{"role":"user","content":"slow %d"}]}}`, i, testSimModel, i))
 	}
@@ -43,7 +44,7 @@ func doTestResumableRecoveryPodLoss(t *testing.T) {
 	batchID := mustCreateBatch(t, fileID)
 
 	_, _ = waitForBatchStatus(t, batchID, 2*time.Minute, openai.BatchStatusInProgress)
-	time.Sleep(2 * time.Second)
+	waitForPartialCompletedRequests(t, batchID, requestCount, 2*time.Minute)
 
 	out, err := exec.Command("kubectl", "delete", "pod",
 		"-l", fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/component=processor", testHelmRelease),
@@ -55,7 +56,19 @@ func doTestResumableRecoveryPodLoss(t *testing.T) {
 	t.Logf("processor pod delete issued: %s", strings.TrimSpace(string(out)))
 
 	waitForProcessorReady(t, 2*time.Minute)
-	finalBatch, _ := waitForBatchStatus(t, batchID, 5*time.Minute, openai.BatchStatusCompleted)
+	finalBatch, results := waitForBatchStatus(t, batchID, 5*time.Minute, openai.BatchStatusCompleted)
+	if results == nil {
+		t.Fatal("expected completed batch artifacts")
+	}
+	if finalBatch.RequestCounts.Total != requestCount {
+		t.Errorf("total = %d, want %d", finalBatch.RequestCounts.Total, requestCount)
+	}
+	if finalBatch.RequestCounts.Completed != requestCount {
+		t.Errorf("completed = %d, want %d", finalBatch.RequestCounts.Completed, requestCount)
+	}
+	if finalBatch.RequestCounts.Failed != 0 {
+		t.Errorf("failed = %d, want 0", finalBatch.RequestCounts.Failed)
+	}
 	t.Logf("resumable pod loss: batch %s reached %s (completed=%d, failed=%d, total=%d)",
 		batchID, finalBatch.Status, finalBatch.RequestCounts.Completed,
 		finalBatch.RequestCounts.Failed, finalBatch.RequestCounts.Total)
