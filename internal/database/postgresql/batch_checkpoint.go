@@ -28,16 +28,17 @@ import (
 var _ api.BatchCheckpointStore = (*PostgresBatchDBClient)(nil)
 
 func (c *PostgresBatchDBClient) RecordBatchRequestAttempt(ctx context.Context, attempt *api.BatchRequestAttempt) error {
-	if attempt == nil || attempt.BatchID == "" || attempt.RequestID == "" || attempt.Attempt <= 0 {
+	if attempt == nil || attempt.BatchID == "" || attempt.RequestID == "" || attempt.OwnerInstanceID == "" || attempt.Attempt <= 0 {
 		return fmt.Errorf("valid batch request attempt is required")
 	}
 	const query = `
 INSERT INTO batch_request_attempts (batch_id, request_id, attempt, owner_epoch)
 SELECT id, $2, $3, epoch
   FROM batch_items
- WHERE id = $1 AND epoch = $4 AND resumable = TRUE
+ WHERE id = $1 AND owner_instance_id = $4 AND epoch = $5
+   AND resumable = TRUE AND owner_lease_expires_at > NOW()
 ON CONFLICT (batch_id, request_id, attempt) DO NOTHING`
-	tag, err := c.pool.Exec(ctx, query, attempt.BatchID, attempt.RequestID, attempt.Attempt, attempt.OwnerEpoch)
+	tag, err := c.pool.Exec(ctx, query, attempt.BatchID, attempt.RequestID, attempt.Attempt, attempt.OwnerInstanceID, attempt.OwnerEpoch)
 	if err != nil {
 		return err
 	}
@@ -46,8 +47,8 @@ ON CONFLICT (batch_id, request_id, attempt) DO NOTHING`
 		// batch. Check ownership separately so a stale owner cannot continue.
 		var owned bool
 		if err := c.pool.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM batch_items WHERE id = $1 AND epoch = $2 AND resumable = TRUE)`,
-			attempt.BatchID, attempt.OwnerEpoch,
+			`SELECT EXISTS(SELECT 1 FROM batch_items WHERE id = $1 AND owner_instance_id = $2 AND epoch = $3 AND resumable = TRUE AND owner_lease_expires_at > NOW())`,
+			attempt.BatchID, attempt.OwnerInstanceID, attempt.OwnerEpoch,
 		).Scan(&owned); err != nil {
 			return err
 		}
@@ -59,24 +60,26 @@ ON CONFLICT (batch_id, request_id, attempt) DO NOTHING`
 }
 
 func (c *PostgresBatchDBClient) CheckpointBatchResult(ctx context.Context, checkpoint *api.BatchResultCheckpoint) error {
-	if checkpoint == nil || checkpoint.BatchID == "" || checkpoint.RequestID == "" || len(checkpoint.Result) == 0 {
+	if checkpoint == nil || checkpoint.BatchID == "" || checkpoint.RequestID == "" || checkpoint.OwnerInstanceID == "" || len(checkpoint.Result) == 0 {
 		return fmt.Errorf("valid batch result checkpoint is required")
 	}
 	const query = `
 WITH eligible AS (
     SELECT id, epoch FROM batch_items
-     WHERE id = $1 AND epoch = $2 AND resumable = TRUE
+	 WHERE id = $1 AND owner_instance_id = $2 AND epoch = $3
+	   AND resumable = TRUE AND owner_lease_expires_at > NOW()
 ), checkpointed AS (
     INSERT INTO batch_result_checkpoints (batch_id, request_id, owner_epoch, result)
-    SELECT id, $3, epoch, $4::jsonb FROM eligible
+	SELECT id, $4, epoch, $5::jsonb FROM eligible
     ON CONFLICT (batch_id, request_id) DO UPDATE
        SET result = batch_result_checkpoints.result
+	  WHERE batch_result_checkpoints.result = EXCLUDED.result
     RETURNING request_id
 )
 SELECT request_id FROM checkpointed`
 	var requestID string
 	if err := c.pool.QueryRow(ctx, query,
-		checkpoint.BatchID, checkpoint.OwnerEpoch, checkpoint.RequestID, checkpoint.Result,
+		checkpoint.BatchID, checkpoint.OwnerInstanceID, checkpoint.OwnerEpoch, checkpoint.RequestID, checkpoint.Result,
 	).Scan(&requestID); err != nil {
 		if err == pgx.ErrNoRows {
 			return fmt.Errorf("CheckpointBatchResult: %w", api.ErrConflict)

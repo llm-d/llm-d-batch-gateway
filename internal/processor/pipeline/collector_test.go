@@ -225,8 +225,8 @@ func TestResultCollector_DrainDecrementsMetricsAfterWriteFailure(t *testing.T) {
 	pending.DrainUnresolved(func(_ RequestItem) {
 		remaining++
 	})
-	if remaining != 0 {
-		t.Fatalf("pending requests remaining = %d, want 0 (all should be resolved despite write failure)", remaining)
+	if remaining != 2 {
+		t.Fatalf("pending requests remaining = %d, want 2 (failed and subsequent results must remain unresolved)", remaining)
 	}
 }
 

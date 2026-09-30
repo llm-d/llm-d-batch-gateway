@@ -22,17 +22,19 @@ import (
 )
 
 type BatchRequestAttempt struct {
-	BatchID    string
-	RequestID  string
-	Attempt    int
-	OwnerEpoch int64
+	BatchID         string
+	RequestID       string
+	Attempt         int
+	OwnerInstanceID string
+	OwnerEpoch      int64
 }
 
 type BatchResultCheckpoint struct {
-	BatchID    string
-	RequestID  string
-	OwnerEpoch int64
-	Result     json.RawMessage
+	BatchID         string
+	RequestID       string
+	OwnerInstanceID string
+	OwnerEpoch      int64
+	Result          json.RawMessage
 }
 
 // BatchCheckpointStore persists dispatch attempts and terminal results under

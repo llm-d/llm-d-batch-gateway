@@ -36,7 +36,9 @@ type ResultItem struct {
 	SubmittedAt      time.Time
 	// Ack is non-nil for a leased Async result. The collector invokes it only
 	// after the result is durably accepted.
-	Ack func(context.Context) error
+	Ack      func(context.Context) error
+	Renew    func(context.Context) error
+	LeaseTTL time.Duration
 }
 
 func (r *RequestItem) Canceled() *ResultItem {

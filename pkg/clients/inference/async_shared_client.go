@@ -104,6 +104,7 @@ func (c *asyncSharedClient) ReceiveResult(ctx context.Context) (*DurableGenerate
 		return nil, err
 	}
 	result := delivery.Result
+	config := durable.ResultDeliveryConfig()
 	return &DurableGenerateResult{
 		Response: &GenerateResponse{
 			RequestID:    result.ID,
@@ -115,6 +116,10 @@ func (c *asyncSharedClient) ReceiveResult(ctx context.Context) (*DurableGenerate
 		ack: func(ackCtx context.Context) error {
 			return durable.AckResult(ackCtx, delivery)
 		},
+		renew: func(renewCtx context.Context) error {
+			return durable.RenewResult(renewCtx, delivery)
+		},
+		leaseTTL: config.LeaseTTL,
 	}, nil
 }
 
