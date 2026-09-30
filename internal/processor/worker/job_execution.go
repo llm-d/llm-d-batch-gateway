@@ -44,4 +44,8 @@ type jobExecutionParams struct {
 	onOwnershipLost func()
 
 	requestCounts *openai.BatchRequestCounts
+	completedIDs  map[string]bool
+	recoveredOK   int64
+	recoveredFail int64
+	resume        bool
 }
