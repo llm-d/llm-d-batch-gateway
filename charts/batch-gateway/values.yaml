@@ -307,6 +307,12 @@ processor:
     taskWaitTime: "1s"
     pollInterval: "5s"
     numWorkers: 5
+    # Enables PostgreSQL-backed resumable recovery. It requires async dispatch,
+    # exactly one worker, and exactly one async model queue.
+    resumableRecovery: false
+    # Duration a processor owns a resumable batch before another processor may
+    # recover it. Defaults to llm-d Async's 300-second claim lease.
+    resumableLeaseDuration: "300s"
     # Maximum percentage of the work directory reserved for local input copies.
     # The processor derives its effective worker count at startup from this,
     # workDirVolume.sizeLimit, and the maximum input-file size.

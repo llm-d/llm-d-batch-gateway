@@ -17,6 +17,8 @@ data:
     task_wait_time: {{ .Values.processor.config.taskWaitTime | quote }}
     poll_interval: {{ .Values.processor.config.pollInterval | quote }}
     num_workers: {{ .Values.processor.config.numWorkers }}
+    resumable_recovery: {{ .Values.processor.config.resumableRecovery }}
+    resumable_lease_duration: {{ .Values.processor.config.resumableLeaseDuration | quote }}
     {{- $extraEndpoints := .Values.global.extraEndpoints }}
     {{- if ne .Values.processor.config.extraEndpoints nil }}
     {{- $extraEndpoints = .Values.processor.config.extraEndpoints }}
