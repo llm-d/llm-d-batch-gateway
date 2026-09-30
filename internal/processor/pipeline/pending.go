@@ -30,6 +30,7 @@ func (p *PendingRequests) NumRequests() int64 {
 	return p.numRequests
 }
 
+// Has reports whether requestID is currently awaiting an async result.
 func (p *PendingRequests) Has(requestID string) bool {
 	_, ok := p.m.Load(requestID)
 	return ok
@@ -50,6 +51,9 @@ func (p *PendingRequests) decrement() {
 	}
 }
 
+// Enrich adds pending request metadata without marking the request complete.
+// A durable result must remain pending until its checkpoint and acknowledgement
+// have both succeeded.
 func (p *PendingRequests) Enrich(result *ResultItem) bool {
 	if msg, ok := p.m.Load(result.RequestID); ok {
 		result.CustomID = msg.CustomID
@@ -60,6 +64,7 @@ func (p *PendingRequests) Enrich(result *ResultItem) bool {
 	return result.CustomID != ""
 }
 
+// Resolve marks an enriched result complete after durable handling succeeds.
 func (p *PendingRequests) Resolve(result *ResultItem) bool {
 	if !p.Enrich(result) {
 		return false

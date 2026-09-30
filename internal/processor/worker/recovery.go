@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -287,6 +288,16 @@ func (p *Processor) recoverResumable(ctx context.Context, dbItem *db.BatchItem) 
 	if err := p.restoreCheckpointArtifacts(manifest, checkpoints, dbItem.TenantID); err != nil {
 		return fmt.Errorf("restore result checkpoints: %w", err)
 	}
+	if jobInfo.BatchJob.Status == openai.BatchStatusCancelling {
+		result, err := p.recoverCancelling(ctx, dbItem, jobInfo)
+		if err != nil {
+			return err
+		}
+		p.cleanupJobArtifacts(context.Background(), dbItem.ID, dbItem.TenantID)
+		metrics.RecordStartupRecovery(result.statusLabel, result.action)
+		metrics.RecordCancellation(result.cancelPhase)
+		return nil
+	}
 	completed := make(map[string]bool, len(checkpoints))
 	var succeeded, failed int64
 	for _, checkpoint := range checkpoints {
@@ -313,11 +324,49 @@ func (p *Processor) recoverResumable(ctx context.Context, dbItem *db.BatchItem) 
 		recoveredFail: failed,
 		resume:        true,
 	}
-	counts, err := p.executeJobAsync(ctx, params)
+	leaseStore, ok := p.batchDB.(db.ResumableBatchLeaseStore)
+	if !ok {
+		return fmt.Errorf("%w: lease store unavailable", errResumableRecoveryUnavailable)
+	}
+	recoveryCtx, cancelRecovery := context.WithCancelCause(ctx)
+	defer cancelRecovery(context.Canceled)
+	leaseDone := make(chan struct{})
+	var leaseWG sync.WaitGroup
+	leaseWG.Add(1)
+	go func() {
+		defer leaseWG.Done()
+		ticker := time.NewTicker(p.cfg.ResumableLeaseDuration / 2)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-leaseDone:
+				return
+			case <-recoveryCtx.Done():
+				return
+			case <-ticker.C:
+				if err := leaseStore.RenewResumableBatchLease(recoveryCtx, &db.ResumableBatchLease{
+					BatchID: dbItem.ID, OwnerInstanceID: p.ownerInstanceID,
+					Epoch: dbItem.Epoch, LeaseDuration: p.cfg.ResumableLeaseDuration,
+				}); err != nil {
+					cancelRecovery(err)
+					return
+				}
+			}
+		}
+	}()
+	defer func() {
+		close(leaseDone)
+		leaseWG.Wait()
+	}()
+
+	counts, err := p.executeJobAsync(recoveryCtx, params)
 	if err != nil {
 		return err
 	}
-	if err := p.finalizeJob(ctx, p.updater, dbItem, jobInfo, counts); err != nil {
+	if err := context.Cause(recoveryCtx); err != nil {
+		return err
+	}
+	if err := p.finalizeJob(recoveryCtx, p.updater, dbItem, jobInfo, counts); err != nil {
 		return err
 	}
 	p.cleanupJobArtifacts(context.Background(), dbItem.ID, dbItem.TenantID)
