@@ -36,7 +36,7 @@ func TestLegacyRowsAfterMigration(t *testing.T) {
 	}
 	defer pool.Close()
 
-	if _, err := pool.Exec(ctx, "DROP TABLE IF EXISTS batch_items"); err != nil {
+	if _, err := pool.Exec(ctx, "DROP TABLE IF EXISTS batch_items CASCADE"); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	if _, err := pool.Exec(ctx, preQueueSchema); err != nil {

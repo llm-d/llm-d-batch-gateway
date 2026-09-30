@@ -67,7 +67,7 @@ func TestResumableMarkerFencesStaleGCReadPostgres(t *testing.T) {
 		{name: "queue re-enqueue", priority: time.Now().Add(time.Hour).UnixMicro()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := pool.Exec(ctx, "TRUNCATE batch_items"); err != nil {
+			if _, err := pool.Exec(ctx, "TRUNCATE batch_manifests, batch_items"); err != nil {
 				t.Fatalf("truncate: %v", err)
 			}
 			status, _ := json.Marshal(openai.BatchStatusInfo{Status: openai.BatchStatusInProgress})

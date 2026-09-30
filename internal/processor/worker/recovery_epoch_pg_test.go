@@ -60,7 +60,7 @@ func TestRecoverOwnedJobsFencesPreviousEpoch(t *testing.T) {
 		t.Fatalf("pgxpool: %v", err)
 	}
 	defer pool.Close()
-	if _, err := pool.Exec(ctx, "TRUNCATE batch_items"); err != nil {
+	if _, err := pool.Exec(ctx, "TRUNCATE batch_manifests, batch_items"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 
@@ -170,7 +170,7 @@ func TestRecoverOwnedJobsFinalizesCancellationAfterEnqueueConflict(t *testing.T)
 		t.Fatalf("pgxpool: %v", err)
 	}
 	defer pool.Close()
-	if _, err := pool.Exec(ctx, "TRUNCATE batch_items"); err != nil {
+	if _, err := pool.Exec(ctx, "TRUNCATE batch_manifests, batch_items"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 
