@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -29,7 +30,7 @@ func TestActivateResumableBatchDoesNotPartiallyActivateOnManifestConflict(t *tes
 	if err != nil {
 		t.Fatalf("NewPostgresBatchDBClient: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	const batchID = "manifest-conflict-batch"
 	if _, err := pool.Exec(ctx, "DELETE FROM batch_items WHERE id = $1", batchID); err != nil {
@@ -49,10 +50,12 @@ func TestActivateResumableBatchDoesNotPartiallyActivateOnManifestConflict(t *tes
 	}
 
 	err = client.ActivateResumableBatch(ctx, &api.BatchItem{
-		BaseIndexes:  api.BaseIndexes{ID: batchID},
-		BaseContents: api.BaseContents{Status: newStatus},
-		ProcessorID:  "processor-0",
-		Epoch:        7,
+		BaseIndexes:        api.BaseIndexes{ID: batchID},
+		BaseContents:       api.BaseContents{Status: newStatus},
+		ProcessorID:        "processor-0",
+		OwnerInstanceID:    "owner-a",
+		OwnerLeaseDuration: 30 * time.Second,
+		Epoch:              7,
 	}, oldStatus, &api.BatchManifest{BatchID: batchID, Version: api.BatchManifestVersion})
 	if !errors.Is(err, api.ErrConflict) {
 		t.Fatalf("ActivateResumableBatch error = %v, want ErrConflict", err)

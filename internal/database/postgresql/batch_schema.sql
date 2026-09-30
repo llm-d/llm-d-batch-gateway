@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS batch_items (
     priority      BIGINT,
     epoch         BIGINT NOT NULL DEFAULT 0,
     recovery_attempts BIGINT NOT NULL DEFAULT 0,
-    resumable     BOOLEAN NOT NULL DEFAULT FALSE
+    resumable     BOOLEAN NOT NULL DEFAULT FALSE,
+    owner_instance_id TEXT,
+    owner_lease_expires_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS batch_manifests (
@@ -40,6 +42,8 @@ ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS priority BIGINT;
 ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS epoch BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS recovery_attempts BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS resumable BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS owner_instance_id TEXT;
+ALTER TABLE batch_items ADD COLUMN IF NOT EXISTS owner_lease_expires_at TIMESTAMPTZ;
 
 -- Rows written before the queue columns existed carry the SLO in a tag and
 -- have no owner. Restore the queue order from the tag and hand in-flight rows
