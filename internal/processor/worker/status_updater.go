@@ -113,12 +113,12 @@ func (s *StatusUpdater) ActivateResumable(
 	}
 	expectedStatus := append([]byte(nil), dbJob.Status...)
 	activation := &db.BatchItem{
-		BaseIndexes:  db.BaseIndexes{ID: dbJob.ID},
-		BaseContents: db.BaseContents{Status: statusBytes},
-		ProcessorID:  dbJob.ProcessorID,
-		OwnerInstanceID: ownerInstanceID,
+		BaseIndexes:        db.BaseIndexes{ID: dbJob.ID},
+		BaseContents:       db.BaseContents{Status: statusBytes},
+		ProcessorID:        dbJob.ProcessorID,
+		OwnerInstanceID:    ownerInstanceID,
 		OwnerLeaseDuration: leaseDuration,
-		Epoch:        dbJob.Epoch,
+		Epoch:              dbJob.Epoch,
 	}
 	if err := store.ActivateResumableBatch(ctx, activation, expectedStatus, manifest); err != nil {
 		return err
@@ -171,7 +171,8 @@ func (s *StatusUpdater) updatePersistentStatus(
 		BaseContents: db.BaseContents{
 			Status: statusBytes,
 		},
-		Epoch: dbJob.Epoch,
+		Epoch:           dbJob.Epoch,
+		OwnerInstanceID: dbJob.OwnerInstanceID,
 	}
 	var updateErr error
 	if dbJob.Resumable && newStatus.IsTerminal() {

@@ -47,8 +47,8 @@ type BatchCheckpointStore interface {
 	CompletedBatchRequestIDs(ctx context.Context, batchID string) (map[string]bool, error)
 }
 
-// ResumableBatchFinalizer publishes a terminal status under the active owner
-// epoch and atomically removes the resumable ownership marker. Implementations
+// ResumableBatchFinalizer publishes a terminal status under the active owner,
+// epoch, and lease, then atomically removes resumable ownership. Implementations
 // must treat an identical already-published terminal status as success so an
 // ambiguous database response is safe to retry.
 type ResumableBatchFinalizer interface {

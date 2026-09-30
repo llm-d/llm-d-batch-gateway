@@ -30,16 +30,17 @@ func TestFinalizeResumableBatch(t *testing.T) {
 	oldStatus := []byte(`{"status":"finalizing"}`)
 	newStatus := []byte(`{"status":"completed","output_file_id":"file_stable"}`)
 	batch := &api.BatchItem{
-		BaseIndexes:  api.BaseIndexes{ID: "batch-1"},
-		BaseContents: api.BaseContents{Status: newStatus},
-		Epoch:        7,
+		BaseIndexes:     api.BaseIndexes{ID: "batch-1"},
+		BaseContents:    api.BaseContents{Status: newStatus},
+		Epoch:           7,
+		OwnerInstanceID: "owner-1",
 	}
 
 	t.Run("publishes terminal state and clears ownership", func(t *testing.T) {
 		client, mock := newTestBatchClient(t)
 		defer mock.Close()
 		mock.ExpectExec("UPDATE batch_items").
-			WithArgs(batch.ID, batch.Epoch, oldStatus, newStatus).
+			WithArgs(batch.ID, batch.Epoch, batch.OwnerInstanceID, oldStatus, newStatus).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		if err := client.FinalizeResumableBatch(context.Background(), batch, oldStatus); err != nil {
 			t.Fatalf("FinalizeResumableBatch: %v", err)
@@ -50,7 +51,7 @@ func TestFinalizeResumableBatch(t *testing.T) {
 		client, mock := newTestBatchClient(t)
 		defer mock.Close()
 		mock.ExpectExec("UPDATE batch_items").
-			WithArgs(batch.ID, batch.Epoch, oldStatus, newStatus).
+			WithArgs(batch.ID, batch.Epoch, batch.OwnerInstanceID, oldStatus, newStatus).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 		mock.ExpectQuery("SELECT EXISTS").
 			WithArgs(batch.ID, batch.Epoch, newStatus).
@@ -64,13 +65,23 @@ func TestFinalizeResumableBatch(t *testing.T) {
 		client, mock := newTestBatchClient(t)
 		defer mock.Close()
 		mock.ExpectExec("UPDATE batch_items").
-			WithArgs(batch.ID, batch.Epoch, oldStatus, newStatus).
+			WithArgs(batch.ID, batch.Epoch, batch.OwnerInstanceID, oldStatus, newStatus).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 		mock.ExpectQuery("SELECT EXISTS").
 			WithArgs(batch.ID, batch.Epoch, newStatus).
 			WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
 		if err := client.FinalizeResumableBatch(context.Background(), batch, oldStatus); !errors.Is(err, api.ErrConflict) {
 			t.Fatalf("expected ErrConflict, got %v", err)
+		}
+	})
+
+	t.Run("rejects a finalizer without an owner identity", func(t *testing.T) {
+		client, mock := newTestBatchClient(t)
+		defer mock.Close()
+		ownerless := *batch
+		ownerless.OwnerInstanceID = ""
+		if err := client.FinalizeResumableBatch(context.Background(), &ownerless, oldStatus); err == nil {
+			t.Fatal("expected validation error")
 		}
 	})
 }
