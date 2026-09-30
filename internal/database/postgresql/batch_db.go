@@ -49,6 +49,7 @@ const (
 	colPriority         = "priority"
 	colEpoch            = "epoch"
 	colRecoveryAttempts = "recovery_attempts"
+	colResumable        = "resumable"
 )
 
 // Compile-time checks.
@@ -63,7 +64,7 @@ type batchDescriptor struct{}
 func (batchDescriptor) TableName() string { return "batch_items" }
 func (batchDescriptor) Schema() string    { return batchSchemaSql }
 func (batchDescriptor) ExtraColumns() []string {
-	return []string{colProcessorID, colPriority, colEpoch, colRecoveryAttempts}
+	return []string{colProcessorID, colPriority, colEpoch, colRecoveryAttempts, colResumable}
 }
 
 // PostgresBatchDBClient implements api.BatchDBClient using PostgreSQL.
@@ -106,6 +107,7 @@ func (c *PostgresBatchDBClient) DBStore(ctx context.Context, item *api.BatchItem
 		colPriority:         item.Priority,
 		colEpoch:            item.Epoch,
 		colRecoveryAttempts: item.RecoveryAttempts,
+		colResumable:        item.Resumable,
 	}); err != nil {
 		return
 	}
@@ -145,6 +147,7 @@ func (c *PostgresBatchDBClient) DBGet(
 		priority, _ := extras[i][colPriority].(int64)
 		epoch, _ := extras[i][colEpoch].(int64)
 		recoveryAttempts, _ := extras[i][colRecoveryAttempts].(int64)
+		resumable, _ := extras[i][colResumable].(bool)
 		items[i] = &api.BatchItem{
 			BaseIndexes:      *indexes[i],
 			BaseContents:     *contents[i],
@@ -152,6 +155,7 @@ func (c *PostgresBatchDBClient) DBGet(
 			Priority:         priority,
 			Epoch:            epoch,
 			RecoveryAttempts: recoveryAttempts,
+			Resumable:        resumable,
 		}
 	}
 
@@ -163,15 +167,21 @@ func (c *PostgresBatchDBClient) DBUpdate(ctx context.Context, item *api.BatchIte
 		err = fmt.Errorf("item is nil")
 		return
 	}
-	var epochFence map[string]any
-	if item.Epoch > 0 {
-		epochFence = map[string]any{colEpoch: item.Epoch}
+	var updateConditions map[string]any
+	if item.Epoch > 0 || item.BumpEpoch {
+		updateConditions = map[string]any{colEpoch: item.Epoch}
 	}
 	var rawSets []string
 	if item.BumpEpoch {
 		rawSets = append(rawSets, colEpoch+" = "+colEpoch+" + 1")
 	}
-	if err = c.update(ctx, &item.BaseIndexes, &item.BaseContents, expectedStatus, epochFence, rawSets); err != nil {
+	if item.ExpectedResumable != nil {
+		if updateConditions == nil {
+			updateConditions = make(map[string]any)
+		}
+		updateConditions[colResumable] = *item.ExpectedResumable
+	}
+	if err = c.update(ctx, &item.BaseIndexes, &item.BaseContents, expectedStatus, updateConditions, rawSets); err != nil {
 		return
 	}
 	return
