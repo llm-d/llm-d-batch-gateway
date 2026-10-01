@@ -1085,12 +1085,18 @@ def collect_aimd_metrics(context, namespace, start_time, end_time):
 
 
 def collect_flow_control_metrics(context, namespace, start_time, end_time):
-    """Collect llm-d Router flow control metrics from Prometheus."""
+    """Collect namespaced EPP metrics, preferring Router names over legacy GIE names."""
     metrics = {}
+    namespace_selector = f'{{namespace={json.dumps(namespace)}}}'
 
     # Pool saturation (0-1 ratio of flow control capacity used)
-    saturation_query = 'avg(inference_extension_flow_control_pool_saturation)'
-    results = query_prometheus(context, namespace, saturation_query, start_time, end_time)
+    metric_prefix = "llm_d_epp"
+    for candidate_prefix in (metric_prefix, "inference_extension"):
+        saturation_query = f"avg({candidate_prefix}_flow_control_pool_saturation{namespace_selector})"
+        results = query_prometheus(context, namespace, saturation_query, start_time, end_time)
+        if results:
+            metric_prefix = candidate_prefix
+            break
     if results:
         values = [float(v[1]) for v in results[0].get("values", []) if v[1] != "NaN"]
         if values:
@@ -1099,7 +1105,10 @@ def collect_flow_control_metrics(context, namespace, start_time, end_time):
             metrics["flow_control_saturation_series"] = values
 
     # Queue size per priority band
-    queue_query = 'sum by (priority) (inference_extension_flow_control_queue_size)'
+    queue_query = (
+        f"sum by (priority) "
+        f"({metric_prefix}_flow_control_queue_size{namespace_selector})"
+    )
     results = query_prometheus(context, namespace, queue_query, start_time, end_time)
     if results:
         for series in results:
@@ -1110,7 +1119,9 @@ def collect_flow_control_metrics(context, namespace, start_time, end_time):
                 metrics[f"queue_size_priority_{priority}_series"] = values
 
     # Total queue size (all priorities combined) for the chart
-    total_queue_query = 'sum(inference_extension_flow_control_queue_size)'
+    total_queue_query = (
+        f"sum({metric_prefix}_flow_control_queue_size{namespace_selector})"
+    )
     results = query_prometheus(context, namespace, total_queue_query, start_time, end_time)
     if results:
         values = [float(v[1]) for v in results[0].get("values", []) if v[1] != "NaN"]

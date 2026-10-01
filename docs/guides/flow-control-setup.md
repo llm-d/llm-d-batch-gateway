@@ -300,6 +300,13 @@ Key metrics to watch when running batch and interactive workloads together:
 | 503/429 response rate | Batch Gateway metrics | High 503 (queue TTL) or 429 (band capacity) rate = flow control is shedding batch |
 | Batch job completion rate | Batch Gateway metrics | Should meet SLO deadlines under normal load |
 
+> **Metric naming:** the table lists the names used by llm-d Router v0.8.0
+> and earlier. Router v0.9.0-v0.10.x also emits the same signals under
+> `llm_d_epp_flow_control_pool_saturation`,
+> `llm_d_epp_flow_control_queue_size`, and
+> `llm_d_epp_flow_control_request_queue_duration_seconds`. Router v0.11.0+
+> emits only the `llm_d_epp_*` names.
+
 ## Summary
 
 The combination of GIE flow control and Batch Gateway provides automatic, infrastructure-level workload balancing:
