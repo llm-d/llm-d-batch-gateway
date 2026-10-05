@@ -15,10 +15,10 @@ set -euo pipefail
 #   MODE               — "sim" to use inference-sim instead of real vLLM (default: gpu)
 #   LLM_D_REPO         — path to llm-d checkout (overrides downloading from LLM_D_TAG)
 #   ROUTER_REPO        — path to llm-d-router checkout (overrides OCI chart)
-#   ROUTER_CHART_VERSION — OCI chart version for llm-d-router (default: 0.9.2)
-#   ROUTER_EPP_TAG     — EPP image tag (default: v0.9.0)
-#   ROUTER_EPP_REGISTRY — EPP image registry (default: ghcr.io)
-#   ROUTER_EPP_REPOSITORY — EPP image repository (default: llm-d/llm-d-inference-scheduler)
+#   ROUTER_CHART_VERSION — OCI chart version for llm-d-router (default: v0, built from router main branch)
+#   ROUTER_EPP_TAG     — EPP image tag, used with ROUTER_REPO (default: main)
+#   ROUTER_EPP_REGISTRY — EPP image registry, used with ROUTER_REPO (default: ghcr.io)
+#   ROUTER_EPP_REPOSITORY — EPP image path, used with ROUTER_REPO (default: llm-d/llm-d-router-endpoint-picker)
 #   LLM_D_TAG          — git tag for llm-d guide values (default: v0.7.0)
 #   NAMESPACE          — override auto-generated namespace (default: batch-bench-s${SCENARIO})
 #   MODEL              — model to serve (default: Qwen/Qwen3-8B)
@@ -45,10 +45,14 @@ else
 fi
 GUIDE_NAME="${GUIDE_NAME:-optimized-baseline}"
 NAMESPACE="${NAMESPACE:-batch-bench-s${SCENARIO}}"
-ROUTER_CHART_VERSION="${ROUTER_CHART_VERSION:-0.9.2}"
-ROUTER_EPP_TAG="${ROUTER_EPP_TAG:-v0.9.0}"
+# The configs here use the llm-d.ai API group (EndpointPickerConfig llm-d.ai/v1),
+# which is only on llm-d-router main until the 1.0.0 release. The router publishes
+# its main build as chart version "v0" and image tag "main".
+# TODO: switch both defaults to v1.0.0 once that release is out.
+ROUTER_CHART_VERSION="${ROUTER_CHART_VERSION:-v0}"
+ROUTER_EPP_TAG="${ROUTER_EPP_TAG:-main}"
+ROUTER_EPP_REPOSITORY="${ROUTER_EPP_REPOSITORY:-llm-d/llm-d-router-endpoint-picker}"
 ROUTER_EPP_REGISTRY="${ROUTER_EPP_REGISTRY:-ghcr.io}"
-ROUTER_EPP_REPOSITORY="${ROUTER_EPP_REPOSITORY:-llm-d/llm-d-inference-scheduler}"
 LLM_D_TAG="${LLM_D_TAG:-v0.7.0}"
 SIM_IMAGE="${SIM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:latest}"
 SIM_TTFT="${SIM_TTFT:-50ms}"
@@ -170,10 +174,13 @@ spec:
       storage: 10Gi
 EOF
 
-# GIE (flow control) settings for sim mode scenario 4
-GIE_VERSION="${GIE_VERSION:-v1.5.0}"
-GIE_REPO="${GIE_REPO:-}"
-GIE_UPSTREAM_REPO="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
+# CRD sources for sim mode scenario 4. InferencePool comes from GAIE.
+# InferenceObjective and InferenceModelRewrite moved to llm-d-router in GAIE 1.6.
+GIE_VERSION="${GIE_VERSION:-v1.6.2}"
+ROUTER_CRD_REF="${ROUTER_CHART_VERSION}"
+if [ "${ROUTER_CRD_REF}" = "v0" ]; then
+    ROUTER_CRD_REF="main"
+fi
 
 # --- Inference backend ---
 if [ "${MODE}" = "sim" ]; then
@@ -238,89 +245,58 @@ spec:
       name: http
 EOF
 
-    # --- Scenario 4 sim mode: deploy GIE EPP with flow control ---
+    # --- Scenario 4 sim mode: deploy router EPP with flow control ---
     if [ "${SCENARIO}" = "4" ]; then
-        log "Deploying GIE EPP with flow control (sim mode, scenario 4)"
+        log "Deploying router EPP with flow control (sim mode, scenario 4)"
 
-        # Ensure GIE repo is available
-        if [ -z "${GIE_REPO}" ] || [ ! -d "${GIE_REPO}" ]; then
-            GIE_REPO="$(mktemp -d)/gateway-api-inference-extension"
-            log "  Cloning GIE ${GIE_VERSION}..."
-            git clone --depth 1 --branch "${GIE_VERSION}" "${GIE_UPSTREAM_REPO}" "${GIE_REPO}" >/dev/null 2>&1
+        # Install CRDs: InferencePool from GAIE, the rest from llm-d-router
+        log "  Installing CRDs (InferencePool from GAIE ${GIE_VERSION}, the rest from llm-d-router)"
+        router_crd_base="https://raw.githubusercontent.com/llm-d/llm-d-router/${ROUTER_CRD_REF}/config/crd/bases"
+        if [ -n "${ROUTER_REPO:-}" ]; then
+            router_crd_base="${ROUTER_REPO}/config/crd/bases"
+        fi
+        ${K} apply -f "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/${GIE_VERSION}/config/crd/bases/inference.networking.k8s.io_inferencepools.yaml" >/dev/null
+        ${K} apply -f "${router_crd_base}/llm-d.ai_inferenceobjectives.yaml" >/dev/null
+        ${K} apply -f "${router_crd_base}/llm-d.ai_inferencemodelrewrites.yaml" >/dev/null
+        ${K} wait --for=condition=established crd/inferencepools.inference.networking.k8s.io \
+            crd/inferenceobjectives.llm-d.ai crd/inferencemodelrewrites.llm-d.ai --timeout=60s >/dev/null
+
+        # Pick the router standalone chart: local checkout or OCI
+        chart_args=()
+        if [ -n "${ROUTER_REPO:-}" ]; then
+            chart_ref="${ROUTER_REPO}/config/charts/llm-d-router-standalone"
+            rm -f "${chart_ref}/Chart.lock"
+            (cd "${chart_ref}" && helm dependency build >/dev/null 2>&1)
+            chart_args+=(--set "router.epp.image.registry=${ROUTER_EPP_REGISTRY}"
+                --set "router.epp.image.repository=${ROUTER_EPP_REPOSITORY}"
+                --set "router.epp.image.tag=${ROUTER_EPP_TAG}")
+        else
+            chart_ref="oci://ghcr.io/llm-d/charts/llm-d-router-standalone"
+            chart_args+=(--version "${ROUTER_CHART_VERSION}")
         fi
 
-        # Install GIE CRDs
-        log "  Installing GIE CRDs"
-        ${K} apply -f "${GIE_REPO}/config/crd/bases/" >/dev/null
-
-        # Build Helm dependencies for standalone chart
-        chart_dir="${GIE_REPO}/config/charts/standalone"
-        (cd "${chart_dir}" && helm dependency build >/dev/null 2>&1)
-
-        # Create flow-control values
-        values_file="$(mktemp)"
-        cat > "${values_file}" <<'VALUESEOF'
-inferenceExtension:
-  pluginsCustomConfig:
-    flow-control-plugins.yaml: |
-      apiVersion: inference.networking.x-k8s.io/v1alpha1
-      kind: EndpointPickerConfig
-      featureGates:
-        - "flowControl"
-      plugins:
-        - type: round-robin-fairness-policy
-        - type: global-strict-fairness-policy
-        - type: slo-deadline-ordering-policy
-        - type: concurrency-detector
-          parameters:
-            maxConcurrency: 1000
-      flowControl:
-        maxBytes: 4294967296
-        defaultRequestTTL: 30s
-        priorityBands:
-          - priority: 100
-            maxBytes: 1073741824
-            fairnessPolicyRef: round-robin-fairness-policy
-            orderingPolicyRef: fcfs-ordering-policy
-          - priority: -1
-            maxBytes: 3221225472
-            fairnessPolicyRef: global-strict-fairness-policy
-            orderingPolicyRef: slo-deadline-ordering-policy
-        defaultPriorityBand:
-          maxBytes: 536870912
-          fairnessPolicyRef: global-strict-fairness-policy
-          orderingPolicyRef: fcfs-ordering-policy
-      saturationDetector:
-        pluginRef: concurrency-detector
-VALUESEOF
-
-        # Install EPP standalone chart
+        # Install EPP standalone chart. The flow-control plugins come from the
+        # scenario 4 router overlay.
         epp_release="epp-bench"
         log "  Installing EPP (release: ${epp_release})"
-        ${H} upgrade --install "${epp_release}" "${chart_dir}" \
+        ${H} upgrade --install "${epp_release}" "${chart_ref}" \
             -n "${NAMESPACE}" \
-            --set "inferenceExtension.image.tag=${GIE_VERSION}" \
-            --set inferenceExtension.monitoring.prometheus.auth.enabled=false \
-            --set inferenceExtension.sidecar.enabled=false \
-            --set inferenceExtension.endpointsServer.createInferencePool=true \
-            --set "inferencePool.modelServers.matchLabels.app=inference-sim" \
-            --set "inferencePool.targetPorts[0].number=8000" \
-            --set inferencePool.modelServerType=vllm \
-            --set inferenceExtension.pluginsConfigFile=flow-control-plugins.yaml \
-            --set inferenceExtension.resources.requests.cpu=100m \
-            --set inferenceExtension.resources.requests.memory=256Mi \
-            --set inferenceExtension.resources.limits.memory=512Mi \
-            -f "${values_file}" >/dev/null
-        rm -f "${values_file}"
+            "${chart_args[@]}" \
+            --set router.monitoring.prometheus.auth.enabled=false \
+            --set "router.modelServers.matchLabels.app=inference-sim" \
+            --set router.epp.resources.requests.cpu=100m \
+            --set router.epp.resources.requests.memory=256Mi \
+            --set router.epp.resources.limits.memory=512Mi \
+            -f "${SCRIPT_DIR}/helm-values/scenario-4-flow-control-overlay-router.yaml" >/dev/null
 
         # Wait for EPP deployment
         log "  Waiting for EPP to be ready..."
         ${K} -n "${NAMESPACE}" wait --for=condition=available deployment/${epp_release}-epp --timeout=120s
 
-        # Create InferenceObjective CRDs
-        log "  Creating InferenceObjective CRDs"
+        # Create InferenceObjectives
+        log "  Creating InferenceObjectives"
         ${K} -n "${NAMESPACE}" apply -f - <<EOOBJ
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
 metadata:
   name: interactive-default
@@ -330,7 +306,7 @@ spec:
     group: inference.networking.k8s.io
     name: ${epp_release}
 ---
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
 metadata:
   name: batch-sheddable
@@ -345,6 +321,19 @@ EOOBJ
 else
     # GPU mode: deploy real vLLM + llm-d Router + Istio Gateway
 
+    # The router chart does not install CRDs. Install the InferenceObjective CRD
+    # before the router starts, because the router only looks for it at startup.
+    # Chart "v0" is built from router main.
+    if [ "${SCENARIO}" = "3" ] || [ "${SCENARIO}" = "4" ]; then
+        objective_crd="https://raw.githubusercontent.com/llm-d/llm-d-router/${ROUTER_CRD_REF}/config/crd/bases/llm-d.ai_inferenceobjectives.yaml"
+        if [ -n "${ROUTER_REPO:-}" ]; then
+            objective_crd="${ROUTER_REPO}/config/crd/bases/llm-d.ai_inferenceobjectives.yaml"
+        fi
+        log "Installing InferenceObjective CRD from ${objective_crd}"
+        ${K} apply -f "${objective_crd}" >/dev/null
+        ${K} wait --for=condition=established crd/inferenceobjectives.llm-d.ai --timeout=60s >/dev/null
+    fi
+
     # --- llm-d Router (EPP) ---
     log "Installing llm-d Router (${GUIDE_NAME})"
 
@@ -354,12 +343,13 @@ else
         log "  Flow control: enabling EPP priority bands (interactive=100, batch=-1)"
     fi
 
+    if [ "${SCENARIO}" = "3" ]; then
+        FLOW_CONTROL_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-3-admission-control-overlay-router.yaml"
+    elif [ "${SCENARIO}" = "4" ]; then
+        FLOW_CONTROL_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-4-flow-control-overlay-router.yaml"
+    fi
+
     if [ -n "${ROUTER_REPO:-}" ]; then
-        if [ "${SCENARIO}" = "3" ]; then
-            FLOW_CONTROL_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-3-admission-control-overlay-router.yaml"
-        elif [ "${SCENARIO}" = "4" ]; then
-            FLOW_CONTROL_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-4-flow-control-overlay-router.yaml"
-        fi
         # Local repo mode (development override)
         log "  Using local repo: ROUTER_REPO=${ROUTER_REPO}"
         chart_dir="${ROUTER_REPO}/config/charts/llm-d-router-gateway"
@@ -388,13 +378,8 @@ else
             --set httpRoute.create=true \
             --set httpRoute.inferenceGatewayName=llm-d-inference-gateway >/dev/null
     else
-        if [ "${SCENARIO}" = "3" ]; then
-            FLOW_CONTROL_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-3-admission-control-overlay.yaml"
-        elif [ "${SCENARIO}" = "4" ]; then
-            FLOW_CONTROL_OVERLAY="-f ${SCRIPT_DIR}/helm-values/scenario-4-flow-control-overlay.yaml"
-        fi
-        # OCI mode (default — reproducible, pinned versions)
-        log "  Using OCI chart: ghcr.io/llm-d/llm-d-router-gateway:${ROUTER_CHART_VERSION}"
+        # OCI mode (default)
+        log "  Using OCI chart: ghcr.io/llm-d/charts/llm-d-router-gateway:${ROUTER_CHART_VERSION}"
         log "  Using llm-d guide values from tag: ${LLM_D_TAG}"
 
         # Download guide values from pinned llm-d tag
@@ -406,7 +391,7 @@ else
         curl -sL "${local_base}/guides/recipes/router/features/monitoring.values.yaml" -o "${LLM_D_VALUES_DIR}/monitoring.values.yaml"
 
         ${H} upgrade --install "${GUIDE_NAME}" \
-            oci://ghcr.io/llm-d/llm-d-router-gateway \
+            oci://ghcr.io/llm-d/charts/llm-d-router-gateway \
             --version "${ROUTER_CHART_VERSION}" \
             -n "${NAMESPACE}" \
             -f "${LLM_D_VALUES_DIR}/base.values.yaml" \
@@ -517,11 +502,12 @@ else
     log "Skipping batch-gateway (not needed for scenario ${SCENARIO})"
 fi
 
-# --- Scenario 3/4: InferenceObjective CRDs (priority-based routing) ---
-if [ "${SCENARIO}" = "3" ] || [ "${SCENARIO}" = "4" ]; then
-    log "Deploying InferenceObjective CRDs for flow control"
+# --- Scenario 3/4: InferenceObjectives (priority-based routing) ---
+# GPU mode only. Sim scenario 4 creates its own objectives above.
+if [ "${MODE}" != "sim" ] && { [ "${SCENARIO}" = "3" ] || [ "${SCENARIO}" = "4" ]; }; then
+    log "Deploying InferenceObjectives for flow control"
     ${K} -n "${NAMESPACE}" apply -f - <<EOF
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
 metadata:
   name: interactive-default
@@ -531,7 +517,7 @@ spec:
     group: inference.networking.k8s.io
     name: ${GUIDE_NAME}
 ---
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
 metadata:
   name: batch-sheddable
@@ -543,30 +529,6 @@ spec:
 EOF
     log "  Created InferenceObjective: interactive-default (priority 100)"
     log "  Created InferenceObjective: batch-sheddable (priority -1)"
-
-    # Also create under llm-d.ai API group (EPP selects this when available)
-    ${K} -n "${NAMESPACE}" apply -f - <<EOF2
-apiVersion: llm-d.ai/v1alpha2
-kind: InferenceObjective
-metadata:
-  name: interactive-default
-spec:
-  priority: 100
-  poolRef:
-    group: inference.networking.k8s.io
-    name: ${GUIDE_NAME}
----
-apiVersion: llm-d.ai/v1alpha2
-kind: InferenceObjective
-metadata:
-  name: batch-sheddable
-spec:
-  priority: -1
-  poolRef:
-    group: inference.networking.k8s.io
-    name: ${GUIDE_NAME}
-EOF2
-    log "  Created InferenceObjective (llm-d.ai): interactive-default, batch-sheddable"
 fi
 
 # --- Scenario 5: Async processor ---

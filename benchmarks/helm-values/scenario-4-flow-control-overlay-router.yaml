@@ -1,4 +1,8 @@
-# Flow control overlay for llm-d Router (router.epp.* format for v0.9.0+ charts).
+# Flow control overlay for llm-d Router.
+#
+# Needs llm-d-router main (chart v0) until the 1.0.0 release: EndpointPickerConfig
+# llm-d.ai/v1 is not in released charts yet. Values use the router.epp.* format.
+#
 # Applied in scenario 4 to enable priority dispatch ordering:
 #   Flow control's dispatch cycle dispatches one request per tick, highest
 #   priority first. Interactive (priority 100) always dispatches before
@@ -23,7 +27,7 @@ router:
     pluginsConfigFile: "flow-control-plugins.yaml"
     pluginsCustomConfig:
       flow-control-plugins.yaml: |
-        apiVersion: inference.networking.x-k8s.io/v1alpha1
+        apiVersion: llm-d.ai/v1
         kind: EndpointPickerConfig
         featureGates:
           - "flowControl"

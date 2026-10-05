@@ -40,8 +40,10 @@ For full details on GIE flow control, see the [Flow Control Configuration Guide]
 
 ### EndpointPickerConfig
 
+`llm-d.ai/v1` is only available on llm-d-router main until the 1.0.0 release.
+
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 featureGates:
   - "flowControl"
@@ -97,10 +99,10 @@ Flow control assigns requests to priority bands based on the `InferenceObjective
 
 **Setup:**
 
-1. Create `InferenceObjective` CRDs for each workload class:
+1. Create `InferenceObjective` CRDs for each workload class. The CRD (`llm-d.ai_inferenceobjectives.yaml`) comes from llm-d-router, not GAIE:
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
 metadata:
   name: interactive-default
@@ -111,7 +113,7 @@ spec:
     name: <your-inference-pool>
 
 ---
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
 metadata:
   name: batch-sheddable
@@ -293,10 +295,10 @@ Key metrics to watch when running batch and interactive workloads together:
 
 | Metric | Source | What to Watch |
 |--------|--------|---------------|
-| `inference_extension_flow_control_pool_saturation` | GIE | Should hover below 1.0 during mixed workloads |
-| `inference_extension_flow_control_queue_size` | GIE | Batch band queue growing = saturation approaching; at 1.0, new batch requests are shed instead of queued |
-| `inference_extension_flow_control_request_queue_duration_seconds` | GIE | High queue time in batch band = sustained saturation |
-| Request evictions (TTL) | GIE flow control | Batch evictions = SLO deadlines being missed |
+| `llm_d_epp_flow_control_pool_saturation` | llm-d Router | Should hover below 1.0 during mixed workloads |
+| `llm_d_epp_flow_control_queue_size` | llm-d Router | Batch band queue growing = saturation approaching; at 1.0, new batch requests are shed instead of queued |
+| `llm_d_epp_flow_control_request_queue_duration_seconds` | llm-d Router | High queue time in batch band = sustained saturation |
+| Request evictions (TTL) | llm-d Router flow control | Batch evictions = SLO deadlines being missed |
 | 503/429 response rate | Batch Gateway metrics | High 503 (queue TTL) or 429 (band capacity) rate = flow control is shedding batch |
 | Batch job completion rate | Batch Gateway metrics | Should meet SLO deadlines under normal load |
 

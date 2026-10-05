@@ -235,8 +235,8 @@ Compare TTFT p99 during burst phases across scenarios:
 | `KUBE_CONTEXT` | Yes | — | kubectl context |
 | `SCENARIO` | Yes | — | Scenario number (0-5) |
 | `LLM_D_REPO` | No | — | Path to llm-d checkout (overrides downloading from tag) |
-| `ROUTER_REPO` | No | — | Path to llm-d-router checkout (overrides OCI chart) |
-| `ROUTER_CHART_VERSION` | No | `0.9.2` | OCI chart version for llm-d-router |
+| `ROUTER_REPO` | No | — | Path to llm-d-router checkout (overrides OCI chart). |
+| `ROUTER_CHART_VERSION` | No | `v0` | OCI chart version for llm-d-router. `v0` is built from router main; use `v1.0.0` once it is released |
 | `LLM_D_TAG` | No | `v0.7.0` | Git tag for llm-d guide values (used in OCI mode) |
 | `NAMESPACE` | No | `batch-bench-s${SCENARIO}` | Override namespace |
 | `MODEL` | No | `Qwen/Qwen3-8B` | Model to serve |

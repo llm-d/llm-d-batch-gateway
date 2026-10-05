@@ -390,8 +390,8 @@ func waitForBatchFailures(t *testing.T, batchID string, timeout time.Duration) {
 //
 // Not covered: while two sheddable requests are queued, EPP does not dispatch
 // the earlier x-slo-ttft-ms deadline first. Observed on GIE EPP v1.5.0 (FCFS
-// even with slo-deadline-ordering-policy). Unblock by deploying llm-d-router
-// for Kind e2e, not by bumping GIE_VERSION (v1.6.0 dropped standalone EPP).
+// even with slo-deadline-ordering-policy). Not rechecked with the llm-d-router
+// EPP that dev-deploy now uses.
 // When adding the test: saturate, curl long then short SLO on the same
 // objective, unsaturate only after both "Item enqueued", assert short
 // "Item dispatched" first. Do not use batch CompletedAt.
@@ -572,7 +572,7 @@ func truncateLog(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-var eppDispatchedCountPattern = regexp.MustCompile(`(?m)^inference_extension_flow_control_request_queue_duration_seconds_count\{([^}]*)\}\s+([0-9.e+-]+)$`)
+var eppDispatchedCountPattern = regexp.MustCompile(`(?m)^llm_d_epp_flow_control_request_queue_duration_seconds_count\{([^}]*)\}\s+([0-9.e+-]+)$`)
 
 func assertEPPDispatchedDelta(
 	t *testing.T,
@@ -607,7 +607,7 @@ func getEPPDispatchedCount(t *testing.T, deployment string) float64 {
 }
 
 // EPP flow-control outcomes for the batch band, as labelled on
-// inference_extension_flow_control_request_queue_duration_seconds_count.
+// llm_d_epp_flow_control_request_queue_duration_seconds_count.
 // Each maps to the status the EPP answers with (GIE v1.5.0
 // requestcontrol/admission.go translateFlowControlOutcome).
 const (
@@ -667,7 +667,7 @@ func shedCount(outcomes map[string]float64) float64 {
 	return total
 }
 
-var eppPoolSaturationPattern = regexp.MustCompile(`(?m)^inference_extension_flow_control_pool_saturation\{[^}]*\}\s+([0-9.e+-]+)$`)
+var eppPoolSaturationPattern = regexp.MustCompile(`(?m)^llm_d_epp_flow_control_pool_saturation\{[^}]*\}\s+([0-9.e+-]+)$`)
 
 // waitForEPPSaturation polls until the EPP's flow-control pool saturation
 // gauge exceeds 1 (the pool is past the configured queue-depth threshold).
@@ -780,7 +780,7 @@ func getEPPDispatchedCountAndSample(t *testing.T, deployment string) (float64, s
 		}
 		total += value
 		lines = append(lines,
-			fmt.Sprintf("inference_extension_flow_control_request_queue_duration_seconds_count{%s} %s", labels, match[2]))
+			fmt.Sprintf("llm_d_epp_flow_control_request_queue_duration_seconds_count{%s} %s", labels, match[2]))
 	}
 	if len(lines) == 0 {
 		return 0, truncateLog(metrics, 1000)
