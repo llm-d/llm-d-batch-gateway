@@ -85,6 +85,39 @@ if [[ "${1:-}" == "--case" ]]; then
     make() { record "make $*"; }
     export -f record command docker podman kind kubectl helm jq nc make
 
+    require_log() {
+        if ! grep -Fq -- "$1" "${TEST_LOG}"; then
+            printf 'missing expected call: %s\n' "$1" >&2
+            exit 1
+        fi
+    }
+
+    if [[ "${GIE_TEST_MODE:-}" == oci || "${GIE_TEST_MODE:-}" == local ]]; then
+        if [[ "${GIE_TEST_MODE}" == local ]]; then
+            ROUTER_REPO="${FIXTURE_ROOT}/router"
+            mkdir -p "${ROUTER_REPO}/config/charts/llm-d-router-standalone"
+        fi
+        install_gie_crds
+        install_gie_epp vllm-sim sim-model
+
+        if [[ "${GIE_TEST_MODE}" == local ]]; then
+            expected_router_crd_base="${ROUTER_REPO}/config/crd/bases"
+            expected_chart_ref="${ROUTER_REPO}/config/charts/llm-d-router-standalone"
+            require_log "helm dependency build ${expected_chart_ref}"
+            require_log "helm install epp-sim-model ${expected_chart_ref} --namespace ${NAMESPACE}"
+        else
+            expected_router_crd_base="https://raw.githubusercontent.com/llm-d/llm-d-router/${ROUTER_CRD_REF}/config/crd/bases"
+            expected_chart_ref="oci://ghcr.io/llm-d/charts/llm-d-router-standalone"
+            require_log "helm install epp-sim-model ${expected_chart_ref} --version ${ROUTER_CHART_VERSION} --namespace ${NAMESPACE}"
+        fi
+        require_log "kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/${GIE_VERSION}/config/crd/bases/inference.networking.k8s.io_inferencepools.yaml"
+        require_log "kubectl apply -f ${expected_router_crd_base}/llm-d.ai_inferenceobjectives.yaml"
+        require_log "kubectl apply -f ${expected_router_crd_base}/llm-d.ai_inferencemodelrewrites.yaml"
+        require_log '--set router.monitoring.prometheus.auth.enabled=false --set router.proxy.configMap.name=envoy-sim-model'
+        require_log '--set router.modelServers.matchLabels.app=vllm-sim --set router.epp.resources.requests.cpu=100m'
+        exit
+    fi
+
     # No builds, certificates, real infrastructure, or HTTP calls. Keep main's
     # orchestration and both scripts' actual Helm commands under test.
     for fn in build_images pull_images ensure_cluster install_exchange install_postgresql \
@@ -207,6 +240,9 @@ run_case 'runtime digest mismatch rejected' runtime-digest-error \
     RUNTIME_IMAGE_ID='docker-pullable://localhost:5000/async@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 assert_no_log 'helm install batch-gateway '
 assert_no_log 'helm upgrade batch-gateway '
+
+run_case 'router EPP OCI wiring' ok GIE_TEST_MODE=oci
+run_case 'router EPP local checkout wiring' ok GIE_TEST_MODE=local
 
 run_case 'sync GIE' ok ENABLE_DISPATCHER=false ENABLE_GIE=true
 assert_log 'processor.config.dispatchMode=sync'
