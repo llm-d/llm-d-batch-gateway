@@ -876,8 +876,14 @@ func TestBatchHandler(t *testing.T) {
 				{"LimitZero", "limit=0"},
 				{"LimitTooLarge", "limit=999"},
 				{"InvalidLimit", "limit=abc"},
+				{"LimitDecimal", "limit=1.5"},
+				{"LimitExponent", "limit=1e2"},
+				{"LimitTrailingText", "limit=1abc"},
 				{"AfterNegative", "after=-1"},
 				{"InvalidAfter", "after=abc"},
+				{"AfterDecimal", "after=1.5"},
+				{"AfterExponent", "after=1e2"},
+				{"AfterTrailingText", "after=1abc"},
 			}
 			for _, tc := range negativeCases {
 				t.Run(tc.name, func(t *testing.T) {

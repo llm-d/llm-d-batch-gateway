@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -230,8 +231,8 @@ func (c *BatchAPIHandler) ListBatches(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	limit := 20
 	if limitStr := query.Get(common.QueryParamLimit); limitStr != "" {
-		var parsedLimit int
-		if _, err := fmt.Sscanf(limitStr, "%d", &parsedLimit); err != nil {
+		parsedLimit, err := strconv.Atoi(limitStr)
+		if err != nil {
 			apiErr := openai.NewAPIError(http.StatusBadRequest, "", "invalid limit parameter: must be an integer", nil)
 			common.WriteAPIError(w, r, apiErr)
 			return
@@ -247,8 +248,8 @@ func (c *BatchAPIHandler) ListBatches(w http.ResponseWriter, r *http.Request) {
 
 	after := 0
 	if afterStr := query.Get(common.QueryParamAfter); afterStr != "" {
-		var parsedAfter int
-		if _, err := fmt.Sscanf(afterStr, "%d", &parsedAfter); err != nil {
+		parsedAfter, err := strconv.Atoi(afterStr)
+		if err != nil {
 			apiErr := openai.NewAPIError(http.StatusBadRequest, "", "invalid after parameter: must be an integer", nil)
 			common.WriteAPIError(w, r, apiErr)
 			return
