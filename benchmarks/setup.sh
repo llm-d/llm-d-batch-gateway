@@ -95,6 +95,68 @@ values_file_for_scenario() {
     esac
 }
 
+# Verify that the deployed EPP comes from llm-d-router, not the retired GIE
+# inference scheduler image. The OCI chart owns its image defaults; local
+# router checkouts use ROUTER_EPP_REPOSITORY above.
+verify_router_deployment() {
+    local epp_release="$1"
+    local expected_image="ghcr.io/llm-d/llm-d-router-endpoint-picker"
+    if [ -n "${ROUTER_REPO:-}" ]; then
+        expected_image="${ROUTER_EPP_REGISTRY}/${ROUTER_EPP_REPOSITORY}:${ROUTER_EPP_TAG}"
+    fi
+
+    local images
+    images="$(${K} -n "${NAMESPACE}" get deployment/${epp_release}-epp \
+        -o jsonpath='{.spec.template.spec.containers[*].image}')"
+    if [[ "${images}" != *"${expected_image}"* ]]; then
+        echo "ERROR: deployment/${epp_release}-epp is not using the llm-d-router EPP image; expected ${expected_image}, got: ${images}" >&2
+        exit 1
+    fi
+    if [[ "${images}" == *"llm-d-inference-scheduler"* ]]; then
+        echo "ERROR: deployment/${epp_release}-epp still uses the retired inference scheduler image: ${images}" >&2
+        exit 1
+    fi
+    log "  Verified deployment/${epp_release}-epp uses ${expected_image}"
+}
+
+verify_router_crds() {
+    local crd
+    for crd in "$@"; do
+        if ! ${K} get "crd/${crd}" >/dev/null 2>&1; then
+            echo "ERROR: expected router CRD crd/${crd} was not deployed" >&2
+            exit 1
+        fi
+    done
+}
+
+# EndpointPickerConfig uses llm-d.ai/v1; InferenceObjective uses llm-d.ai/v1alpha2.
+verify_router_objectives() {
+    local objective api_version
+    for objective in interactive-default batch-sheddable; do
+        api_version="$(${K} -n "${NAMESPACE}" get \
+            "inferenceobjectives.llm-d.ai/${objective}" -o jsonpath='{.apiVersion}')"
+        if [ "${api_version}" != "llm-d.ai/v1alpha2" ]; then
+            echo "ERROR: InferenceObjective ${objective} uses ${api_version}, expected llm-d.ai/v1alpha2" >&2
+            exit 1
+        fi
+    done
+    log "  Verified InferenceObjectives use llm-d.ai/v1alpha2"
+}
+
+verify_router_plugin_config() {
+    local epp_release="$1"
+    local config_file="$2"
+    local data_key="${config_file//./\\.}"
+    local plugin_config
+    plugin_config="$(${K} -n "${NAMESPACE}" get "configmap/${epp_release}-epp" \
+        -o "jsonpath={.data.${data_key}}")"
+    if ! grep -qx 'apiVersion: llm-d.ai/v1' <<<"${plugin_config}"; then
+        echo "ERROR: ${config_file} does not use llm-d.ai/v1 EndpointPickerConfig" >&2
+        exit 1
+    fi
+    log "  Verified ${config_file} uses llm-d.ai/v1 EndpointPickerConfig"
+}
+
 log "=== Setting up scenario ${SCENARIO} in namespace ${NAMESPACE} ==="
 
 # Create namespace
@@ -292,6 +354,10 @@ EOF
         # Wait for EPP deployment
         log "  Waiting for EPP to be ready..."
         ${K} -n "${NAMESPACE}" wait --for=condition=available deployment/${epp_release}-epp --timeout=120s
+        verify_router_deployment "${epp_release}"
+        verify_router_plugin_config "${epp_release}" flow-control-plugins.yaml
+        verify_router_crds inferencepools.inference.networking.k8s.io \
+            inferenceobjectives.llm-d.ai inferencemodelrewrites.llm-d.ai
 
         # Create InferenceObjectives
         log "  Creating InferenceObjectives"
@@ -316,6 +382,7 @@ spec:
     group: inference.networking.k8s.io
     name: ${epp_release}
 EOOBJ
+        verify_router_objectives
         log "  Flow control ready: EPP at ${epp_release}-epp:8081"
     fi
 else
@@ -401,6 +468,18 @@ else
             --set provider.name=istio \
             --set httpRoute.create=true \
             --set httpRoute.inferenceGatewayName=llm-d-inference-gateway >/dev/null
+    fi
+
+    log "  Waiting for llm-d-router EPP to be ready..."
+    ${K} -n "${NAMESPACE}" wait --for=condition=available deployment/${GUIDE_NAME}-epp --timeout=120s >/dev/null
+    verify_router_deployment "${GUIDE_NAME}"
+    if [ "${SCENARIO}" = "3" ] || [ "${SCENARIO}" = "4" ]; then
+        if [ "${SCENARIO}" = "3" ]; then
+            verify_router_plugin_config "${GUIDE_NAME}" admission-control-plugins.yaml
+        else
+            verify_router_plugin_config "${GUIDE_NAME}" flow-control-plugins.yaml
+        fi
+        verify_router_crds inferenceobjectives.llm-d.ai
     fi
 
     # --- Istio Gateway ---
@@ -527,6 +606,7 @@ spec:
     group: inference.networking.k8s.io
     name: ${GUIDE_NAME}
 EOF
+    verify_router_objectives
     log "  Created InferenceObjective: interactive-default (priority 100)"
     log "  Created InferenceObjective: batch-sheddable (priority -1)"
 fi

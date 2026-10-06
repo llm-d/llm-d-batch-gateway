@@ -1930,7 +1930,7 @@ def _managed_setup(args, scenario):
         check=False,
     )
     if result.returncode != 0:
-        log(f"  [managed] WARNING: setup.sh exited with code {result.returncode}")
+        raise RuntimeError(f"setup.sh exited with code {result.returncode}")
 
 
 def _managed_teardown(args, scenario):
