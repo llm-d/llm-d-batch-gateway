@@ -2587,16 +2587,22 @@ def main():
                     warmup_cycles=cfg.warmup_cycles,
                 )
                 if args.managed:
-                    _managed_setup(args, scenario)
-                result = run_scenario(trial_cfg, scenario)
-                if args.managed:
-                    _managed_teardown(args, scenario)
+                    try:
+                        _managed_setup(args, scenario)
+                        result = run_scenario(trial_cfg, scenario)
+                    finally:
+                        _managed_teardown(args, scenario)
+                else:
+                    result = run_scenario(trial_cfg, scenario)
             else:
                 if args.managed:
-                    _managed_setup(args, scenario)
-                result = run_scenario(cfg, scenario)
-                if args.managed:
-                    _managed_teardown(args, scenario)
+                    try:
+                        _managed_setup(args, scenario)
+                        result = run_scenario(cfg, scenario)
+                    finally:
+                        _managed_teardown(args, scenario)
+                else:
+                    result = run_scenario(cfg, scenario)
             trial_results.append(result)
 
         if trials > 1:

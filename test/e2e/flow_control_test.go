@@ -17,11 +17,11 @@
 //
 // Tests are split into two groups:
 //
-//   - Headers: run without GIE. They verify batch-gateway's own
+//   - Headers: run without an EPP. They verify batch-gateway's own
 //     responsibilities (sending the right headers) against plain vllm-vcr
 //     instances.
 //
-//   - GIE: require a full GIE/EPP deployment (ENABLE_GIE=true). They verify
+//   - EPP: require a full EPP deployment (ENABLE_GIE=true; legacy flag name). They verify
 //     that requests route through EPP, that per-model InferenceObjectives are
 //     respected, and that the processor retries and eventually gives up on
 //     the responses the EPP emits when it sheds batch traffic under
@@ -62,7 +62,7 @@ func testFlowControl(t *testing.T) {
 			t.Skip("kubectl not available")
 		}
 		if !detectGIEDeployed(t) {
-			t.Skip("GIE EPP not deployed (deploy with ENABLE_GIE=true)")
+			t.Skip("EPP not deployed (deploy with ENABLE_GIE=true; legacy flag name)")
 		}
 		t.Cleanup(func() { deleteE2ECurlPod(t) })
 		t.Run("HeaderPropagation", doTestGIEHeaderPropagation)
@@ -73,7 +73,7 @@ func testFlowControl(t *testing.T) {
 	})
 }
 
-// ── Header propagation (no GIE required) ────────────────────────────────
+// ── Header propagation (no EPP required) ────────────────────────────────
 
 // doTestInferenceObjectiveHeader verifies that the processor ConfigMap has the
 // expected inferenceObjective for testModel, and that a batch targeting this
@@ -137,7 +137,7 @@ func doTestSLOHeader(t *testing.T) {
 //  3. Assert every request completed with no failures; the AIMD decrease
 //     counter is logged for inspection.
 //
-// In GIE mode model B is configured with maxRetries=3 and backoff 2s..30s, so
+// In per-model EPP mode model B is configured with maxRetries=3 and backoff 2s..30s, so
 // the engine is released as soon as shedding is observed.
 func doTestRetryOnShed(t *testing.T) {
 	t.Helper()
@@ -201,7 +201,7 @@ func doTestRetryOnShed(t *testing.T) {
 // interactive traffic (priority 100, dispatched first), which
 // submitSaturatingBatch keeps aimed at model B's choked EPP. Batch requests
 // behind it are evicted at every 30s TTL, exhaust their retries (maxRetries=3
-// in GIE mode) after roughly four TTL cycles, and the processor records the
+// in per-model EPP mode) after roughly four TTL cycles, and the processor records the
 // EPP's final answer (503 "request TTL expired", or 429 if it rejected
 // outright). The load is then stopped and the engine released so the rest of
 // the batch completes, leaving a mix of completed and failed lines.
@@ -379,7 +379,7 @@ func waitForBatchFailures(t *testing.T, batchID string, timeout time.Duration) {
 	t.Fatalf("batch %s recorded no failed request within %v", batchID, timeout)
 }
 
-// ──  GIE integration tests (require ENABLE_GIE=true) ───────────────────
+// ──  EPP integration tests (require ENABLE_GIE=true) ───────────────────
 //
 // Current coverage: EPP routing smoke tests (header propagation, multi-model
 // completion) and shedding under saturation, with the model server choked
@@ -389,16 +389,16 @@ func waitForBatchFailures(t *testing.T, batchID string, timeout time.Duration) {
 // tests), priority band interaction is PriorityBandInteraction.
 //
 // Not covered: while two sheddable requests are queued, EPP does not dispatch
-// the earlier x-slo-ttft-ms deadline first. Observed on GIE EPP v1.5.0 (FCFS
+// the earlier x-slo-ttft-ms deadline first. Observed on legacy GIE EPP v1.5.0 (FCFS
 // even with slo-deadline-ordering-policy). Not rechecked with the llm-d-router
 // EPP that dev-deploy now uses.
 // When adding the test: saturate, curl long then short SLO on the same
 // objective, unsaturate only after both "Item enqueued", assert short
 // "Item dispatched" first. Do not use batch CompletedAt.
 
-// detectGIEDeployed checks whether at least one EPP deployment exists.
+// detectGIEDeployed (legacy function name) checks whether at least one EPP deployment exists.
 // It searches testEPPNamespace (TEST_EPP_NAMESPACE) if set, otherwise
-// testNamespace. Set TEST_GIE_DEPLOYED=true to force-enable GIE tests
+// testNamespace. Set TEST_GIE_DEPLOYED=true to force-enable EPP tests
 // when the EPP naming convention differs (e.g. RHOAI).
 func detectGIEDeployed(t *testing.T) bool {
 	t.Helper()
@@ -428,7 +428,7 @@ func detectGIEDeployed(t *testing.T) bool {
 	return false
 }
 
-// doTestGIEHeaderPropagation verifies that the processor sends requests through
+// doTestGIEHeaderPropagation (legacy function name) verifies that the processor sends requests through
 // EPP with x-gateway-inference-objective configured and that the requests
 // pass through the flow control dispatch path.
 //
@@ -572,7 +572,43 @@ func truncateLog(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-var eppDispatchedCountPattern = regexp.MustCompile(`(?m)^llm_d_epp_flow_control_request_queue_duration_seconds_count\{([^}]*)\}\s+([0-9.e+-]+)$`)
+type eppMetricFamily struct {
+	prefix                 string
+	dispatchedCountPattern *regexp.Regexp
+	poolSaturationPattern  *regexp.Regexp
+}
+
+var eppMetricFamilies = []eppMetricFamily{
+	{
+		prefix:                 "llm_d_epp",
+		dispatchedCountPattern: regexp.MustCompile(`(?m)^llm_d_epp_flow_control_request_queue_duration_seconds_count\{([^}]*)\}\s+([0-9.e+-]+)$`),
+		poolSaturationPattern:  regexp.MustCompile(`(?m)^llm_d_epp_flow_control_pool_saturation\{[^}]*\}\s+([0-9.e+-]+)$`),
+	},
+	{
+		prefix:                 "inference_extension",
+		dispatchedCountPattern: regexp.MustCompile(`(?m)^inference_extension_flow_control_request_queue_duration_seconds_count\{([^}]*)\}\s+([0-9.e+-]+)$`),
+		poolSaturationPattern:  regexp.MustCompile(`(?m)^inference_extension_flow_control_pool_saturation\{[^}]*\}\s+([0-9.e+-]+)$`),
+	},
+}
+
+func findEPPDispatchedCountMatches(metrics string) (eppMetricFamily, [][]string) {
+	for _, family := range eppMetricFamilies {
+		matches := family.dispatchedCountPattern.FindAllStringSubmatch(metrics, -1)
+		if len(matches) > 0 {
+			return family, matches
+		}
+	}
+	return eppMetricFamily{}, nil
+}
+
+func findEPPPoolSaturationMatch(metrics string) ([]string, bool) {
+	for _, family := range eppMetricFamilies {
+		if match := family.poolSaturationPattern.FindStringSubmatch(metrics); match != nil {
+			return match, true
+		}
+	}
+	return nil, false
+}
 
 func assertEPPDispatchedDelta(
 	t *testing.T,
@@ -606,10 +642,8 @@ func getEPPDispatchedCount(t *testing.T, deployment string) float64 {
 	return count
 }
 
-// EPP flow-control outcomes for the batch band, as labelled on
-// llm_d_epp_flow_control_request_queue_duration_seconds_count.
-// Each maps to the status the EPP answers with (GIE v1.5.0
-// requestcontrol/admission.go translateFlowControlOutcome).
+// EPP flow-control outcomes for the batch band, as labelled on the Router
+// metric or its legacy GIE equivalent.
 const (
 	eppOutcomeDispatched       = "Dispatched"
 	eppOutcomeEvictedTTL       = "EvictedTTL"       // 503 "request timed out in queue"
@@ -636,8 +670,9 @@ func getEPPOutcomes(t *testing.T, deployment, priority string) map[string]float6
 	t.Helper()
 
 	metrics := scrapeEPPMetrics(t, deployment)
+	_, matches := findEPPDispatchedCountMatches(metrics)
 	outcomes := make(map[string]float64)
-	for _, match := range eppDispatchedCountPattern.FindAllStringSubmatch(metrics, -1) {
+	for _, match := range matches {
 		labels := match[1]
 		if !strings.Contains(labels, fmt.Sprintf(`priority=%q`, priority)) {
 			continue
@@ -667,8 +702,6 @@ func shedCount(outcomes map[string]float64) float64 {
 	return total
 }
 
-var eppPoolSaturationPattern = regexp.MustCompile(`(?m)^llm_d_epp_flow_control_pool_saturation\{[^}]*\}\s+([0-9.e+-]+)$`)
-
 // waitForEPPSaturation polls until the EPP's flow-control pool saturation
 // gauge exceeds 1 (the pool is past the configured queue-depth threshold).
 func waitForEPPSaturation(t *testing.T, deployment string, timeout time.Duration) {
@@ -677,7 +710,7 @@ func waitForEPPSaturation(t *testing.T, deployment string, timeout time.Duration
 	deadline := time.Now().Add(timeout)
 	var last float64
 	for time.Now().Before(deadline) {
-		if match := eppPoolSaturationPattern.FindStringSubmatch(scrapeEPPMetrics(t, deployment)); match != nil {
+		if match, ok := findEPPPoolSaturationMatch(scrapeEPPMetrics(t, deployment)); ok {
 			value, err := strconv.ParseFloat(match[1], 64)
 			if err != nil {
 				t.Fatalf("failed to parse pool saturation for %s: %v", deployment, err)
@@ -762,7 +795,7 @@ func getEPPDispatchedCountAndSample(t *testing.T, deployment string) (float64, s
 	t.Helper()
 
 	metrics := scrapeEPPMetrics(t, deployment)
-	matches := eppDispatchedCountPattern.FindAllStringSubmatch(metrics, -1)
+	family, matches := findEPPDispatchedCountMatches(metrics)
 	if len(matches) == 0 {
 		return 0, truncateLog(metrics, 1000)
 	}
@@ -780,7 +813,7 @@ func getEPPDispatchedCountAndSample(t *testing.T, deployment string) (float64, s
 		}
 		total += value
 		lines = append(lines,
-			fmt.Sprintf("llm_d_epp_flow_control_request_queue_duration_seconds_count{%s} %s", labels, match[2]))
+			fmt.Sprintf("%s_flow_control_request_queue_duration_seconds_count{%s} %s", family.prefix, labels, match[2]))
 	}
 	if len(lines) == 0 {
 		return 0, truncateLog(metrics, 1000)
@@ -851,7 +884,7 @@ func getProcessorConfigObjective(t *testing.T, model string) string {
 }
 
 // resolveExpectedObjective returns the inference objective value that the
-// processor should set for the given model. In GIE mode the objective is
+// processor should set for the given model. In per-model EPP mode the objective is
 // per-model ("<prefix>-<model>"), otherwise it is the prefix alone.
 // TEST_INFERENCE_OBJECTIVE overrides auto-detection.
 func resolveExpectedObjective(t *testing.T, model string) string {

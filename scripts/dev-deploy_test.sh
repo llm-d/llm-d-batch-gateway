@@ -113,7 +113,7 @@ if [[ "${1:-}" == "--case" ]]; then
         require_log "kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/${GIE_VERSION}/config/crd/bases/inference.networking.k8s.io_inferencepools.yaml"
         require_log "kubectl apply -f ${expected_router_crd_base}/llm-d.ai_inferenceobjectives.yaml"
         require_log "kubectl apply -f ${expected_router_crd_base}/llm-d.ai_inferencemodelrewrites.yaml"
-        require_log '--set router.monitoring.prometheus.auth.enabled=false --set router.proxy.configMap.name=envoy-sim-model'
+        require_log '--set router.monitoring.prometheus.auth.enabled=false --set router.proxy.presets.envoy.configMap.name=envoy-sim-model'
         require_log '--set router.modelServers.matchLabels.app=vllm-sim --set router.epp.resources.requests.cpu=100m'
         exit
     fi
@@ -244,7 +244,7 @@ assert_no_log 'helm upgrade batch-gateway '
 run_case 'router EPP OCI wiring' ok GIE_TEST_MODE=oci
 run_case 'router EPP local checkout wiring' ok GIE_TEST_MODE=local
 
-run_case 'sync GIE' ok ENABLE_DISPATCHER=false ENABLE_GIE=true
+run_case 'sync Router EPP' ok ENABLE_DISPATCHER=false ENABLE_GIE=true
 assert_log 'processor.config.dispatchMode=sync'
 assert_log 'processor.config.modelGateways.sim-model.url=http://epp-sim-model-epp.default.svc.cluster.local:8081'
 assert_log 'processor.config.modelGateways.sim-model-b.url=http://epp-sim-model-b-epp.default.svc.cluster.local:8081'

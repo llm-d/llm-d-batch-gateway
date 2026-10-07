@@ -1,6 +1,6 @@
 # Flow Control Setup for Batch and Interactive Inference
 
-This guide describes how to configure the Gateway API Inference Extension (GIE) flow control system and the Batch Gateway system to efficiently support both interactive (online) and batch (offline) inference workloads on shared infrastructure.
+This guide describes how to configure llm-d Router flow control and Batch Gateway to efficiently support both interactive (online) and batch (offline) inference workloads on shared infrastructure.
 
 ## Goal
 
@@ -11,7 +11,7 @@ This guide describes how to configure the Gateway API Inference Extension (GIE) 
 
 ## How Flow Control Works
 
-GIE's flow control is a sharded queuing and dispatch engine that sits between the llm-d Router and the model servers. When the `flowControl` feature gate is enabled, all inference requests pass through a three-tier dispatch hierarchy:
+llm-d Router's flow control is a sharded queuing and dispatch engine that sits between the EPP and model servers. When the `flowControl` feature gate is enabled, all inference requests pass through a three-tier dispatch hierarchy:
 
 1. **Priority Band Selection** -- Requests are assigned to priority bands by numerical level. Higher-priority bands are dispatched first; lower bands are served only when higher bands are empty.
 2. **Fairness Policy** -- Within a priority band, a fairness policy selects which flow (logical grouping of requests) to serve next. Options are `round-robin` (prevents starvation) or `global-strict` (maximizes throughput).
@@ -19,7 +19,7 @@ GIE's flow control is a sharded queuing and dispatch engine that sits between th
 
 A **saturation detector** monitors backend load and applies head-of-line blocking when saturation reaches 1.0 -- pausing all dispatch until capacity becomes available. Higher-priority bands resume first.
 
-For full details on GIE flow control, see the [Flow Control Configuration Guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/flow-control/#configuration-guide) and the [EndpointPickerConfig Reference](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/#flow-control-configuration).
+For full details, see the [llm-d Router flow-control guide](https://github.com/llm-d/llm-d-router/blob/main/pkg/epp/flowcontrol/README.md) and [flow-control architecture](https://github.com/llm-d/llm-d-router/blob/main/docs/architecture.md#flowcontrol).
 
 ## Recommended Flow Control Configuration
 
@@ -30,11 +30,11 @@ For full details on GIE flow control, see the [Flow Control Configuration Guide]
 |Interactive|100|Interactive requests|round-robin|fcfs|Low latency, fair across tenants|
 |Batch|-1|Batch requests|global-strict|slo-deadline|Sheddable; maximizes throughput, dispatches by SLO urgency|
 
-**Why this works:** When the backend is not saturated, both bands dispatch freely. When saturation reaches 1.0 and head-of-line blocking activates, the priority hierarchy ensures interactive requests (priority 100) are dispatched before batch requests (priority -1). Because batch requests have negative priority, they are **sheddable** — GIE rejects them immediately at admission when the system is saturated, instead of queuing them. Batch dispatch resumes as soon as saturation drops. Interactive requests without an `InferenceObjective` header default to priority 0 and are still protected, since they outrank the -1 batch band. If batch requests are queued but saturation persists, they are evicted when their TTL expires.
+**Why this works:** When the backend is not saturated, both bands dispatch freely. When saturation reaches 1.0 and head-of-line blocking activates, the priority hierarchy ensures interactive requests (priority 100) are dispatched before batch requests (priority -1). Because batch requests have negative priority, they are **sheddable** — the Router EPP rejects them immediately at admission when the system is saturated, instead of queuing them. Batch dispatch resumes as soon as saturation drops. Interactive requests without an `InferenceObjective` header default to priority 0 and are still protected, since they outrank the -1 batch band. If batch requests are queued but saturation persists, they are evicted when their TTL expires.
 
-**Why sheddable (negative priority) for batch:** With non-negative priority, batch requests would queue inside GIE during saturation — consuming queue memory and likely getting evicted by TTL anyway. Shedding rejects them early and lets the batch processor handle backoff, which it's already designed to do. The processor sends a fresh `x-slo-ttft-ms` on each retry, so retried requests are re-prioritized correctly by SLO urgency when they're eventually admitted.
+**Why sheddable (negative priority) for batch:** With non-negative priority, batch requests would queue inside the Router EPP during saturation — consuming queue memory and likely getting evicted by TTL anyway. Shedding rejects them early and lets the batch processor handle backoff, which it's already designed to do. The processor sends a fresh `x-slo-ttft-ms` on each retry, so retried requests are re-prioritized correctly by SLO urgency when they're eventually admitted.
 
-**SLO-deadline ordering for batch:** The batch band uses `slo-deadline-ordering-policy`, which orders requests by their SLO deadline (`ReceivedTimestamp + x-slo-ttft-ms`), ensuring inference requests of jobs closer to their completion deadline are dispatched first. See [SLO Deadline Ordering Policy](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/#slodeadlineorderingpolicy).
+**SLO-deadline ordering for batch:** The batch band uses `slo-deadline-ordering-policy`, which orders requests by their SLO deadline (`ReceivedTimestamp + x-slo-ttft-ms`), ensuring inference requests of jobs closer to their completion deadline are dispatched first. See the [Router SLO Deadline Ordering Policy](https://github.com/llm-d/llm-d-router/blob/main/pkg/epp/framework/plugins/flowcontrol/ordering/slodeadline/README.md).
 
 **FCFS ordering for interactive:** Interactive requests typically don't carry `x-slo-ttft-ms` headers, so `slo-deadline-ordering-policy` would assign them all a far-future deadline — effectively degrading to FCFS with extra overhead. FCFS also provides predictable arrival-order dispatch. If interactive clients do send SLO headers (e.g., latency-sensitive API tiers), consider switching the interactive band to `slo-deadline` as well.
 
@@ -48,7 +48,7 @@ kind: EndpointPickerConfig
 featureGates:
   - "flowControl"
 
-# schedulingProfiles is omitted — GIE auto-populates a default profile.
+# schedulingProfiles is omitted — llm-d Router auto-populates a default profile.
 
 plugins:
   - type: round-robin-fairness-policy
@@ -89,13 +89,13 @@ flowControl:
     fairnessPolicyRef: global-strict-fairness-policy
     orderingPolicyRef: fcfs-ordering-policy
 
-saturationDetector:
-  pluginRef: utilization-detector
+  saturationDetector:
+    pluginRef: utilization-detector
 ```
 
 ### How Requests Get Assigned to Bands
 
-Flow control assigns requests to priority bands based on the `InferenceObjective` Kubernetes CRD referenced by each request. The request carries the CRD name in the `x-gateway-inference-objective` header, and GIE looks up the corresponding `InferenceObjective` resource to determine the priority band.
+Flow control assigns requests to priority bands based on the `InferenceObjective` Kubernetes CRD referenced by each request. The request carries the CRD name in the `x-gateway-inference-objective` header, and the Router EPP looks up the corresponding `InferenceObjective` resource to determine the priority band.
 
 **Setup:**
 
@@ -134,9 +134,9 @@ spec:
 
 Batch Gateway sets the following flow-control headers on each inference request:
 
-- **`x-slo-ttft-ms`**: Remaining milliseconds until the batch job's SLO deadline. GIE's `slo-deadline-ordering-policy` reads this header to order batch requests by urgency within the batch priority band.
+- **`x-slo-ttft-ms`**: Remaining milliseconds until the batch job's SLO deadline. The Router EPP's `slo-deadline-ordering-policy` reads this header to order batch requests by urgency within the batch priority band.
 - **`x-gateway-inference-objective`**: Name of the `InferenceObjective` CRD that determines the priority band. Only sent when `inference_objective` is configured on the gateway (see below).
-- **`x-gateway-inference-fairness-id`**: Tenant identifier for per-tenant fairness within a priority band. Automatically set to the job's tenant ID when it is non-empty. GIE uses this header to group requests into separate flows so that a `round-robin` fairness policy can schedule them fairly.
+- **`x-gateway-inference-fairness-id`**: Tenant identifier for per-tenant fairness within a priority band. Automatically set to the job's tenant ID when it is non-empty. The Router EPP uses this header to group requests into separate flows so that a `round-robin` fairness policy can schedule them fairly.
 
 **Note:** The recommended batch band configuration above uses `global-strict` fairness, which ignores flow boundaries and maximizes throughput. The fairness header only has effect if operators switch the batch band's fairness policy to `round-robin`.
 
@@ -171,7 +171,7 @@ The `inference_objective` setting controls which `InferenceObjective` CRD name i
 
 ```yaml
 global_inference_gateway:
-  url: "http://gie-epp:8081"
+  url: "http://epp:8081"
   inference_objective: "batch-sheddable"
 ```
 
@@ -180,10 +180,10 @@ global_inference_gateway:
 ```yaml
 model_gateways:
   "model-a":
-    url: "http://gie-a-epp:8081"
+    url: "http://epp-a:8081"
     inference_objective: "batch-sheddable-a"  # references pool-a
   "model-b":
-    url: "http://gie-b-epp:8081"
+    url: "http://epp-b:8081"
     inference_objective: "batch-sheddable-b"  # references pool-b
 ```
 
@@ -192,23 +192,23 @@ model_gateways:
 ```yaml
 model_gateways:
   "model-a":
-    url: "http://gie-shared-epp:8081"
+    url: "http://shared-epp:8081"
     inference_objective: "batch-sheddable"
   "model-b":
-    url: "http://gie-shared-epp:8081"
+    url: "http://shared-epp:8081"
     inference_objective: "batch-sheddable"
   "model-c":
-    url: "http://gie-c-epp:8081"
+    url: "http://epp-c:8081"
     inference_objective: "batch-sheddable-c"
 ```
 
 #### Key Considerations
 
-- **`request_timeout`**: With flow control enabled, requests may spend time in the GIE queue before reaching the backend. Set this high enough to accommodate queuing time plus inference time. 5 minutes is a reasonable starting point.
-- **`max_retries` and `max_backoff`**: When the system is saturated, GIE sheds batch requests: a queued request whose TTL expires gets HTTP 503 ("request timed out in queue"), and a request that finds its priority band's byte budget full gets HTTP 429. Retry backoff slows resubmission pressure, while AIMD separately lowers per-endpoint concurrency (`aimd.backoff_factor`) and later raises it gradually (`aimd.additive_increase`) as successes accumulate.
-- **AIMD with flow control**: Flow control decides queueing/shedding priority in GIE, and AIMD controls how aggressively the processor feeds each endpoint. Together they provide two layers of backpressure response: Router-side admission/shedding plus processor-side concurrency adaptation. Set `aimd.enabled: false` to use fixed concurrency without adaptive behavior.
+- **`request_timeout`**: With flow control enabled, requests may spend time in the Router EPP queue before reaching the backend. Set this high enough to accommodate queuing time plus inference time. 5 minutes is a reasonable starting point.
+- **`max_retries` and `max_backoff`**: When the system is saturated, the Router EPP sheds batch requests: a queued request whose TTL expires gets HTTP 503 ("request timed out in queue"), and a request that finds its priority band's byte budget full gets HTTP 429. Retry backoff slows resubmission pressure, while AIMD separately lowers per-endpoint concurrency (`aimd.backoff_factor`) and later raises it gradually (`aimd.additive_increase`) as successes accumulate.
+- **AIMD with flow control**: Flow control decides queueing/shedding priority in the Router EPP, and AIMD controls how aggressively the processor feeds each endpoint. Together they provide two layers of backpressure response: Router-side admission/shedding plus processor-side concurrency adaptation. Set `aimd.enabled: false` to use fixed concurrency without adaptive behavior.
 - **`concurrency.global`**: A hard ceiling across all endpoints. When AIMD is enabled, per-endpoint limits self-regulate via backpressure, so the global limit mostly acts as a burst ceiling. Size it high enough to avoid being the first bottleneck (e.g., `perEndpoint × expected_endpoint_count × 2`).
-- **`concurrency.perEndpoint`**: Sizing depends on backend topology. For a single vLLM instance, 10–20 is reasonable. For a GIE/EPP pool routing to N replicas, set it higher (e.g., `20 × N`) since the pool absorbs more concurrency. With AIMD enabled, starting high is safer — AIMD backs off quickly on 429s but recovers slowly at `+additiveIncrease` per window. Starting too low means underutilizing the backend until AIMD crawls up.
+- **`concurrency.perEndpoint`**: Sizing depends on backend topology. For a single vLLM instance, 10–20 is reasonable. For a Router EPP pool routing to N replicas, set it higher (e.g., `20 × N`) since the pool absorbs more concurrency. With AIMD enabled, starting high is safer — AIMD backs off quickly on 429s but recovers slowly at `+additiveIncrease` per window. Starting too low means underutilizing the backend until AIMD crawls up.
 - **`aimd.min`**: The minimum concurrency sustained per endpoint under heavy backpressure — AIMD will never reduce below this value, even under sustained 429s. Too high and AIMD cannot back off enough when the backend is genuinely overloaded. Too low and a few 429s starve the endpoint, with recovery very slow at `+additiveIncrease` per window. The default of 5 ensures the processor always keeps a baseline level of requests in flight per endpoint.
 
 #### Helm Values
@@ -222,7 +222,7 @@ processor:
       global: 100
       perEndpoint: 20
     globalInferenceGateway:
-      url: "http://gie-epp:8081"
+      url: "http://epp:8081"
       inferenceObjective: "batch-sheddable"
       requestTimeout: "5m"
       maxRetries: 3
@@ -240,14 +240,14 @@ processor:
       perEndpoint: 20
     modelGateways:
       "model-a":
-        url: "http://gie-a-epp:8081"
+        url: "http://epp-a:8081"
         inferenceObjective: "batch-sheddable-a"
         requestTimeout: "5m"
         maxRetries: 3
         initialBackoff: "2s"
         maxBackoff: "30s"
       "model-b":
-        url: "http://gie-b-epp:8081"
+        url: "http://epp-b:8081"
         inferenceObjective: "batch-sheddable-b"
         requestTimeout: "5m"
         maxRetries: 3
@@ -302,8 +302,8 @@ Key metrics to watch when running batch and interactive workloads together:
 | 503/429 response rate | Batch Gateway metrics | High 503 (queue TTL) or 429 (band capacity) rate = flow control is shedding batch |
 | Batch job completion rate | Batch Gateway metrics | Should meet SLO deadlines under normal load |
 
-> **Metric naming:** the table lists the names used by llm-d Router v0.8.0
-> and earlier. Router v0.9.0-v0.10.x also emits the same signals under
+> **Metric naming:** Router v0.8.0 and earlier used the legacy
+> `inference_extension_*` names. Router v0.9.0-v0.10.x also emits the current signals under
 > `llm_d_epp_flow_control_pool_saturation`,
 > `llm_d_epp_flow_control_queue_size`, and
 > `llm_d_epp_flow_control_request_queue_duration_seconds`. Router v0.11.0+
@@ -311,9 +311,9 @@ Key metrics to watch when running batch and interactive workloads together:
 
 ## Summary
 
-The combination of GIE flow control and Batch Gateway provides automatic, infrastructure-level workload balancing:
+The combination of llm-d Router flow control and Batch Gateway provides automatic, infrastructure-level workload balancing:
 
-- **GIE flow control** handles admission, queuing, and dispatch ordering based on priority and SLO deadlines.
+- **llm-d Router flow control** handles admission, queuing, and dispatch ordering based on priority and SLO deadlines.
 - **Batch Gateway** communicates priority via `x-gateway-inference-objective`, urgency via `x-slo-ttft-ms`, and handles backpressure via retries.
 - **Priority bands** ensure interactive traffic always takes precedence.
 - **SLO-deadline ordering** ensures the most urgent batch requests are served first within the batch band.

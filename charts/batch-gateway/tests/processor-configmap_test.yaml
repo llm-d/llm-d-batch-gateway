@@ -362,14 +362,14 @@ tests:
       processor.config.dispatchMode: sync
       processor.config.modelGateways:
         "llama-3":
-          url: "http://gie-a-epp:8081"
+          url: "http://epp-a:8081"
           inferenceObjective: "batch-sheddable-a"
           requestTimeout: "5m"
           maxRetries: 3
           initialBackoff: "1s"
           maxBackoff: "60s"
         "mistral":
-          url: "http://gie-b-epp:8081"
+          url: "http://epp-b:8081"
           inferenceObjective: "batch-sheddable-b"
           requestTimeout: "2m"
           maxRetries: 1

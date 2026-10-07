@@ -19,7 +19,7 @@ set -euo pipefail
 #   ROUTER_EPP_TAG     — EPP image tag, used with ROUTER_REPO (default: main)
 #   ROUTER_EPP_REGISTRY — EPP image registry, used with ROUTER_REPO (default: ghcr.io)
 #   ROUTER_EPP_REPOSITORY — EPP image path, used with ROUTER_REPO (default: llm-d/llm-d-router-endpoint-picker)
-#   LLM_D_TAG          — git tag for llm-d guide values (default: v0.7.0)
+#   LLM_D_TAG          — git tag for llm-d guide values (default: v0.10.0)
 #   NAMESPACE          — override auto-generated namespace (default: batch-bench-s${SCENARIO})
 #   MODEL              — model to serve (default: Qwen/Qwen3-8B)
 #   GUIDE_NAME         — inference pool name (default: optimized-baseline)
@@ -45,6 +45,7 @@ else
 fi
 GUIDE_NAME="${GUIDE_NAME:-optimized-baseline}"
 NAMESPACE="${NAMESPACE:-batch-bench-s${SCENARIO}}"
+LLM_D_REPO="${LLM_D_REPO:-}"
 # The configs here use the llm-d.ai API group (EndpointPickerConfig llm-d.ai/v1),
 # which is only on llm-d-router main until the 1.0.0 release. The router publishes
 # its main build as chart version "v0" and image tag "main".
@@ -53,7 +54,7 @@ ROUTER_CHART_VERSION="${ROUTER_CHART_VERSION:-v0}"
 ROUTER_EPP_TAG="${ROUTER_EPP_TAG:-main}"
 ROUTER_EPP_REPOSITORY="${ROUTER_EPP_REPOSITORY:-llm-d/llm-d-router-endpoint-picker}"
 ROUTER_EPP_REGISTRY="${ROUTER_EPP_REGISTRY:-ghcr.io}"
-LLM_D_TAG="${LLM_D_TAG:-v0.7.0}"
+LLM_D_TAG="${LLM_D_TAG:-v0.10.0}"
 SIM_IMAGE="${SIM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:latest}"
 SIM_TTFT="${SIM_TTFT:-50ms}"
 SIM_ITL="${SIM_ITL:-20ms}"
@@ -95,8 +96,8 @@ values_file_for_scenario() {
     esac
 }
 
-# Verify that the deployed EPP comes from llm-d-router, not the retired GIE
-# inference scheduler image. The OCI chart owns its image defaults; local
+# Verify that the deployed EPP comes from llm-d-router, not the retired
+# inference-scheduler image. The OCI chart owns its image defaults; local
 # router checkouts use ROUTER_EPP_REPOSITORY above.
 verify_router_deployment() {
     local epp_release="$1"
@@ -447,15 +448,42 @@ else
     else
         # OCI mode (default)
         log "  Using OCI chart: ghcr.io/llm-d/charts/llm-d-router-gateway:${ROUTER_CHART_VERSION}"
-        log "  Using llm-d guide values from tag: ${LLM_D_TAG}"
+        if [ -n "${LLM_D_REPO}" ]; then
+            log "  Using llm-d guide values from local repo: ${LLM_D_REPO}"
+        else
+            log "  Using llm-d guide values from tag: ${LLM_D_TAG}"
+        fi
 
-        # Download guide values from pinned llm-d tag
+        # Stage guide values from the local checkout or pinned llm-d tag.
         LLM_D_VALUES_DIR=$(mktemp -d)
         trap "rm -rf ${LLM_D_VALUES_DIR}" EXIT
-        local_base="https://raw.githubusercontent.com/llm-d/llm-d/${LLM_D_TAG}"
-        curl -sL "${local_base}/guides/recipes/router/base.values.yaml" -o "${LLM_D_VALUES_DIR}/base.values.yaml"
-        curl -sL "${local_base}/guides/${GUIDE_NAME}/router/${GUIDE_NAME}.values.yaml" -o "${LLM_D_VALUES_DIR}/guide.values.yaml"
-        curl -sL "${local_base}/guides/recipes/router/features/monitoring.values.yaml" -o "${LLM_D_VALUES_DIR}/monitoring.values.yaml"
+        if [ -n "${LLM_D_REPO}" ]; then
+            local_values=(
+                "${LLM_D_REPO}/guides/recipes/router/base.values.yaml"
+                "${LLM_D_REPO}/guides/${GUIDE_NAME}/router/${GUIDE_NAME}.values.yaml"
+                "${LLM_D_REPO}/guides/recipes/router/features/monitoring.values.yaml"
+            )
+            for values_path in "${local_values[@]}"; do
+                if [ ! -f "${values_path}" ]; then
+                    echo "ERROR: missing llm-d values file: ${values_path}" >&2
+                    exit 1
+                fi
+            done
+            cp "${local_values[0]}" "${LLM_D_VALUES_DIR}/base.values.yaml"
+            cp "${local_values[1]}" "${LLM_D_VALUES_DIR}/guide.values.yaml"
+            cp "${local_values[2]}" "${LLM_D_VALUES_DIR}/monitoring.values.yaml"
+        else
+            local_base="https://raw.githubusercontent.com/llm-d/llm-d/${LLM_D_TAG}"
+            curl --fail --silent --show-error --location \
+                "${local_base}/guides/recipes/router/base.values.yaml" \
+                -o "${LLM_D_VALUES_DIR}/base.values.yaml"
+            curl --fail --silent --show-error --location \
+                "${local_base}/guides/${GUIDE_NAME}/router/${GUIDE_NAME}.values.yaml" \
+                -o "${LLM_D_VALUES_DIR}/guide.values.yaml"
+            curl --fail --silent --show-error --location \
+                "${local_base}/guides/recipes/router/features/monitoring.values.yaml" \
+                -o "${LLM_D_VALUES_DIR}/monitoring.values.yaml"
+        fi
 
         ${H} upgrade --install "${GUIDE_NAME}" \
             oci://ghcr.io/llm-d/charts/llm-d-router-gateway \

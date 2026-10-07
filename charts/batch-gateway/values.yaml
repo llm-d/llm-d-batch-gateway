@@ -324,7 +324,7 @@ processor:
       # Initial (and maximum) concurrency per inference endpoint. Sizing depends
       # on what sits behind the endpoint URL:
       #   - Single vLLM instance: 10–20 is reasonable
-      #   - GIE/EPP pool routing to N replicas: can be much higher (e.g., 20 × N)
+      #   - Router EPP pool routing to N replicas: can be much higher (e.g., 20 × N)
       # With AIMD enabled, starting high is safer — AIMD backs off quickly on 429s
       # but recovers slowly at +additiveIncrease per window.
       perEndpoint: 10
@@ -389,8 +389,8 @@ processor:
     # where each model routes through a separate InferencePool with its own priority band.
     # modelGateways:
     #   "llama-3":
-    #     url: "http://gie-a-epp:8081"
-    #     inferenceObjective: "batch-sheddable-a"   # references gie-a pool
+    #     url: "http://epp-a:8081"
+    #     inferenceObjective: "batch-sheddable-a"   # references EPP pool A
     #     requestTimeout: "5m"
     #     maxRetries: 3
     #     initialBackoff: "1s"
@@ -400,8 +400,8 @@ processor:
     #     tlsClientCertFile: ""
     #     tlsClientKeyFile: ""
     #   "mistral":
-    #     url: "http://gie-b-epp:8081"
-    #     inferenceObjective: "batch-sheddable-b"   # references gie-b pool
+    #     url: "http://epp-b:8081"
+    #     inferenceObjective: "batch-sheddable-b"   # references EPP pool B
     #     requestTimeout: "2m"
     #     maxRetries: 1
     # How modelGateways lookup keys are derived from a request model ID.
@@ -420,7 +420,7 @@ processor:
     #   models:
     #     "llama-3":
     #       inferencePoolName: "pool-a"
-    #       inferenceObjective: "batch-sheddable-a"  # optional: GIE InferenceObjective CRD name
+    #       inferenceObjective: "batch-sheddable-a"  # optional: Router InferenceObjective CRD name
     #       requestQueueName: "llm-d-async:requests:pool-a"  # optional: explicit request queue
     #       resultQueueName: "llm-d-async:results:pool-a"    # optional: explicit result queue base
     #     "mistral":

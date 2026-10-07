@@ -23,5 +23,6 @@ router:
           - type: concurrency-detector
             parameters:
               maxConcurrency: 50
-        saturationDetector:
-          pluginRef: concurrency-detector
+        flowControl:
+          saturationDetector:
+            pluginRef: concurrency-detector

@@ -49,26 +49,27 @@ GC_IMG="${GC_IMG:-ghcr.io/llm-d/batch-gateway-gc:${IMAGE_TAG}}"
 # USE_KIND=false → use existing kubeconfig context (OpenShift / Kubernetes)
 USE_KIND="${USE_KIND:-true}"
 
-# ── GIE (Gateway API Inference Extension) flow control support ────────────────
-# Set ENABLE_GIE=true to deploy per-model EPP (standalone mode) in front of
+# ── Router EPP flow control support ───────────────────────────────────────────
+# Set ENABLE_GIE=true (legacy flag name) to deploy per-model Router EPPs
+# (standalone mode) in front of
 # each vllm-sim instance; processor routes through EPP and sends
 # x-gateway-inference-objective / x-slo-ttft-ms headers.
 #
 # Naming contract (referenced by dev-deploy, dev-clean, and e2e tests):
 #   EPP Helm release:      ${GIE_EPP_RELEASE}-${model}          e.g. epp-sim-model
 #   EPP deployment/service: ${GIE_EPP_RELEASE}-${model}-epp     e.g. epp-sim-model-epp
-#   InferencePool name:     ${GIE_EPP_RELEASE}-${model}          (created by Helm chart)
-#   InferenceObjective:     batch-sheddable-${model}             (GIE mode)
-#                           batch-sheddable                      (non-GIE mode)
+#   InferencePool name:     ${GIE_EPP_RELEASE}-${model}          (GAIE CRD)
+#   InferenceObjective:     batch-sheddable-${model}             (per-model EPP mode)
+#                           batch-sheddable                      (shared EPP mode)
 #   Managed-by label:       app.kubernetes.io/managed-by=batch-gateway-dev
 ENABLE_GIE="${ENABLE_GIE:-false}"
 
 # ── Async dispatcher (llm-d-async) support ──────────────────────────────────
 # Use sync dispatch by default. Set ENABLE_DISPATCHER=true to deploy the
-# llm-d-async dev fixtures; sync dispatch is required for GIE and custom layouts.
+# llm-d-async dev fixtures; sync dispatch is required for per-model EPPs and custom layouts.
 # Set DISPATCHER_SOURCE to a local llm-d-async checkout to build from source.
 ENABLE_DISPATCHER="${ENABLE_DISPATCHER:-false}"
-# EPP comes from the llm-d-router standalone chart. InferencePool CRD comes
+# EPP comes from the llm-d-router standalone chart. The InferencePool CRD comes
 # from GAIE; InferenceObjective and InferenceModelRewrite CRDs come from
 # llm-d-router. Chart "v0" is built from router main (llm-d.ai/v1 is only there
 # until the 1.0.0 release). TODO: switch to v1.0.0 once it is released.
@@ -78,6 +79,7 @@ ROUTER_CRD_REF="${ROUTER_CHART_VERSION}"
 if [ "${ROUTER_CRD_REF}" = "v0" ]; then
     ROUTER_CRD_REF="main"
 fi
+# Legacy variable name retained; this is the GAIE InferencePool CRD version.
 GIE_VERSION="${GIE_VERSION:-v1.6.2}"
 GIE_EPP_RELEASE="${GIE_EPP_RELEASE:-epp}"
 GIE_OBJECTIVE_PREFIX="${GIE_OBJECTIVE_PREFIX:-batch-sheddable}"
@@ -108,7 +110,7 @@ check_prerequisites() {
     esac
     if [ "${ENABLE_DISPATCHER}" = "true" ]; then
         if [ "${ENABLE_GIE}" = "true" ]; then
-            die "ENABLE_GIE=true cannot be combined with ENABLE_DISPATCHER=true. Use 'make dev-deploy-gie' or ENABLE_DISPATCHER=false ENABLE_GIE=true make dev-deploy for sync GIE."
+            die "ENABLE_GIE=true cannot be combined with ENABLE_DISPATCHER=true. Use 'make dev-deploy-gie' or ENABLE_DISPATCHER=false ENABLE_GIE=true make dev-deploy for sync Router EPP."
         fi
         # These restrictions belong to the fixed dev/E2E fixtures, not the chart.
         local setting
@@ -955,7 +957,7 @@ EOF
     log "vllm-vcr installed. Service: ${sim_name}:8000 (control API :${VLLM_SIM_CONTROL_PORT})"
 }
 
-# ── GIE (Gateway API Inference Extension) ────────────────────────────────────
+# ── Router EPP and GAIE InferencePool support ─────────────────────────────────
 
 install_gie_crds() {
     step "Installing InferencePool, InferenceObjective and InferenceModelRewrite CRDs..."
@@ -1024,15 +1026,15 @@ router:
             maxBytes: 536870912
             fairnessPolicyRef: global-strict-fairness-policy
             orderingPolicyRef: fcfs-ordering-policy
-        saturationDetector:
-          pluginRef: utilization-detector
+          saturationDetector:
+            pluginRef: utilization-detector
 VALUESEOF
 
     # The Envoy ConfigMap name is fixed by default, so give each release its own.
     local helm_args=(
         --namespace "${NAMESPACE}"
         --set router.monitoring.prometheus.auth.enabled=false
-        --set "router.proxy.configMap.name=envoy-${sim_model}"
+        --set "router.proxy.presets.envoy.configMap.name=envoy-${sim_model}"
         --set "router.modelServers.matchLabels.app=${sim_name}"
         --set router.epp.resources.requests.cpu=100m
         --set router.epp.resources.requests.memory=256Mi
@@ -1100,7 +1102,7 @@ install_batch_gateway() {
     if [ "${ENABLE_GIE}" = "true" ]; then
         vllm_sim_url="http://${GIE_EPP_RELEASE}-${VLLM_SIM_MODEL}-epp.${NAMESPACE}.svc.cluster.local:8081"
         vllm_sim_b_url="http://${GIE_EPP_RELEASE}-${VLLM_SIM_B_MODEL}-epp.${NAMESPACE}.svc.cluster.local:8081"
-        log "GIE enabled: routing both models through per-model EPP instances"
+        log "Router EPP mode enabled: routing both models through per-model EPP instances"
     else
         vllm_sim_url="http://${VLLM_SIM_NAME}.${NAMESPACE}.svc.cluster.local:8000"
         vllm_sim_b_url="http://${VLLM_SIM_B_NAME}.${NAMESPACE}.svc.cluster.local:8000"
@@ -1425,7 +1427,7 @@ print_usage() {
     echo "       - sim-model-b   (vllm-vcr at ${VLLM_SIM_B_NAME}, control API :${VLLM_SIM_CONTROL_PORT})"
     if [ "${ENABLE_GIE}" = "true" ]; then
     echo ""
-    echo "     GIE (flow control) is enabled:"
+    echo "     EPP flow control is enabled:"
     echo "       - Requests route through per-model EPP instances"
     echo "       - Each model has its own InferencePool and InferenceObjective"
     echo "       - InferenceObjectives: interactive-default (priority 100), ${GIE_OBJECTIVE_PREFIX} (priority -1)"

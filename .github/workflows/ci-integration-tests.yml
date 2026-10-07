@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   integration-tests:
-    name: Integration Tests (${{ matrix.file_client_type }}, ${{ matrix.db_client_type }}, ${{ matrix.exchange_client_type }}${{ matrix.enable_gie == 'true' && ', gie' || '' }}${{ matrix.enable_dispatcher == 'true' && ', dispatcher' || '' }})
+    name: Integration Tests (${{ matrix.file_client_type }}, ${{ matrix.db_client_type }}, ${{ matrix.exchange_client_type }}${{ matrix.enable_gie == 'true' && ', epp' || '' }}${{ matrix.enable_dispatcher == 'true' && ', dispatcher' || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
