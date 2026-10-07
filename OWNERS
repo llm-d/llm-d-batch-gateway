@@ -12,6 +12,7 @@ reviewers:
 
 # List of usernames who may use /approve
 approvers:
+  - aneeshkp
   - j-mok-dev
   - lioraron
   - vishbhat
