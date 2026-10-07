@@ -343,6 +343,7 @@ test-postgres:
 	$(GO) test -count=1 -v ./internal/database/postgresql
 	$(GO) test -count=1 -v ./internal/processor/worker
 	$(GO) test -count=1 -v ./internal/apiserver/batch
+	$(GO) test -count=1 -v ./internal/util/clientset
 
 ## test-postgres-local: Run PostgreSQL-backed tests in a disposable Docker or Podman container
 test-postgres-local:
