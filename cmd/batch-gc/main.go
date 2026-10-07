@@ -38,6 +38,7 @@ import (
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/gc/collector"
 	gcconfig "github.com/llm-d/llm-d-batch-gateway/internal/gc/config"
+	"github.com/llm-d/llm-d-batch-gateway/internal/gc/eventpurge"
 	gcmetrics "github.com/llm-d/llm-d-batch-gateway/internal/gc/metrics"
 	"github.com/llm-d/llm-d-batch-gateway/internal/gc/podwatcher"
 	"github.com/llm-d/llm-d-batch-gateway/internal/gc/reconciler"
@@ -123,10 +124,14 @@ func run() error {
 	})
 	g.Go(func() error { return gc.RunLoop(gCtx) })
 	if !cfg.DryRun {
-		if clients.EventGC == nil {
-			return fmt.Errorf("event GC is not configured")
+		if clients.EventPurge == nil {
+			return fmt.Errorf("event purge client is not configured")
 		}
-		g.Go(func() error { return clients.EventGC.Run(gCtx) })
+		purger, err := eventpurge.New(clients.EventPurge, cfg.EventPurge.Interval)
+		if err != nil {
+			return fmt.Errorf("failed to create event purger: %w", err)
+		}
+		g.Go(func() error { return purger.RunLoop(gCtx) })
 	}
 
 	if cfg.Reconciler.Enabled {

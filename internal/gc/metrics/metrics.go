@@ -32,6 +32,8 @@ var (
 	casConflictsTotal     prometheus.Counter
 	staleCleanupTotal     prometheus.Counter
 	errorsTotal           prometheus.Counter
+	eventsPurgedTotal     prometheus.Counter
+	eventPurgeFailures    prometheus.Counter
 )
 
 // InitMetrics creates and registers all reconciler Prometheus metrics.
@@ -81,12 +83,28 @@ func initMetrics() error {
 		},
 	)
 
+	eventPurgeFailures = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "batch_gc_event_purge_failures_total",
+			Help: "Failed event purge attempts",
+		},
+	)
+
+	eventsPurgedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "batch_gc_events_purged_total",
+			Help: "Expired events removed from the batch events table",
+		},
+	)
+
 	for _, c := range []prometheus.Collector{
 		orphansRecoveredTotal,
 		cycleDuration,
 		casConflictsTotal,
 		staleCleanupTotal,
 		errorsTotal,
+		eventsPurgedTotal,
+		eventPurgeFailures,
 	} {
 		if err := prometheus.Register(c); err != nil {
 			return err
@@ -134,5 +152,19 @@ func RecordStaleCleanup(count int) {
 func RecordErrors(count int) {
 	if count > 0 {
 		errorsTotal.Add(float64(count))
+	}
+}
+
+// RecordEventsPurged adds the given count to the events purged counter.
+func RecordEventsPurged(count int64) {
+	if count > 0 {
+		eventsPurgedTotal.Add(float64(count))
+	}
+}
+
+// RecordEventPurgeFailures adds the given count to the event purge failures counter.
+func RecordEventPurgeFailures(count int) {
+	if count > 0 {
+		eventPurgeFailures.Add(float64(count))
 	}
 }
