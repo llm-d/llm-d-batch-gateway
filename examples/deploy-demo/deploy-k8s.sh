@@ -492,25 +492,25 @@ deploy_llmd_model() {
 create_inference_objectives() {
     step "Creating InferenceObjective resources..."
     kubectl apply -f - <<EOF
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: ${INTERACTIVE_FLOW_CONTROL_OBJECTIVE}
   namespace: ${LLM_NAMESPACE}
 spec:
   priority: 100
-  poolRef:
-    name: ${LLMD_POOL_NAME}
+  poolRefs:
+    - name: ${LLMD_POOL_NAME}
 ---
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: ${BATCH_FLOW_CONTROL_OBJECTIVE}
   namespace: ${LLM_NAMESPACE}
 spec:
   priority: -1
-  poolRef:
-    name: ${LLMD_POOL_NAME}
+  poolRefs:
+    - name: ${LLMD_POOL_NAME}
 EOF
     log "InferenceObjectives created (${INTERACTIVE_FLOW_CONTROL_OBJECTIVE}: priority 100, ${BATCH_FLOW_CONTROL_OBJECTIVE}: priority -1)."
 }

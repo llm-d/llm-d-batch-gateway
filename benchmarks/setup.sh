@@ -130,18 +130,18 @@ verify_router_crds() {
     done
 }
 
-# EndpointPickerConfig uses llm-d.ai/v1; InferenceObjective uses llm-d.ai/v1alpha2.
+# EndpointPickerConfig and InferenceObjective use llm-d.ai/v1.
 verify_router_objectives() {
     local objective api_version
     for objective in interactive-default batch-sheddable; do
         api_version="$(${K} -n "${NAMESPACE}" get \
-            "inferenceobjectives.llm-d.ai/${objective}" -o jsonpath='{.apiVersion}')"
-        if [ "${api_version}" != "llm-d.ai/v1alpha2" ]; then
-            echo "ERROR: InferenceObjective ${objective} uses ${api_version}, expected llm-d.ai/v1alpha2" >&2
+            "inferenceobjectives.v1.llm-d.ai/${objective}" -o jsonpath='{.apiVersion}')"
+        if [ "${api_version}" != "llm-d.ai/v1" ]; then
+            echo "ERROR: InferenceObjective ${objective} uses ${api_version}, expected llm-d.ai/v1" >&2
             exit 1
         fi
     done
-    log "  Verified InferenceObjectives use llm-d.ai/v1alpha2"
+    log "  Verified InferenceObjectives use llm-d.ai/v1"
 }
 
 verify_router_plugin_config() {
@@ -363,25 +363,25 @@ EOF
         # Create InferenceObjectives
         log "  Creating InferenceObjectives"
         ${K} -n "${NAMESPACE}" apply -f - <<EOOBJ
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: interactive-default
 spec:
   priority: 100
-  poolRef:
-    group: inference.networking.k8s.io
-    name: ${epp_release}
+  poolRefs:
+    - group: inference.networking.k8s.io
+      name: ${epp_release}
 ---
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: batch-sheddable
 spec:
   priority: -1
-  poolRef:
-    group: inference.networking.k8s.io
-    name: ${epp_release}
+  poolRefs:
+    - group: inference.networking.k8s.io
+      name: ${epp_release}
 EOOBJ
         verify_router_objectives
         log "  Flow control ready: EPP at ${epp_release}-epp:8081"
@@ -614,25 +614,25 @@ fi
 if [ "${MODE}" != "sim" ] && { [ "${SCENARIO}" = "3" ] || [ "${SCENARIO}" = "4" ]; }; then
     log "Deploying InferenceObjectives for flow control"
     ${K} -n "${NAMESPACE}" apply -f - <<EOF
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: interactive-default
 spec:
   priority: 100
-  poolRef:
-    group: inference.networking.k8s.io
-    name: ${GUIDE_NAME}
+  poolRefs:
+    - group: inference.networking.k8s.io
+      name: ${GUIDE_NAME}
 ---
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: batch-sheddable
 spec:
   priority: -1
-  poolRef:
-    group: inference.networking.k8s.io
-    name: ${GUIDE_NAME}
+  poolRefs:
+    - group: inference.networking.k8s.io
+      name: ${GUIDE_NAME}
 EOF
     verify_router_objectives
     log "  Created InferenceObjective: interactive-default (priority 100)"

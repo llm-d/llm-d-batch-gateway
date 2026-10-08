@@ -102,26 +102,26 @@ Flow control assigns requests to priority bands based on the `InferenceObjective
 1. Create `InferenceObjective` CRDs for each workload class. The CRD (`llm-d.ai_inferenceobjectives.yaml`) comes from llm-d-router, not GAIE:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: interactive-default
 spec:
   priority: 100
-  poolRef:
-    group: inference.networking.k8s.io
-    name: <your-inference-pool>
+  poolRefs:
+    - group: inference.networking.k8s.io
+      name: <your-inference-pool>
 
 ---
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: batch-sheddable
 spec:
   priority: -1
-  poolRef:
-    group: inference.networking.k8s.io
-    name: <your-inference-pool>
+  poolRefs:
+    - group: inference.networking.k8s.io
+      name: <your-inference-pool>
 ```
 
 2. Configure Batch Gateway to reference the batch objective (see [Recommended Batch Gateway Configuration](#recommended-batch-gateway-configuration) below).

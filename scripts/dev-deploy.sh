@@ -1039,6 +1039,8 @@ VALUESEOF
         --set router.epp.resources.requests.cpu=100m
         --set router.epp.resources.requests.memory=256Mi
         --set router.epp.resources.limits.memory=512Mi
+        --set router.proxy.resources.requests.cpu=100m
+        --set router.proxy.resources.requests.memory=128Mi
         --set "router.epp.flags.v=${LOG_VERBOSITY}"
         -f "${values_file}"
     )
@@ -1061,7 +1063,7 @@ create_inference_objectives() {
     for sim_model in "${VLLM_SIM_MODEL}" "${VLLM_SIM_B_MODEL}"; do
         local pool_name="${GIE_EPP_RELEASE}-${sim_model}"
         kubectl apply -f - <<EOF
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: interactive-default-${sim_model}
@@ -1070,11 +1072,11 @@ metadata:
     app.kubernetes.io/managed-by: batch-gateway-dev
 spec:
   priority: 100
-  poolRef:
-    group: inference.networking.k8s.io
-    name: ${pool_name}
+  poolRefs:
+    - group: inference.networking.k8s.io
+      name: ${pool_name}
 ---
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: ${GIE_OBJECTIVE_PREFIX}-${sim_model}
@@ -1083,9 +1085,9 @@ metadata:
     app.kubernetes.io/managed-by: batch-gateway-dev
 spec:
   priority: -1
-  poolRef:
-    group: inference.networking.k8s.io
-    name: ${pool_name}
+  poolRefs:
+    - group: inference.networking.k8s.io
+      name: ${pool_name}
 EOF
     done
 

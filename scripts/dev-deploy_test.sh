@@ -115,6 +115,7 @@ if [[ "${1:-}" == "--case" ]]; then
         require_log "kubectl apply -f ${expected_router_crd_base}/llm-d.ai_inferencemodelrewrites.yaml"
         require_log '--set router.monitoring.prometheus.auth.enabled=false --set router.proxy.presets.envoy.configMap.name=envoy-sim-model'
         require_log '--set router.modelServers.matchLabels.app=vllm-sim --set router.epp.resources.requests.cpu=100m'
+        require_log '--set router.epp.resources.limits.memory=512Mi --set router.proxy.resources.requests.cpu=100m --set router.proxy.resources.requests.memory=128Mi'
         exit
     fi
 
