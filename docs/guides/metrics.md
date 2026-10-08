@@ -107,6 +107,18 @@ increase(batch_reconciler_errors_total{namespace="<release namespace>"}[<window>
 
 **Tuning `for`:** default `5m` avoids paging on a single brief evaluation blip. It does not need to track the reconciler interval.
 
+## Garbage Collector — Event Purge
+
+The GC process periodically purges expired rows from the `batch_events` table (default every 30s, configurable via `event_purge.interval` in the GC config). The purger shares the metrics endpoint above and uses the `batch_gc_` prefix — the going-forward prefix for batch-gc process metrics (the legacy `batch_reconciler_` family predates the collector and purger living in the same binary; it is not renamed for dashboard compatibility).
+
+**Purge Metrics:**
+
+- `batch_gc_events_purged_total` (Counter) - Expired events removed from the batch events table. A persistently zero value alongside a non-empty events table indicates the purge loop is not running (e.g. `dry_run: true`, under which the purger is not started).
+
+- `batch_gc_event_purge_failures_total` (Counter) - Failed event purge attempts. Outcomes that race context cancellation during shutdown are neither logged nor counted, so every increment represents a real purge failure (typically DB connectivity loss).
+
+Note: unlike `batch_reconciler_errors_total`, there is currently no shipped alert rule for `batch_gc_event_purge_failures_total`; watch it on dashboards.
+
 ## Shared (file storage retry client)
 
 Used by components that wrap file storage with retries (`internal/files_store/retryclient/metrics.go`):

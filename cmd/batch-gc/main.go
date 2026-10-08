@@ -127,7 +127,14 @@ func run() error {
 		if clients.EventPurge == nil {
 			return fmt.Errorf("event purge client is not configured")
 		}
-		purger, err := eventpurge.New(clients.EventPurge, cfg.EventPurge.Interval)
+		onPurge := func(purged int64, err error) {
+			if err != nil {
+				gcmetrics.RecordEventPurgeFailures(1)
+				return
+			}
+			gcmetrics.RecordEventsPurged(purged)
+		}
+		purger, err := eventpurge.New(clients.EventPurge, cfg.EventPurge.Interval, onPurge)
 		if err != nil {
 			return fmt.Errorf("failed to create event purger: %w", err)
 		}

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package metrics provides Prometheus instrumentation for the GC reconciler.
+// Package metrics provides Prometheus instrumentation for the batch garbage collector.
 package metrics
 
 import (
@@ -36,7 +36,7 @@ var (
 	eventPurgeFailures    prometheus.Counter
 )
 
-// InitMetrics creates and registers all reconciler Prometheus metrics.
+// InitMetrics creates and registers all batch-gc Prometheus metrics.
 // It is safe to call multiple times; only the first call has effect.
 func InitMetrics() error {
 	initOnce.Do(func() {

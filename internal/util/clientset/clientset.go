@@ -274,9 +274,6 @@ func NewClientset(ctx context.Context, component ucom.Component, opts ...Option)
 				eventClient, err = postgresql.NewPostgresBatchEventProducer(ctx, &cfg.dbCfg.PostgreSQLCfg)
 			case ucom.ComponentGC:
 				cs.EventPurge, err = postgresql.NewPostgresBatchEventPurgeClient(batchDB)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create postgres event purge client: %w", err)
-				}
 			default:
 				return nil, fmt.Errorf("unsupported component for postgres events: %s", component)
 			}

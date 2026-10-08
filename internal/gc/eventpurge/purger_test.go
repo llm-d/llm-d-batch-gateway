@@ -19,43 +19,25 @@ package eventpurge
 import (
 	"context"
 	"errors"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
-
-	"github.com/llm-d/llm-d-batch-gateway/internal/gc/metrics"
 )
-
-// TestMain initializes the shared Prometheus metrics so runOnce can record
-// them; the production binary does this in main before starting the purger.
-func TestMain(m *testing.M) {
-	if err := metrics.InitMetrics(); err != nil {
-		panic(err)
-	}
-	os.Exit(m.Run())
-}
 
 type fakePurgeClient struct {
 	mu     sync.Mutex
 	calls  int
-	purged int64       // returned on each call
-	err    error       // returned on each call
-	onCall func(n int) // optional hook invoked on each call
+	purged int64 // returned on each call
+	err    error // returned on each call
 }
 
 func (f *fakePurgeClient) PurgeExpiredEvents(_ context.Context) (int64, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls++
-	n := f.calls
-	purged, err := f.purged, f.err
-	f.mu.Unlock()
-	if f.onCall != nil {
-		f.onCall(n)
-	}
-	return purged, err
+	return f.purged, f.err
 }
 
 func (f *fakePurgeClient) callCount() int {
@@ -64,9 +46,49 @@ func (f *fakePurgeClient) callCount() int {
 	return f.calls
 }
 
+// runLoopUntilTwoCalls starts a purger over the client, waits until the
+// client has been called at least twice (immediate purge plus one tick),
+// cancels, and verifies RunLoop returns context.Canceled.
+func runLoopUntilTwoCalls(t *testing.T, client *fakePurgeClient, onPurge func(purged int64, err error)) {
+	t.Helper()
+
+	purger, err := New(client, 20*time.Millisecond, onPurge)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- purger.RunLoop(logr.NewContext(ctx, logr.Discard())) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for client.callCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunLoop = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunLoop did not return after cancel")
+	}
+	if got := client.callCount(); got < 2 {
+		t.Fatalf("purge calls = %d, want >= 2 (immediate + at least one tick)", got)
+	}
+}
+
+// purgeResult records one onPurge callback invocation.
+type purgeResult struct {
+	purged int64
+	err    error
+}
+
 func TestNew(t *testing.T) {
 	t.Run("rejects nil client", func(t *testing.T) {
-		if _, err := New(nil, time.Second); err == nil {
+		if _, err := New(nil, time.Second, nil); err == nil {
 			t.Fatal("expected error for nil client")
 		}
 	})
@@ -74,84 +96,76 @@ func TestNew(t *testing.T) {
 	t.Run("rejects non-positive interval", func(t *testing.T) {
 		client := &fakePurgeClient{}
 		for _, interval := range []time.Duration{0, -time.Second} {
-			if _, err := New(client, interval); err == nil {
+			if _, err := New(client, interval, nil); err == nil {
 				t.Fatalf("expected error for interval %v", interval)
 			}
 		}
 	})
 
 	t.Run("accepts valid arguments", func(t *testing.T) {
-		if _, err := New(&fakePurgeClient{}, time.Second); err != nil {
+		if _, err := New(&fakePurgeClient{}, time.Second, nil); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 }
 
 func TestPurgerRunLoop(t *testing.T) {
-	t.Run("purges immediately on start and again on tick", func(t *testing.T) {
+	t.Run("purges immediately on start and again on tick, reporting each result", func(t *testing.T) {
 		client := &fakePurgeClient{purged: 1}
-		purger, err := New(client, 20*time.Millisecond)
-		if err != nil {
-			t.Fatalf("New: %v", err)
+
+		var mu sync.Mutex
+		var results []purgeResult
+		runLoopUntilTwoCalls(t, client, func(purged int64, err error) {
+			mu.Lock()
+			defer mu.Unlock()
+			results = append(results, purgeResult{purged: purged, err: err})
+		})
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(results) < 2 {
+			t.Fatalf("onPurge calls = %d, want >= 2 (immediate + at least one tick)", len(results))
 		}
-
-		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan error, 1)
-		go func() { done <- purger.RunLoop(logr.NewContext(ctx, logr.Discard())) }()
-
-		// The immediate purge happens before the first tick.
-		deadline := time.Now().Add(2 * time.Second)
-		for client.callCount() < 2 && time.Now().Before(deadline) {
-			time.Sleep(2 * time.Millisecond)
-		}
-		cancel()
-
-		select {
-		case err := <-done:
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("RunLoop = %v, want context.Canceled", err)
+		for i, r := range results {
+			if r.err != nil {
+				t.Fatalf("onPurge result %d err = %v, want nil", i, r.err)
 			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("RunLoop did not return after cancel")
-		}
-		if got := client.callCount(); got < 2 {
-			t.Fatalf("purge calls = %d, want >= 2 (immediate + at least one tick)", got)
+			if r.purged != 1 {
+				t.Fatalf("onPurge result %d purged = %d, want 1", i, r.purged)
+			}
 		}
 	})
 
-	t.Run("purge failure is recorded and the loop continues", func(t *testing.T) {
-		client := &fakePurgeClient{err: errors.New("boom")}
-		purger, err := New(client, 20*time.Millisecond)
-		if err != nil {
-			t.Fatalf("New: %v", err)
+	t.Run("purge failure is reported and the loop continues", func(t *testing.T) {
+		purgeErr := errors.New("boom")
+		client := &fakePurgeClient{err: purgeErr}
+
+		var mu sync.Mutex
+		var results []purgeResult
+		runLoopUntilTwoCalls(t, client, func(purged int64, err error) {
+			mu.Lock()
+			defer mu.Unlock()
+			results = append(results, purgeResult{purged: purged, err: err})
+		})
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(results) < 2 {
+			t.Fatalf("onPurge calls = %d, want >= 2 (loop must continue past failures)", len(results))
 		}
-
-		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan error, 1)
-		go func() { done <- purger.RunLoop(logr.NewContext(ctx, logr.Discard())) }()
-
-		// The failed purge must not stop the loop.
-		deadline := time.Now().Add(2 * time.Second)
-		for client.callCount() < 2 && time.Now().Before(deadline) {
-			time.Sleep(2 * time.Millisecond)
-		}
-		cancel()
-
-		select {
-		case err := <-done:
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("RunLoop = %v, want context.Canceled", err)
+		for i, r := range results {
+			if !errors.Is(r.err, purgeErr) {
+				t.Fatalf("onPurge result %d err = %v, want the purge error", i, r.err)
 			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("RunLoop did not return after cancel")
 		}
-		if got := client.callCount(); got < 2 {
-			t.Fatalf("purge calls = %d, want >= 2 (loop must continue past failures)", got)
-		}
+	})
+
+	t.Run("nil onPurge callback is allowed", func(t *testing.T) {
+		runLoopUntilTwoCalls(t, &fakePurgeClient{purged: 1}, nil)
 	})
 
 	t.Run("returns context error on already-cancelled context", func(t *testing.T) {
-		purger, err := New(&fakePurgeClient{}, time.Second)
+		purger, err := New(&fakePurgeClient{}, time.Second, nil)
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}

@@ -25,25 +25,25 @@ import (
 	"github.com/go-logr/logr"
 
 	dbapi "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
-	"github.com/llm-d/llm-d-batch-gateway/internal/gc/metrics"
-	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
 )
 
 // Purger periodically removes expired events via the purge client.
 type Purger struct {
 	client   dbapi.BatchEventPurgeClient
 	interval time.Duration
+	onPurge  func(purged int64, err error)
 }
 
-// New creates a new event purger.
-func New(client dbapi.BatchEventPurgeClient, interval time.Duration) (*Purger, error) {
+// New creates a new event purger. The optional onPurge callback is invoked
+// after every purge attempt with its result; a nil callback is allowed.
+func New(client dbapi.BatchEventPurgeClient, interval time.Duration, onPurge func(purged int64, err error)) (*Purger, error) {
 	if client == nil {
 		return nil, fmt.Errorf("purge client is required")
 	}
 	if interval <= 0 {
 		return nil, fmt.Errorf("interval must be positive, got %v", interval)
 	}
-	return &Purger{client: client, interval: interval}, nil
+	return &Purger{client: client, interval: interval, onPurge: onPurge}, nil
 }
 
 // RunLoop runs the purger in a continuous loop at the configured interval.
@@ -54,7 +54,9 @@ func (p *Purger) RunLoop(ctx context.Context) error {
 	logger.Info("Starting event purge loop", "interval", p.interval)
 
 	// Run immediately on startup before waiting for the first tick.
-	p.runOnce(ctx)
+	if ctx.Err() == nil {
+		p.runOnce(ctx)
+	}
 
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
@@ -70,20 +72,24 @@ func (p *Purger) RunLoop(ctx context.Context) error {
 	}
 }
 
-// runOnce executes a single purge and records metrics.
+// runOnce executes a single purge and reports its result via onPurge.
+// Outcomes racing context cancellation are neither logged nor reported:
+// they are shutdown noise, not purge results.
 func (p *Purger) runOnce(ctx context.Context) {
 	logger := logr.FromContextOrDiscard(ctx)
 
 	purged, err := p.client.PurgeExpiredEvents(ctx)
-	if err != nil {
-		if ctx.Err() == nil {
-			logger.Error(err, "Event purge failed")
-			metrics.RecordEventPurgeFailures(1)
-		}
+	if ctx.Err() != nil {
 		return
 	}
-	metrics.RecordEventsPurged(purged)
+	if p.onPurge != nil {
+		p.onPurge(purged, err)
+	}
+	if err != nil {
+		logger.Error(err, "Event purge failed")
+		return
+	}
 	if purged > 0 {
-		logger.V(logging.INFO).Info("Purged expired events", "purged", purged)
+		logger.Info("Purged expired events", "purged", purged)
 	}
 }

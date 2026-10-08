@@ -336,7 +336,8 @@ test-integration:
 
 ## test-postgres: Run all PostgreSQL-backed tests (requires TEST_POSTGRES_URL)
 # Run these packages sequentially: the migration and recovery tests modify
-# batch_items and must not share a database concurrently.
+# batch_items and the clientset tests issue a destructive purge against
+# batch_events, so none of them may share a database with concurrent runs.
 test-postgres:
 	@test -n "$(TEST_POSTGRES_URL)" || { echo "TEST_POSTGRES_URL is required for PostgreSQL-backed tests"; exit 1; }
 	$(GO) test -count=1 -v ./pkg/clients/inference
