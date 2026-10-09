@@ -869,9 +869,15 @@ func doTestProgressPolling(t *testing.T) {
 	t.Helper()
 
 	// 5 fast requests (max_tokens=1, ~150ms each) complete almost immediately.
-	// 15 slow requests (max_tokens=200, ~20s each at the simulator's 100ms
-	// inter-token latency) keep the batch in_progress long enough for the
-	// 15-second progress ticker to fire and persist intermediate counts to the DB.
+	// In sync mode, 15 slow requests (max_tokens=200, ~20s each at the
+	// simulator's 100ms inter-token latency) keep the batch in_progress long
+	// enough for the 15-second progress ticker to fire and persist intermediate
+	// counts to the DB. The dispatcher processes requests with concurrency 1, so
+	// it uses shorter slow requests to finish inside the final timeout.
+	slowMaxTokens := 200
+	if testDispatcherDeployed {
+		slowMaxTokens = 60
+	}
 	var lines []string
 	for i := 1; i <= 5; i++ {
 		lines = append(lines, fmt.Sprintf(
@@ -879,7 +885,7 @@ func doTestProgressPolling(t *testing.T) {
 	}
 	for i := 1; i <= 15; i++ {
 		lines = append(lines, fmt.Sprintf(
-			`{"custom_id":"slow-%d","method":"POST","url":"/v1/chat/completions","body":{"model":"%s","max_tokens":200,"messages":[{"role":"user","content":"slow %d"}]}}`, i, testSimModel, i))
+			`{"custom_id":"slow-%d","method":"POST","url":"/v1/chat/completions","body":{"model":"%s","max_tokens":%d,"messages":[{"role":"user","content":"slow %d"}]}}`, i, testSimModel, slowMaxTokens, i))
 	}
 	fileID := mustCreateFile(t, fmt.Sprintf("test-progress-%s.jsonl", testRunID), strings.Join(lines, "\n"))
 	batchID := mustCreateBatch(t, fileID)
