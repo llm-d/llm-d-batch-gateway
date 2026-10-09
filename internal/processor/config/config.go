@@ -117,7 +117,7 @@ type AsyncModelConfig struct {
 	// InferencePoolName identifies the async dispatch pool for this model.
 	InferencePoolName string `yaml:"inference_pool_name"`
 
-	// InferenceObjective is the name of a GIE InferenceObjective CRD sent in
+	// InferenceObjective is the name of an llm-d-router InferenceObjective CRD sent in
 	// the x-gateway-inference-objective header on inference requests.
 	// When empty, the header is not sent.
 	InferenceObjective string `yaml:"inference_objective"`
@@ -281,9 +281,9 @@ type ModelGatewayConfig struct {
 	APIKeyName string `yaml:"api_key_name"`
 	APIKeyFile string `yaml:"api_key_file"`
 
-	// InferenceObjective is the name of a GIE InferenceObjective CRD sent in
+	// InferenceObjective is the name of an llm-d-router InferenceObjective CRD sent in
 	// the x-gateway-inference-objective header on inference requests. Use this
-	// to target per-model InferencePools in multi-pool GIE deployments.
+	// to target per-model InferencePools in multi-pool Router EPP deployments.
 	// When empty, the header is not sent.
 	InferenceObjective string `yaml:"inference_objective"`
 

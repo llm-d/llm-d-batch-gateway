@@ -90,7 +90,7 @@ func doTestBatchCancel(t *testing.T) {
 
 	// Wait for at least one fast request to complete before cancelling.
 	// This replaces a fixed sleep, making the test deterministic regardless
-	// of request-path latency (e.g. with GIE: processor → Envoy → EPP → vllm-sim).
+	// of request-path latency (e.g. with a Router EPP: processor → Envoy → EPP → vllm-sim).
 	waitForCompletedRequests(t, batchID, 1, 2*time.Minute)
 
 	// Cancel the batch while slow requests are still in-flight.

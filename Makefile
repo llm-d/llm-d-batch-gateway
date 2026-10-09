@@ -374,7 +374,7 @@ KIND_CLUSTER_NAME ?= batch-gateway-dev
 dev-deploy:
 	@bash scripts/dev-deploy.sh
 
-## dev-deploy-gie: Deploy with sync GIE integration (per-model EPP + InferenceObjectives)
+## dev-deploy-gie: Deploy with sync Router EPP integration (legacy target name)
 dev-deploy-gie:
 	@ENABLE_DISPATCHER=false ENABLE_GIE=true bash scripts/dev-deploy.sh
 

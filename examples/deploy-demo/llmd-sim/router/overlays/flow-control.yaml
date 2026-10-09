@@ -40,5 +40,5 @@ router:
             maxBytes: 536870912
             fairnessPolicyRef: global-strict-fairness-policy
             orderingPolicyRef: fcfs-ordering-policy
-        saturationDetector:
-          pluginRef: utilization-detector
+          saturationDetector:
+            pluginRef: utilization-detector
