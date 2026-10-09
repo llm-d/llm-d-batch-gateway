@@ -1,6 +1,10 @@
 name: Integration Tests
 
 on:
+  pull_request:
+    branches:
+      - main
+      - 'release-*'
   push:
     branches:
       - main
@@ -69,7 +73,7 @@ jobs:
         run: make test-e2e
 
       - name: Open issue on failure
-        if: failure()
+        if: failure() && github.event_name != 'pull_request'
         uses: actions/github-script@v9
         with:
           script: |
