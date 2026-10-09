@@ -389,17 +389,23 @@ EOOBJ
 else
     # GPU mode: deploy real vLLM + llm-d Router + Istio Gateway
 
-    # The router chart does not install CRDs. Install the InferenceObjective CRD
-    # before the router starts, because the router only looks for it at startup.
+    # The router chart does not install CRDs. Install the llm-d.ai
+    # InferenceObjective and InferenceModelRewrite CRDs from llm-d-router before
+    # the router starts, because the router reads them at startup.
     # Chart "v0" is built from router main.
     if [ "${SCENARIO}" = "3" ] || [ "${SCENARIO}" = "4" ]; then
         objective_crd="https://raw.githubusercontent.com/llm-d/llm-d-router/${ROUTER_CRD_REF}/config/crd/bases/llm-d.ai_inferenceobjectives.yaml"
+        model_rewrite_crd="https://raw.githubusercontent.com/llm-d/llm-d-router/${ROUTER_CRD_REF}/config/crd/bases/llm-d.ai_inferencemodelrewrites.yaml"
         if [ -n "${ROUTER_REPO:-}" ]; then
             objective_crd="${ROUTER_REPO}/config/crd/bases/llm-d.ai_inferenceobjectives.yaml"
+            model_rewrite_crd="${ROUTER_REPO}/config/crd/bases/llm-d.ai_inferencemodelrewrites.yaml"
         fi
         log "Installing InferenceObjective CRD from ${objective_crd}"
         ${K} apply -f "${objective_crd}" >/dev/null
-        ${K} wait --for=condition=established crd/inferenceobjectives.llm-d.ai --timeout=60s >/dev/null
+        log "Installing InferenceModelRewrite CRD from ${model_rewrite_crd}"
+        ${K} apply -f "${model_rewrite_crd}" >/dev/null
+        ${K} wait --for=condition=established crd/inferenceobjectives.llm-d.ai \
+            crd/inferencemodelrewrites.llm-d.ai --timeout=60s >/dev/null
     fi
 
     # --- llm-d Router (EPP) ---
@@ -507,7 +513,7 @@ else
         else
             verify_router_plugin_config "${GUIDE_NAME}" flow-control-plugins.yaml
         fi
-        verify_router_crds inferenceobjectives.llm-d.ai
+        verify_router_crds inferenceobjectives.llm-d.ai inferencemodelrewrites.llm-d.ai
     fi
 
     # --- Istio Gateway ---
