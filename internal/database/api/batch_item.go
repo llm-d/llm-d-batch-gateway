@@ -43,6 +43,14 @@ type BatchItem struct {
 	// RecoveryAttempts counts startup recoveries under the current ownership.
 	// Reset on dequeue, incremented by PQClaimOwned.
 	RecoveryAttempts int64
+
+	// Resumable marks jobs whose durable manifest allows startup recovery to
+	// resume work without GC resetting or terminalizing the batch.
+	Resumable bool
+
+	// ExpectedResumable optionally fences DBUpdate on the persisted resumable
+	// value. It is a mutation precondition and is not itself persisted.
+	ExpectedResumable *bool
 }
 
 // BatchQuery specifies parameters for retrieving batches from the database.
