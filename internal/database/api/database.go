@@ -219,8 +219,7 @@ type BatchEventChannelClient interface {
 	ECProducerSendEvents(ctx context.Context, events []BatchEvent) (sentIDs []string, err error)
 }
 
-// BatchEventGC removes expired events. The GC process runs the backend's
-// implementation until the context is cancelled.
-type BatchEventGC interface {
-	Run(ctx context.Context) error
+// BatchEventPurgeClient removes expired events. Scheduling is owned by the GC.
+type BatchEventPurgeClient interface {
+	PurgeExpiredEvents(ctx context.Context) (purged int64, err error)
 }

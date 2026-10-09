@@ -79,44 +79,25 @@ func TestPostgresBatchEventProducer(t *testing.T) {
 	}
 }
 
-func TestPostgresBatchEventGC_PurgeExpiredEventsMock(t *testing.T) {
+func TestPostgresBatchEventPurgeClient_PurgeExpiredEventsMock(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
 		t.Fatalf("pgxmock: %v", err)
 	}
 	defer mock.Close()
 	db := &PostgresBatchDBClient{pgCore: &pgCore{pool: mock}}
-	gc, err := NewPostgresBatchEventGC(db, logr.Discard())
+	purgeClient, err := NewPostgresBatchEventPurgeClient(db)
 	if err != nil {
-		t.Fatalf("NewPostgresBatchEventGC: %v", err)
+		t.Fatalf("NewPostgresBatchEventPurgeClient: %v", err)
 	}
 	mock.ExpectExec("DELETE FROM batch_events(?s:.*)WHERE expires_at").
 		WillReturnResult(pgxmock.NewResult("DELETE", 2))
-	purged, err := gc.purgeExpired(context.Background())
+	purged, err := purgeClient.PurgeExpiredEvents(context.Background())
 	if err != nil || purged != 2 {
-		t.Fatalf("purgeExpired = %d, %v; want 2, nil", purged, err)
+		t.Fatalf("PurgeExpiredEvents = %d, %v; want 2, nil", purged, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
-	}
-}
-
-func TestPostgresBatchEventGC_RunPurgesOnStart(t *testing.T) {
-	mock, err := pgxmock.NewPool()
-	if err != nil {
-		t.Fatalf("pgxmock: %v", err)
-	}
-	defer mock.Close()
-	gc := &PostgresBatchEventGC{pool: mock, logger: logr.Discard()}
-	mock.ExpectExec("DELETE FROM batch_events(?s:.*)WHERE expires_at").
-		WillReturnResult(pgxmock.NewResult("DELETE", 1))
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if err := gc.Run(ctx); err != nil {
-		t.Fatalf("event GC Run: %v", err)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("event GC did not purge on start: %v", err)
 	}
 }
 
@@ -253,10 +234,10 @@ func TestPostgresBatchEventClient_BackstopRescan(t *testing.T) {
 	}
 }
 
-// TestPostgresBatchEventGC_PurgeExpiredEvents requires a real PostgreSQL
+// TestPostgresBatchEventPurgeClient_PurgeExpiredEvents requires a real PostgreSQL
 // instance (TEST_POSTGRES_URL) and verifies that expired, never-consumed
 // events are deleted while live events remain.
-func TestPostgresBatchEventGC_PurgeExpiredEvents(t *testing.T) {
+func TestPostgresBatchEventPurgeClient_PurgeExpiredEvents(t *testing.T) {
 	url := requirePostgresURL(t)
 	ctx := context.Background()
 
@@ -265,9 +246,9 @@ func TestPostgresBatchEventGC_PurgeExpiredEvents(t *testing.T) {
 		t.Fatalf("NewPostgresBatchDBClient: %v", err)
 	}
 	defer func() { _ = client.Close() }()
-	eventGC, err := NewPostgresBatchEventGC(client, logr.Discard())
+	purgeClient, err := NewPostgresBatchEventPurgeClient(client)
 	if err != nil {
-		t.Fatalf("NewPostgresBatchEventGC: %v", err)
+		t.Fatalf("NewPostgresBatchEventPurgeClient: %v", err)
 	}
 
 	pool, err := pgxpool.New(ctx, url)
@@ -290,12 +271,12 @@ func TestPostgresBatchEventGC_PurgeExpiredEvents(t *testing.T) {
 		_, _ = pool.Exec(ctx, `DELETE FROM batch_events WHERE job_id IN ($1, $2)`, expiredJob, liveJob)
 	}()
 
-	purged, err := eventGC.purgeExpired(ctx)
+	purged, err := purgeClient.PurgeExpiredEvents(ctx)
 	if err != nil {
-		t.Fatalf("purgeExpired: %v", err)
+		t.Fatalf("PurgeExpiredEvents: %v", err)
 	}
 	if purged < 1 {
-		t.Fatalf("purgeExpired purged %d rows, want >= 1 (the expired test row)", purged)
+		t.Fatalf("PurgeExpiredEvents purged %d rows, want >= 1 (the expired test row)", purged)
 	}
 
 	var remaining int

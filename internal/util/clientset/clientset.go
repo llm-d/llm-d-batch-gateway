@@ -47,7 +47,7 @@ type Clientset struct {
 	FileDB          dbapi.FileDBClient
 	Queue           dbapi.BatchPriorityQueueClient
 	Event           dbapi.BatchEventChannelClient
-	EventGC         dbapi.BatchEventGC
+	EventPurge      dbapi.BatchEventPurgeClient
 	Inference       *inference.GatewayResolver
 	AsyncInference  *inference.AsyncGatewayResolver
 }
@@ -235,10 +235,7 @@ func NewClientset(ctx context.Context, component ucom.Component, opts ...Option)
 			case ucom.ComponentApiserver:
 				eventClient, err = postgresql.NewPostgresBatchEventProducer(ctx, &cfg.dbCfg.PostgreSQLCfg)
 			case ucom.ComponentGC:
-				cs.EventGC, err = postgresql.NewPostgresBatchEventGC(batchDB, logger)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create postgres event GC: %w", err)
-				}
+				cs.EventPurge, err = postgresql.NewPostgresBatchEventPurgeClient(batchDB)
 			default:
 				return nil, fmt.Errorf("unsupported component for postgres events: %s", component)
 			}
