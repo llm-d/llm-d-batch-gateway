@@ -37,6 +37,7 @@ type ResultCollector struct {
 	tracker              *ProgressTracker
 	logger               logr.Logger
 	onPersistenceFailure func()
+	checkpoint           func(context.Context, string, []byte) error
 }
 
 func NewResultCollector(outputFile, errorFile *os.File, pending *PendingRequests, tracker *ProgressTracker, logger logr.Logger) *ResultCollector {
@@ -44,6 +45,12 @@ func NewResultCollector(outputFile, errorFile *os.File, pending *PendingRequests
 	errors := bufio.NewWriterSize(errorFile, fileBufferSize)
 
 	return &ResultCollector{output: output, errors: errors, pending: pending, tracker: tracker, logger: logger}
+}
+
+// SetCheckpoint installs the durable result checkpoint used by resumable
+// batches. It must return only after the result can survive processor loss.
+func (c *ResultCollector) SetCheckpoint(checkpoint func(context.Context, string, []byte) error) {
+	c.checkpoint = checkpoint
 }
 
 // Drain reads results until resultCh is closed, then flushes.
@@ -56,7 +63,7 @@ func NewResultCollector(outputFile, errorFile *os.File, pending *PendingRequests
 func (c *ResultCollector) Drain(ctx context.Context, resultCh <-chan ResultItem) error {
 	var firstErr error
 	for msg := range resultCh {
-		if !c.pending.Resolve(&msg) {
+		if !c.pending.Enrich(&msg) {
 			continue
 		}
 		if !msg.SubmittedAt.IsZero() {
@@ -67,13 +74,15 @@ func (c *ResultCollector) Drain(ctx context.Context, resultCh <-chan ResultItem)
 		if firstErr != nil {
 			continue
 		}
-		if err := c.Receive(msg); err != nil {
+		if err := c.Receive(ctx, msg); err != nil {
 			firstErr = err
 			c.logger.Error(err, "Persistence failure, skipping further writes")
 			if c.onPersistenceFailure != nil {
 				c.onPersistenceFailure()
 			}
+			continue
 		}
+		c.pending.Resolve(&msg)
 	}
 	if flushErr := c.flushFiles(); flushErr != nil {
 		return flushErr
@@ -87,7 +96,10 @@ func (c *ResultCollector) Drain(ctx context.Context, resultCh <-chan ResultItem)
 	return nil
 }
 
-func (c *ResultCollector) Receive(msg ResultItem) error {
+func (c *ResultCollector) Receive(ctx context.Context, msg ResultItem) error {
+	leaseCtx, stopRenewal := c.renewResultLease(ctx, msg)
+	defer stopRenewal()
+
 	line := &outputLine{
 		ID:       msg.RequestID,
 		CustomID: msg.CustomID,
@@ -101,12 +113,31 @@ func (c *ResultCollector) Receive(msg ResultItem) error {
 	}
 	lineBytes = append(lineBytes, '\n')
 
+	if c.checkpoint != nil {
+		if err := c.checkpoint(leaseCtx, msg.RequestID, lineBytes); err != nil {
+			return fmt.Errorf("checkpoint output for %s: %w", msg.RequestID, err)
+		}
+		if err := leaseCtx.Err(); err != nil {
+			return fmt.Errorf("result lease cancelled for %s: %w", msg.RequestID, err)
+		}
+		if msg.Ack != nil {
+			if err := msg.Ack(leaseCtx); err != nil {
+				return fmt.Errorf("ack output for %s: %w", msg.RequestID, err)
+			}
+		}
+	}
+
 	w := c.output
 	if line.Error != nil {
 		w = c.errors
 	}
 	if _, err := w.Write(lineBytes); err != nil {
 		return fmt.Errorf("write output for %s: %w", msg.RequestID, err)
+	}
+	if c.checkpoint == nil && msg.Ack != nil {
+		if err := msg.Ack(leaseCtx); err != nil {
+			return fmt.Errorf("ack output for %s: %w", msg.RequestID, err)
+		}
 	}
 
 	if line.isSuccess() {
@@ -126,6 +157,44 @@ func (c *ResultCollector) Receive(msg ResultItem) error {
 	}
 
 	return nil
+}
+
+func (c *ResultCollector) renewResultLease(ctx context.Context, msg ResultItem) (context.Context, func()) {
+	if msg.Renew == nil || msg.LeaseTTL <= 0 {
+		return ctx, func() {}
+	}
+	renewCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(resultLeaseRenewalInterval(msg.LeaseTTL))
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-renewCtx.Done():
+				return
+			case <-ticker.C:
+				if err := msg.Renew(renewCtx); err != nil {
+					c.logger.Error(err, "Failed to renew durable result lease", "requestID", msg.RequestID)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return renewCtx, func() {
+		close(done)
+		cancel()
+	}
+}
+
+func resultLeaseRenewalInterval(leaseTTL time.Duration) time.Duration {
+	interval := leaseTTL / 2
+	if interval <= 0 {
+		return leaseTTL
+	}
+	return interval
 }
 
 func recordTokenUsage(body map[string]any, model string, logger logr.Logger) {

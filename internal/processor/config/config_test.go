@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	sharedcfg "github.com/llm-d/llm-d-batch-gateway/internal/shared/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/ptr"
 )
 
@@ -199,6 +200,24 @@ func TestProcessorConfig_Validate_TaskWaitTimeMustBeShorterThanPollInterval(t *t
 	c.TaskWaitTime = 500 * time.Millisecond
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate() unexpected error when task_wait_time < poll_interval: %v", err)
+	}
+}
+
+func TestProcessorConfig_Validate_ResumableLeaseDuration(t *testing.T) {
+	c := NewConfig()
+	c.DispatchMode = DispatchModeAsync
+	c.ResumableRecovery = true
+	c.NumWorkers = 1
+	c.AsyncDispatchConfig.Models = map[string]AsyncModelConfig{
+		"model": {InferencePoolName: "pool"},
+	}
+	if c.ResumableLeaseDuration != 5*time.Minute {
+		t.Fatalf("ResumableLeaseDuration = %v, want %v", c.ResumableLeaseDuration, 5*time.Minute)
+	}
+
+	c.ResumableLeaseDuration = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate() expected error for zero resumable_lease_duration")
 	}
 }
 
@@ -901,6 +920,74 @@ func TestProcessorConfig_Validate_AsyncDispatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := validAsyncConfig()
+			tt.mutate(c)
+			err := c.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestProcessorConfig_Validate_ResumableRecoveryTopology(t *testing.T) {
+	validResumableConfig := func() *ProcessorConfig {
+		c := NewConfig()
+		c.ResumableRecovery = true
+		c.DispatchMode = DispatchModeAsync
+		c.NumWorkers = 1
+		c.AsyncDispatchConfig = AsyncDispatchConfig{
+			ResultPollTimeout: 5 * time.Second,
+			Models: map[string]AsyncModelConfig{
+				"llama-3": {InferencePoolName: "pool-a"},
+			},
+		}
+		return c
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*ProcessorConfig)
+		wantErr bool
+	}{
+		{
+			name:    "valid restricted topology",
+			mutate:  func(_ *ProcessorConfig) {},
+			wantErr: false,
+		},
+		{
+			name: "non PostgreSQL database rejected",
+			mutate: func(c *ProcessorConfig) {
+				c.DBClientCfg.Type = sharedcfg.DBTypeMock
+			},
+			wantErr: true,
+		},
+		{
+			name: "sync dispatch rejected",
+			mutate: func(c *ProcessorConfig) {
+				c.DispatchMode = DispatchModeSync
+				c.ModelGateways = validPerModelConfig()
+			},
+			wantErr: true,
+		},
+		{
+			name: "multiple workers rejected",
+			mutate: func(c *ProcessorConfig) {
+				c.NumWorkers = 2
+			},
+			wantErr: true,
+		},
+		{
+			name: "multiple async model queues rejected",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.Models["mistral"] = AsyncModelConfig{InferencePoolName: "pool-b"}
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := validResumableConfig()
 			tt.mutate(c)
 			err := c.Validate()
 			if (err != nil) != tt.wantErr {
