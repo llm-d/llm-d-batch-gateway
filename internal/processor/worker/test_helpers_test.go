@@ -193,7 +193,7 @@ func mockClaimOwned(batchDB db.BatchProgressDBClient, processorID string) func(c
 			if err := batchDB.DBUpdate(ctx, item, nil); err != nil {
 				return nil, err
 			}
-			tasks = append(tasks, &db.BatchJobPriority{ID: item.ID, SLO: time.UnixMicro(item.Priority), Epoch: item.Epoch, RecoveryAttempts: item.RecoveryAttempts})
+			tasks = append(tasks, &db.BatchJobPriority{ID: item.ID, SLO: time.UnixMicro(item.Priority), Epoch: item.Epoch, RecoveryAttempts: item.RecoveryAttempts, Resumable: item.Resumable})
 		}
 		return tasks, nil
 	}
