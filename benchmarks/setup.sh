@@ -32,6 +32,9 @@ set -euo pipefail
 #   BENCH_DB_PASSWORD  — PostgreSQL password (default: random 24-char string)
 #   PROMETHEUS_RELEASE — Prometheus Operator release label for ServiceMonitor discovery (default: llmd-kube-prometheus-stack)
 #   PROMETHEUS_NAMESPACE — Namespace where Prometheus is deployed (default: llm-d-monitoring)
+#   DISPATCHER_VERSION — llm-d-async image version for scenario 5 (default: v0.9.1)
+#   DISPATCHER_CHART   — async-processor Helm chart reference (default: OCI chart)
+#   DISPATCHER_CHART_VERSION — llm-d-async chart version (default: v0.9.1)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -245,6 +248,12 @@ if [ "${ROUTER_CRD_REF}" = "v0" ]; then
     ROUTER_CRD_REF="main"
 fi
 
+# Async-processor settings for scenario 5
+DISPATCHER_VERSION="${DISPATCHER_VERSION:-v0.9.1}"
+DISPATCHER_IMAGE="${DISPATCHER_IMAGE:-ghcr.io/llm-d/llm-d-async:${DISPATCHER_VERSION}}"
+DISPATCHER_CHART="${DISPATCHER_CHART:-oci://ghcr.io/llm-d/charts/llm-d-async}"
+DISPATCHER_CHART_VERSION="${DISPATCHER_CHART_VERSION:-v0.9.1}"
+
 # --- Inference backend ---
 if [ "${MODE}" = "sim" ]; then
     # Sim mode: deploy inference-sim (no GPU, no router, no Istio)
@@ -278,6 +287,11 @@ spec:
             - "8000"
             - --time-to-first-token=${SIM_TTFT}
             - --inter-token-latency=${SIM_ITL}
+$([ "${SCENARIO}" = "5" ] && cat <<FAKEARGS
+            - --fake-metrics
+            - '{"kv-cache-usage": 0, "waiting-requests": 0, "running-requests": 0}'
+FAKEARGS
+)
           ports:
             - containerPort: 8000
               name: modelserver
@@ -583,8 +597,17 @@ if [ -n "${VALUES_FILE}" ]; then
         )
     fi
 
-    # In sim mode, replace all model gateways with a single entry
-    if [ "${MODE}" = "sim" ]; then
+    if [ "${SCENARIO}" = "5" ]; then
+        # Match the async-processor queue in both sim and GPU modes.
+        ASYNC_POOL_NAME="${GUIDE_NAME}"
+        if [ "${MODE}" = "sim" ]; then
+            ASYNC_POOL_NAME="sim-pool"
+        fi
+        BG_EXTRA_ARGS+=(
+            --set-json "processor.config.asyncDispatch.models={\"${MODEL}\":{\"inferencePoolName\":\"${ASYNC_POOL_NAME}\"}}"
+        )
+    elif [ "${MODE}" = "sim" ]; then
+        # In sim mode, replace all model gateways with a single entry
         if [ "${SCENARIO}" = "4" ]; then
             # Scenario 4: route through EPP for flow control; null out globalInferenceGateway from values file
             BG_EXTRA_ARGS+=(
@@ -647,8 +670,53 @@ fi
 
 # --- Scenario 5: Async processor ---
 if [ "${SCENARIO}" = "5" ]; then
-    log "ERROR: Scenario 5 (async) is blocked on async-processor integration"
-    exit 1
+    log "Deploying async-processor (scenario 5)"
+
+    # Pool name was set with the batch-gateway mapping above.
+    if [ "${MODE}" = "sim" ]; then
+        ASYNC_IGW_URL="http://inference-sim.${NAMESPACE}.svc.cluster.local:8000"
+        ASYNC_METRICS_URL="http://inference-sim.${NAMESPACE}.svc.cluster.local:8000/metrics"
+    else
+        ASYNC_IGW_URL="http://vllm-metrics.${NAMESPACE}.svc.cluster.local:8000"
+        ASYNC_METRICS_URL="http://vllm-metrics.${NAMESPACE}.svc.cluster.local:8000/metrics"
+
+        # Create a Service for the vLLM decode deployment (endpoint-scrape needs it)
+        log "  Creating vLLM metrics Service"
+        ${K} -n "${NAMESPACE}" apply -f - <<EOVLLMSVC
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-metrics
+spec:
+  selector:
+    llm-d.ai/role: decode
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+EOVLLMSVC
+    fi
+
+    DISPATCHER_IMAGE_REPO="$(echo "${DISPATCHER_IMAGE}" | cut -d: -f1)"
+    DISPATCHER_IMAGE_TAG="$(echo "${DISPATCHER_IMAGE}" | cut -d: -f2)"
+
+    ${H} upgrade --install async-processor "${DISPATCHER_CHART}" \
+        --version "${DISPATCHER_CHART_VERSION}" \
+        -n "${NAMESPACE}" \
+        --set "ap.image.repository=${DISPATCHER_IMAGE_REPO}" \
+        --set "ap.image.tag=${DISPATCHER_IMAGE_TAG}" \
+        --set ap.transport=redis-sortedset \
+        --set ap.concurrency=1 \
+        --set-json "ap.transportConfig={\"urlSecret\":{\"url\":\"redis://redis-master.${NAMESPACE}.svc.cluster.local:6379\"},\"result_queue_name\":\"result-list\",\"poll_interval_ms\":500,\"batch_size\":10,\"queues\":[{\"queue_name\":\"llm-d-async:requests:${ASYNC_POOL_NAME}\",\"request_path_url\":\"/v1/chat/completions\",\"igw_base_url\":\"${ASYNC_IGW_URL}\",\"gate_type\":\"endpoint-scrape\",\"gate_params\":{\"url\":\"${ASYNC_METRICS_URL}\",\"metric\":\"vllm:num_requests_waiting\",\"max_count_per_pod\":\"5\",\"fallback\":\"1.0\"}}]}" \
+        --set ap.modelServerMonitor.enabled=false \
+        --set ap.metrics.enabled=true \
+        --set ap.metrics.port=9091 \
+        --set ap.metrics.secure=false \
+        --wait --timeout=120s >/dev/null
+
+    log "  Waiting for async-processor to be ready..."
+    ${K} -n "${NAMESPACE}" wait --for=condition=available deployment/async-processor-llm-d-async --timeout=120s >/dev/null
+    log "  Async-processor deployed (pool: ${ASYNC_POOL_NAME}, gate: endpoint-scrape)"
 fi
 
 if [ -n "${VALUES_FILE}" ]; then

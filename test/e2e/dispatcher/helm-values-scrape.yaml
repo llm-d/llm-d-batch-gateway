@@ -1,5 +1,6 @@
 ap:
   imagePullPolicy: Never
+  transport: "redis-sortedset"
   concurrency: 1
   prometheusCacheTTL: "0s"
   otel:
@@ -7,15 +8,14 @@ ap:
     insecure: true
     sampler: "always_on"
     samplerArg: "1.0"
-    redisTracing: false
   metrics:
     enabled: true
     port: 9091
     secure: false
-  transport: "redis-sortedset"
   transportConfig:
     urlSecret:
       url: "redis://redis-master.default.svc.cluster.local:6379"
+    result_queue_name: "result-list"
     poll_interval_ms: 500
     batch_size: 10
     queues:
