@@ -241,7 +241,7 @@ func testDispatcherHTTPErrorStatusPreserved(t *testing.T, rdb *redis.Client) {
 		t.Fatalf("LPUSH result: %v", err)
 	}
 
-	finalBatch := waitForRetryExhaustion(t, batchID, 2*time.Minute)
+	finalBatch := waitForTerminalBatch(t, batchID, 2*time.Minute)
 
 	if finalBatch.Status != openai.BatchStatusCompleted {
 		t.Errorf("expected batch status %q, got %q", openai.BatchStatusCompleted, finalBatch.Status)
