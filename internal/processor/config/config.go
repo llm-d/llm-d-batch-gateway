@@ -158,6 +158,15 @@ type ProcessorConfig struct {
 	// ExtraEndpoints adds deployment-specific inference paths to the default OpenAI endpoint allowlist.
 	ExtraEndpoints []string `yaml:"extra_endpoints"`
 
+	// ResumableRecovery enables the PostgreSQL durable manifest/checkpoint path.
+	// Milestone 1 is intentionally limited to one worker and one Async model.
+	ResumableRecovery bool `yaml:"resumable_recovery"`
+
+	// ResumableLeaseDuration bounds how long a processor owns a resumable batch
+	// before another processor may recover it. The default matches llm-d Async's
+	// 300-second claim lease; Async documents that claim as exceeding inference time.
+	ResumableLeaseDuration time.Duration `yaml:"resumable_lease_duration"`
+
 	// TaskWaitTime is the timeout parameter used when dequeueing from the priority queue
 	// This should be shorter than PollInterval
 	TaskWaitTime time.Duration `yaml:"task_wait_time"`
@@ -352,8 +361,9 @@ func (pc *ProcessorConfig) LoadFromYAML(filePath string) error {
 // TaskWaitTime has to be shorter than poll interval.
 func NewConfig() *ProcessorConfig {
 	return &ProcessorConfig{
-		PollInterval: 5 * time.Second,
-		TaskWaitTime: 1 * time.Second,
+		PollInterval:           5 * time.Second,
+		TaskWaitTime:           1 * time.Second,
+		ResumableLeaseDuration: 5 * time.Minute,
 		ProcessTimeBucket: BucketConfig{
 			BucketStart:  0.1,
 			BucketFactor: 2,
@@ -467,6 +477,23 @@ func (c *ProcessorConfig) Validate() error {
 
 	if err := c.validateGateways(); err != nil {
 		return err
+	}
+	if c.ResumableRecovery {
+		if c.ResumableLeaseDuration <= 0 {
+			return fmt.Errorf("resumable_lease_duration must be > 0 when resumable_recovery is enabled")
+		}
+		if c.DBClientCfg.Type != sharedcfg.DBTypePostgreSQL {
+			return fmt.Errorf("resumable_recovery requires a PostgreSQL database")
+		}
+		if c.DispatchMode != DispatchModeAsync {
+			return fmt.Errorf("resumable_recovery requires dispatch_mode %q", DispatchModeAsync)
+		}
+		if c.NumWorkers != 1 {
+			return fmt.Errorf("resumable_recovery requires num_workers=1")
+		}
+		if len(c.AsyncDispatchConfig.Models) != 1 {
+			return fmt.Errorf("resumable_recovery requires exactly one async model queue")
+		}
 	}
 
 	return nil

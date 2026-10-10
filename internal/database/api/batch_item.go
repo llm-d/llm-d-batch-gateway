@@ -16,6 +16,8 @@ limitations under the License.
 
 package api
 
+import "time"
+
 // BatchItem is the database item type
 type BatchItem struct {
 	BaseIndexes
@@ -25,6 +27,17 @@ type BatchItem struct {
 	// Set atomically with the status transition to in_progress during dequeue.
 	// Empty when the job is queued (validating) or in a terminal state.
 	ProcessorID string
+
+	// OwnerInstanceID identifies the resumable recovery owner. Unlike
+	// ProcessorID, it changes when a replacement Processor takes over.
+	OwnerInstanceID string
+
+	// OwnerLeaseExpiresAt is evaluated by PostgreSQL when a resumable owner
+	// renews or a replacement takes over.
+	OwnerLeaseExpiresAt *time.Time
+
+	// OwnerLeaseDuration is an activation input, not persisted state.
+	OwnerLeaseDuration time.Duration
 
 	// Priority determines dequeue order (lower = higher priority).
 	// Stores SLO.UnixMicro() — jobs with earlier deadlines are dequeued first.
@@ -43,6 +56,14 @@ type BatchItem struct {
 	// RecoveryAttempts counts startup recoveries under the current ownership.
 	// Reset on dequeue, incremented by PQClaimOwned.
 	RecoveryAttempts int64
+
+	// Resumable marks jobs whose durable manifest allows startup recovery to
+	// resume work without GC resetting or terminalizing the batch.
+	Resumable bool
+
+	// ExpectedResumable optionally fences DBUpdate on the persisted resumable
+	// value. It is a mutation precondition and is not itself persisted.
+	ExpectedResumable *bool
 }
 
 // BatchQuery specifies parameters for retrieving batches from the database.

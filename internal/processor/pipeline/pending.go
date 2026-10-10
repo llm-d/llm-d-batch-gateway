@@ -30,6 +30,12 @@ func (p *PendingRequests) NumRequests() int64 {
 	return p.numRequests
 }
 
+// Has reports whether requestID is currently awaiting an async result.
+func (p *PendingRequests) Has(requestID string) bool {
+	_, ok := p.m.Load(requestID)
+	return ok
+}
+
 // Store registers a request as pending an async result.
 func (p *PendingRequests) Store(msg RequestItem) {
 	p.m.Store(msg.RequestID, msg)
@@ -45,32 +51,28 @@ func (p *PendingRequests) decrement() {
 	}
 }
 
-// Resolve enriches a result with request metadata. Returns true if the
-// result is accepted: either it already has metadata (cancels, inline errors)
-// or it was found in the pending map (async inference results).
-// Returns false only for broadcast results that belong to another job.
-func (p *PendingRequests) Resolve(result *ResultItem) bool {
-	if result.Error != nil {
-		if _, ok := p.m.LoadAndDelete(result.RequestID); ok {
-			p.decrement()
-			return true
-		}
-		return result.CustomID != ""
-	}
-	if result.CustomID != "" {
-		if _, ok := p.m.LoadAndDelete(result.RequestID); ok {
-			p.decrement()
-		}
-		return true
-	}
-	if msg, ok := p.m.LoadAndDelete(result.RequestID); ok {
-		p.decrement()
+// Enrich adds pending request metadata without marking the request complete.
+// A durable result must remain pending until its checkpoint and acknowledgement
+// have both succeeded.
+func (p *PendingRequests) Enrich(result *ResultItem) bool {
+	if msg, ok := p.m.Load(result.RequestID); ok {
 		result.CustomID = msg.CustomID
 		result.ModelID = msg.ModelID
 		result.SubmittedAt = msg.SubmittedAt
 		return true
 	}
-	return false
+	return result.CustomID != ""
+}
+
+// Resolve marks an enriched result complete after durable handling succeeds.
+func (p *PendingRequests) Resolve(result *ResultItem) bool {
+	if !p.Enrich(result) {
+		return false
+	}
+	if _, ok := p.m.LoadAndDelete(result.RequestID); ok {
+		p.decrement()
+	}
+	return true
 }
 
 // Wait blocks until all pending entries are resolved or ctx is cancelled.
