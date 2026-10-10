@@ -15,10 +15,14 @@ const defaultProgressInterval = time.Second
 // ProgressUpdater pushes progress counts to a status store.
 type ProgressUpdater interface {
 	UpdateProgressCounts(ctx context.Context, jobID string, counts *openai.BatchRequestCounts) error
+	// CheckJobStatus is called on every interval, whether or not the counts
+	// changed, so a job whose stored state requires it to stop is noticed even
+	// when no results arrive.
+	CheckJobStatus(ctx context.Context, jobID string) error
 }
 
-// ProgressTracker tracks request completion counts and pushes throttled
-// updates to the status store.
+// ProgressTracker tracks request completion counts, pushes throttled updates
+// to the status store and re-checks the job's status on every interval.
 type ProgressTracker struct {
 	mu        sync.Mutex
 	total     int64
@@ -61,8 +65,8 @@ func (pt *ProgressTracker) RecordFailure(err error) {
 }
 
 // Run pushes the initial counts at once, then starts the ticker that pushes
-// throttled updates to the status store. Returns when ctx is cancelled, after
-// pushing final counts.
+// throttled updates to the status store and checks the job's status on every
+// tick. Returns when ctx is cancelled, after pushing final counts.
 //
 // The first push makes the total visible right away. Without it, the API shows
 // a total of 0 until the first tick, which can be many seconds away.
@@ -89,6 +93,11 @@ func (pt *ProgressTracker) Run(ctx context.Context) error {
 			pt.mu.Unlock()
 			if dirty {
 				pt.push(ctx)
+			}
+			// Check on every tick, not only when counts changed. Skip it if
+			// the push already stopped the job.
+			if ctx.Err() == nil {
+				pt.check(ctx)
 			}
 		}
 	}
@@ -120,5 +129,19 @@ func (pt *ProgressTracker) push(ctx context.Context) {
 	}
 	if err := pt.updater.UpdateProgressCounts(ctx, pt.jobID, pt.Counts()); err != nil {
 		pt.logger.Error(err, "Failed to update progress counts (best-effort)")
+		// Keep the counts dirty so the next tick retries the write instead of
+		// waiting for another result.
+		pt.mu.Lock()
+		pt.dirty = true
+		pt.mu.Unlock()
+	}
+}
+
+func (pt *ProgressTracker) check(ctx context.Context) {
+	if pt.updater == nil {
+		return
+	}
+	if err := pt.updater.CheckJobStatus(ctx, pt.jobID); err != nil {
+		pt.logger.Error(err, "Failed to check job status (best-effort)")
 	}
 }
