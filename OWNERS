@@ -3,15 +3,14 @@
 # List of usernames who may use /lgtm
 reviewers:
   - aneeshkp
-  - j-mok-dev
   - lioraron
-  - vishbhat
+  - madhugoutham
   - wseaton
-  - yizhaodev
   - zdtsw
 
 # List of usernames who may use /approve
 approvers:
+  - aneeshkp
   - j-mok-dev
   - lioraron
   - vishbhat
