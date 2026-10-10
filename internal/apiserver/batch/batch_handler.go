@@ -245,21 +245,13 @@ func (c *BatchAPIHandler) ListBatches(w http.ResponseWriter, r *http.Request) {
 		limit = parsedLimit
 	}
 
-	after := 0
-	if afterStr := query.Get(common.QueryParamAfter); afterStr != "" {
-		var parsedAfter int
-		if _, err := fmt.Sscanf(afterStr, "%d", &parsedAfter); err != nil {
-			apiErr := openai.NewAPIError(http.StatusBadRequest, "", "invalid after parameter: must be an integer", nil)
-			common.WriteAPIError(w, r, apiErr)
-			return
-		}
-
-		if parsedAfter < 0 {
-			apiErr := openai.NewAPIError(http.StatusBadRequest, "", "invalid after parameter: must be equal to or greater than 0", nil)
-			common.WriteAPIError(w, r, apiErr)
-			return
-		}
-		after = parsedAfter
+	// after is the ID of the last batch of the previous page (OpenAI cursor).
+	// A non-negative integer offset is still accepted for backward compatibility.
+	after, afterID, err := common.ParseAfter(query.Get(common.QueryParamAfter), ucom.BatchIDPrefix)
+	if err != nil {
+		apiErr := openai.NewAPIError(http.StatusBadRequest, "", "invalid after parameter: "+err.Error(), nil)
+		common.WriteAPIError(w, r, apiErr)
+		return
 	}
 
 	// Get tenant ID from context
@@ -268,7 +260,7 @@ func (c *BatchAPIHandler) ListBatches(w http.ResponseWriter, r *http.Request) {
 	// Request items
 	items, _, expectMore, err := c.clients.BatchDB.DBGet(ctx,
 		&api.BatchQuery{
-			BaseQuery: api.BaseQuery{TenantID: tenantID},
+			BaseQuery: api.BaseQuery{TenantID: tenantID, AfterID: afterID},
 		},
 		true, after, limit)
 	if err != nil {

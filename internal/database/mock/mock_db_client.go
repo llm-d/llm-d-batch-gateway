@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 	"time"
 
@@ -101,6 +102,27 @@ func (m *MockDBClient[T, Q]) DBGet(
 			}
 			return true
 		})
+
+		// Order by ID like the real database (sync.Map iteration order is random).
+		sort.Slice(allMatches, func(i, j int) bool {
+			if bq.Descending {
+				return m.idGetter(allMatches[i]) > m.idGetter(allMatches[j])
+			}
+			return m.idGetter(allMatches[i]) < m.idGetter(allMatches[j])
+		})
+
+		// Keyset cursor: keep only items strictly after AfterID; it replaces the offset.
+		if bq.AfterID != "" {
+			start = 0
+			kept := allMatches[:0]
+			for _, item := range allMatches {
+				id := m.idGetter(item)
+				if (!bq.Descending && id > bq.AfterID) || (bq.Descending && id < bq.AfterID) {
+					kept = append(kept, item)
+				}
+			}
+			allMatches = kept
+		}
 	}
 
 	// Handle pagination
