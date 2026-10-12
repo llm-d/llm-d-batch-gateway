@@ -15,17 +15,6 @@ data:
     metrics_addr: {{ .Values.gc.config.metricsAddr | quote }}
     db_client:
       type: {{ .Values.global.dbClient.type | quote }}
-      redis:
-        db: {{ .Values.global.dbClient.redis.db }}
-        enable_tls: {{ .Values.global.dbClient.redis.enableTLS }}
-        insecure: {{ .Values.global.dbClient.redis.insecure }}
-        timeout: {{ .Values.global.dbClient.redis.timeout | quote }}
-        max_retries: {{ .Values.global.dbClient.redis.maxRetries }}
-        min_retry_backoff: {{ .Values.global.dbClient.redis.minRetryBackoff | quote }}
-        max_retry_backoff: {{ .Values.global.dbClient.redis.maxRetryBackoff | quote }}
-        pool_timeout: {{ .Values.global.dbClient.redis.poolTimeout | quote }}
-        conn_max_idle_time: {{ .Values.global.dbClient.redis.connMaxIdleTime | quote }}
-        conn_max_lifetime: {{ .Values.global.dbClient.redis.connMaxLifetime | quote }}
     file_client:
       type: {{ .Values.global.fileClient.type | quote }}
       fs:

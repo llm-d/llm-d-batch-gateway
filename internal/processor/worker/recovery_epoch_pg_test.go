@@ -47,23 +47,22 @@ func TestRecoverOwnedJobsFencesPreviousEpoch(t *testing.T) {
 		t.Fatalf("truncate: %v", err)
 	}
 
-	statusClient := mockdb.NewMockBatchStatusClient()
 	pcfg := config.NewConfig()
 	pcfg.WorkDir = t.TempDir()
 	p, err := NewProcessor(pcfg, &clientset.Clientset{
-		BatchDB:   batchDB,
-		FileDB:    newMockFileDBClient(),
-		File:      mockfiles.NewMockBatchFilesClient(t.TempDir()),
-		Queue:     queue,
-		Status:    statusClient,
-		Event:     mockdb.NewMockBatchEventChannelClient(),
-		Inference: inference.NewSingleClientResolver(&fakeInferenceClient{}),
+		BatchDB:         batchDB,
+		BatchProgressDB: batchDB,
+		FileDB:          newMockFileDBClient(),
+		File:            mockfiles.NewMockBatchFilesClient(t.TempDir()),
+		Queue:           queue,
+		Event:           mockdb.NewMockBatchEventChannelClient(),
+		Inference:       inference.NewSingleClientResolver(&fakeInferenceClient{}),
 	}, processorID, testLogger(t))
 	if err != nil {
 		t.Fatalf("NewProcessor: %v", err)
 	}
 	p.poller = NewPoller(queue, batchDB)
-	p.updater = NewStatusUpdater(batchDB, statusClient, 86400)
+	p.updater = NewStatusUpdater(batchDB)
 
 	const jobID = "job-zombie-fence"
 	const oldEpoch = int64(4)

@@ -20,7 +20,6 @@ package batch
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -46,15 +45,21 @@ import (
 var _ common.ApiHandler = (*BatchAPIHandler)(nil)
 
 type BatchAPIHandler struct {
-	config  *common.ServerConfig
-	clients *clientset.Clientset
+	config            *common.ServerConfig
+	clients           *clientset.Clientset
+	endpointAllowlist openai.EndpointAllowlist
 }
 
-func NewBatchAPIHandler(config *common.ServerConfig, clients *clientset.Clientset) *BatchAPIHandler {
-	return &BatchAPIHandler{
-		config:  config,
-		clients: clients,
+func NewBatchAPIHandler(config *common.ServerConfig, clients *clientset.Clientset) (*BatchAPIHandler, error) {
+	endpointAllowlist, err := openai.NewEndpointAllowlist(config.BatchAPI.ExtraEndpoints)
+	if err != nil {
+		return nil, fmt.Errorf("extra endpoints: %w", err)
 	}
+	return &BatchAPIHandler{
+		config:            config,
+		clients:           clients,
+		endpointAllowlist: endpointAllowlist,
+	}, nil
 }
 
 func (c *BatchAPIHandler) GetRoutes() []common.Route {
@@ -102,7 +107,7 @@ func (c *BatchAPIHandler) CreateBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// validate request
-	if err := batchReq.Validate(); err != nil {
+	if err := batchReq.ValidateWithEndpointAllowlist(c.endpointAllowlist); err != nil {
 		logger.Error(err, "failed to validate request")
 		apiErr := openai.NewAPIError(http.StatusBadRequest, "", err.Error(), nil)
 		common.WriteAPIError(w, r, apiErr)
@@ -299,37 +304,6 @@ func (c *BatchAPIHandler) ListBatches(w http.ResponseWriter, r *http.Request) {
 	common.WriteJSONResponse(w, r, http.StatusOK, resp)
 }
 
-// mergeProgressCounts retrieves real-time progress counts from Redis and merges them
-// into the batch object. This is only done for batches in the "in_progress" state.
-func (c *BatchAPIHandler) mergeProgressCounts(ctx context.Context, batch *openai.Batch) error {
-	// Only merge progress for in-progress batches
-	if batch.Status != openai.BatchStatusInProgress {
-		return nil
-	}
-
-	// Try to get progress counts from Redis
-	data, err := c.clients.Status.StatusGet(ctx, batch.ID)
-	if err != nil {
-		return fmt.Errorf("failed to get status from Redis: %w", err)
-	}
-
-	// If no data in Redis, keep the DB values
-	if data == nil {
-		return nil
-	}
-
-	// Parse the progress counts from Redis
-	var progressCounts openai.BatchRequestCounts
-	if err := json.Unmarshal(data, &progressCounts); err != nil {
-		return fmt.Errorf("failed to unmarshal progress counts: %w", err)
-	}
-
-	// Merge the counts - use Redis values as they are more up-to-date
-	batch.RequestCounts = progressCounts
-
-	return nil
-}
-
 func (c *BatchAPIHandler) getBatchItemFromDB(r *http.Request, operation string) (*api.BatchItem, *openai.APIError) {
 	ctx := r.Context()
 	logger := logging.FromRequest(r)
@@ -405,12 +379,6 @@ func (c *BatchAPIHandler) RetrieveBatch(w http.ResponseWriter, r *http.Request) 
 		logger.Error(err, "failed to convert database item to batch")
 		common.WriteInternalServerError(w, r)
 		return
-	}
-
-	// Merge real-time progress counts from Redis for in-progress batches
-	if err := c.mergeProgressCounts(ctx, batch); err != nil {
-		logger.Error(err, "failed to merge progress counts", "batch_id", batch.ID, "status", batch.Status)
-		// Log error but don't fail the request - return what we have from DB
 	}
 
 	spanAttrs := []attribute.KeyValue{attribute.String(uotel.AttrInputFileID, batch.InputFileID)}
@@ -510,10 +478,7 @@ func (c *BatchAPIHandler) CancelBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Job is being processed — mark as cancelling and send cancel event.
-	batch.Status = openai.BatchStatusCancelling
-	cancellingAt := time.Now().UTC().Unix()
-	batch.CancellingAt = &cancellingAt
-
+	//
 	// Persist the status change *before* sending the cancel event to prevent a
 	// write-write race between the API server and the worker.
 	//
@@ -525,18 +490,8 @@ func (c *BatchAPIHandler) CancelBatch(w http.ResponseWriter, r *http.Request) {
 	//
 	// By writing first, the API server's "cancelling" is already in the DB before the
 	// worker can act, so any subsequent worker write is the final state.
-
-	tenantID := common.GetTenantIDFromContext(ctx)
-
-	dbItem, err := converter.BatchToDBItem(batch, tenantID, item.Tags)
+	batch, err = c.markCancelling(ctx, item, batch)
 	if err != nil {
-		logger.Error(err, "failed to convert batch to database item")
-		common.WriteInternalServerError(w, r)
-		return
-	}
-
-	dbItem.Epoch = item.Epoch
-	if err := c.clients.BatchDB.DBUpdate(ctx, dbItem, item.Status); err != nil {
 		if errors.Is(err, api.ErrConflict) {
 			apiErr := openai.NewAPIError(http.StatusConflict, "", "batch changed state during cancel, retry", nil)
 			common.WriteAPIError(w, r, apiErr)
@@ -563,4 +518,51 @@ func (c *BatchAPIHandler) CancelBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	common.WriteJSONResponse(w, r, http.StatusOK, batch)
+}
+
+const maxCancelAttempts = 3
+
+// markCancelling persists the cancelling transition, conditional on the row's
+// status and epoch. A conflict is retried against the fresh row while its
+// lifecycle status and epoch are unchanged.
+func (c *BatchAPIHandler) markCancelling(ctx context.Context, item *api.BatchItem, batch *openai.Batch) (*openai.Batch, error) {
+	tenantID := common.GetTenantIDFromContext(ctx)
+	fromStatus := batch.Status
+	for attempt := 1; ; attempt++ {
+		batch.Status = openai.BatchStatusCancelling
+		cancellingAt := time.Now().UTC().Unix()
+		batch.CancellingAt = &cancellingAt
+
+		dbItem, err := converter.BatchToDBItem(batch, tenantID, item.Tags)
+		if err != nil {
+			return nil, fmt.Errorf("markCancelling: %w", err)
+		}
+		dbItem.Epoch = item.Epoch
+
+		err = c.clients.BatchDB.DBUpdate(ctx, dbItem, item.Status)
+		if err == nil {
+			return batch, nil
+		}
+		if !errors.Is(err, api.ErrConflict) || attempt == maxCancelAttempts {
+			return nil, err
+		}
+
+		items, _, _, err := c.clients.BatchDB.DBGet(ctx,
+			&api.BatchQuery{BaseQuery: api.BaseQuery{IDs: []string{item.ID}, TenantID: tenantID}},
+			true, 0, 1)
+		if err != nil {
+			return nil, fmt.Errorf("markCancelling: %w", err)
+		}
+		if len(items) != 1 || items[0].Epoch != item.Epoch {
+			return nil, fmt.Errorf("markCancelling: %w", api.ErrConflict)
+		}
+		freshBatch, err := converter.DBItemToBatch(items[0])
+		if err != nil {
+			return nil, fmt.Errorf("markCancelling: %w", err)
+		}
+		if freshBatch.Status != fromStatus {
+			return nil, fmt.Errorf("markCancelling: %w", api.ErrConflict)
+		}
+		item, batch = items[0], freshBatch
+	}
 }

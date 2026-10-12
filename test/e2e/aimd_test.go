@@ -22,7 +22,7 @@
 // configured threshold. The tests
 // provoke that by choking one model's engine through the vllm-vcr control API
 // (one running request, multi-second decode) while the other model stays
-// healthy. These tests therefore require ENABLE_GIE=true.
+// healthy. These tests therefore require ENABLE_GIE=true (legacy flag name).
 //
 // AIMD itself has no independent spec yet, so its gauges (limit, increase and
 // decrease counters, per endpoint) are logged for inspection rather than
@@ -54,7 +54,7 @@ func testAIMD(t *testing.T) {
 		t.Skip("kubectl not available")
 	}
 	if !detectGIEDeployed(t) {
-		t.Skip("GIE EPP not deployed (deploy with ENABLE_GIE=true); backpressure comes from EPP shedding")
+		t.Skip("EPP not deployed (deploy with ENABLE_GIE=true; legacy flag name); backpressure comes from EPP shedding")
 	}
 	t.Cleanup(func() { deleteE2ECurlPod(t) })
 
@@ -63,7 +63,7 @@ func testAIMD(t *testing.T) {
 }
 
 // saturationRequests is the size of the batch submitted at a saturated
-// model: twice the processor's perEndpoint concurrency in GIE mode (20), so
+// model: twice the processor's perEndpoint concurrency in per-model EPP mode (20), so
 // batch arrivals keep coming as shed requests are retried or give up.
 const saturationRequests = 40
 

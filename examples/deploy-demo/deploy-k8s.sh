@@ -52,7 +52,7 @@ MODEL_ROUTES=(
     "${MODEL_NAME}:${LLMD_POOL_NAME}"
 )
 
-# Flow control: GIE priority-based dispatch (interactive > batch).
+# Flow control: Router EPP priority-based dispatch (interactive > batch).
 # When enabled, EPP is configured with flow control plugins and InferenceObjective
 # CRDs are created so batch requests are sheddable (priority -1) while interactive
 # requests get priority 100.
@@ -492,25 +492,25 @@ deploy_llmd_model() {
 create_inference_objectives() {
     step "Creating InferenceObjective resources..."
     kubectl apply -f - <<EOF
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: ${INTERACTIVE_FLOW_CONTROL_OBJECTIVE}
   namespace: ${LLM_NAMESPACE}
 spec:
   priority: 100
-  poolRef:
-    name: ${LLMD_POOL_NAME}
+  poolRefs:
+    - name: ${LLMD_POOL_NAME}
 ---
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: ${BATCH_FLOW_CONTROL_OBJECTIVE}
   namespace: ${LLM_NAMESPACE}
 spec:
   priority: -1
-  poolRef:
-    name: ${LLMD_POOL_NAME}
+  poolRefs:
+    - name: ${LLMD_POOL_NAME}
 EOF
     log "InferenceObjectives created (${INTERACTIVE_FLOW_CONTROL_OBJECTIVE}: priority 100, ${BATCH_FLOW_CONTROL_OBJECTIVE}: priority -1)."
 }
@@ -1387,7 +1387,7 @@ usage() {
     echo "  GATEWAY_LOCAL_PORT     Port-forward fallback port (default: 8080)"
     echo "  BATCH_DEV_VERSION      Batch gateway image tag / commit SHA (default: local)"
     echo "  BATCH_RELEASE_VERSION  Install released OCI chart (e.g. v1.0.0)"
-    echo "  ENABLE_FLOW_CONTROL   Enable GIE flow control (default: true)"
+    echo "  ENABLE_FLOW_CONTROL   Enable Router EPP flow control (default: true)"
     echo "  BATCH_FLOW_CONTROL_OBJECTIVE InferenceObjective name for batch (default: batch-sheddable)"
     echo "  ENABLE_DISPATCHER      Use normal HTTP sync by default (false); true opts into async dispatch"
     echo "  DISPATCHER_VERSION     llm-d-async version (default: v0.7.3)"

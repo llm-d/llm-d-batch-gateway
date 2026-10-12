@@ -166,7 +166,7 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 			return fmt.Errorf("write line %d to input file %q: %w", lineCount, localInputFilePath, err)
 		}
 
-		requestMeta, err := extractAndValidateLine(line)
+		requestMeta, err := extractAndValidateLine(line, p.endpointAllowlist, jobInfo.BatchJob.Endpoint.String())
 		if err != nil {
 			return fmt.Errorf("validate request at line %d: %w", lineCount, err)
 		}
@@ -282,7 +282,7 @@ type requestMeta struct {
 
 // extractAndValidateLine parses and validates a request line and returns the
 // metadata needed during ingestion.
-func extractAndValidateLine(line []byte) (requestMeta, error) {
+func extractAndValidateLine(line []byte, endpointAllowlist openai.EndpointAllowlist, batchEndpoint string) (requestMeta, error) {
 	var req planRequestLine
 	trimmedLine := bytes.TrimSuffix(line, []byte{'\n'})
 	if err := json.Unmarshal(trimmedLine, &req); err != nil {
@@ -303,8 +303,11 @@ func extractAndValidateLine(line []byte) (requestMeta, error) {
 	if !strings.HasPrefix(req.URL, "/") || strings.HasPrefix(req.URL, "//") || strings.Contains(req.URL, "://") {
 		return requestMeta{}, fmt.Errorf("url must be a relative path: %s", req.URL)
 	}
-	if !openai.IsValidEndpoint(req.URL) {
+	if !endpointAllowlist.IsValid(req.URL) {
 		return requestMeta{}, fmt.Errorf("invalid endpoint: %s", req.URL)
+	}
+	if req.URL != batchEndpoint {
+		return requestMeta{}, fmt.Errorf("request endpoint %q does not match batch endpoint %q", req.URL, batchEndpoint)
 	}
 	if req.Body.Model == "" {
 		return requestMeta{}, fmt.Errorf("model id is empty")

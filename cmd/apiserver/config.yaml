@@ -78,6 +78,11 @@ batch_api:
   # pass_through_headers:
   #   - "X-MaaS-Username"
   #   - "X-MaaS-Group"
+  # Additional deployment-specific inference paths. Standard OpenAI endpoints
+  # are always allowed. Configure the identical list on the processor.
+  # extra_endpoints:
+  #   - "/v1/classify"
+  #   - "/v1/pooling"
 
 # File API configuration
 file_api:

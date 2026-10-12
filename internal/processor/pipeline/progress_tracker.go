@@ -60,9 +60,18 @@ func (pt *ProgressTracker) RecordFailure(err error) {
 	pt.mu.Unlock()
 }
 
-// Run starts the ticker that pushes throttled updates to the status store.
-// Returns when ctx is cancelled, after pushing final counts.
+// Run pushes the initial counts at once, then starts the ticker that pushes
+// throttled updates to the status store. Returns when ctx is cancelled, after
+// pushing final counts.
+//
+// The first push makes the total visible right away. Without it, the API shows
+// a total of 0 until the first tick, which can be many seconds away.
 func (pt *ProgressTracker) Run(ctx context.Context) error {
+	pt.mu.Lock()
+	pt.dirty = false
+	pt.mu.Unlock()
+	pt.push(ctx)
+
 	ticker := time.NewTicker(pt.interval)
 	defer ticker.Stop()
 

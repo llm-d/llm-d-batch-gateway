@@ -49,29 +49,38 @@ GC_IMG="${GC_IMG:-ghcr.io/llm-d/batch-gateway-gc:${IMAGE_TAG}}"
 # USE_KIND=false → use existing kubeconfig context (OpenShift / Kubernetes)
 USE_KIND="${USE_KIND:-true}"
 
-# ── GIE (Gateway API Inference Extension) flow control support ────────────────
-# Set ENABLE_GIE=true to deploy per-model EPP (standalone mode) in front of
+# ── Router EPP flow control support ───────────────────────────────────────────
+# Set ENABLE_GIE=true (legacy flag name) to deploy per-model Router EPPs
+# (standalone mode) in front of
 # each vllm-sim instance; processor routes through EPP and sends
 # x-gateway-inference-objective / x-slo-ttft-ms headers.
 #
 # Naming contract (referenced by dev-deploy, dev-clean, and e2e tests):
 #   EPP Helm release:      ${GIE_EPP_RELEASE}-${model}          e.g. epp-sim-model
 #   EPP deployment/service: ${GIE_EPP_RELEASE}-${model}-epp     e.g. epp-sim-model-epp
-#   InferencePool name:     ${GIE_EPP_RELEASE}-${model}          (created by Helm chart)
-#   InferenceObjective:     batch-sheddable-${model}             (GIE mode)
-#                           batch-sheddable                      (non-GIE mode)
+#   InferencePool name:     ${GIE_EPP_RELEASE}-${model}          (GAIE CRD)
+#   InferenceObjective:     batch-sheddable-${model}             (per-model EPP mode)
+#                           batch-sheddable                      (shared EPP mode)
 #   Managed-by label:       app.kubernetes.io/managed-by=batch-gateway-dev
 ENABLE_GIE="${ENABLE_GIE:-false}"
 
 # ── Async dispatcher (llm-d-async) support ──────────────────────────────────
 # Use sync dispatch by default. Set ENABLE_DISPATCHER=true to deploy the
-# llm-d-async dev fixtures; sync dispatch is required for GIE and custom layouts.
+# llm-d-async dev fixtures; sync dispatch is required for per-model EPPs and custom layouts.
 # Set DISPATCHER_SOURCE to a local llm-d-async checkout to build from source.
 ENABLE_DISPATCHER="${ENABLE_DISPATCHER:-false}"
-GIE_REPO="${GIE_REPO:-}"
-GIE_UPSTREAM_REPO="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
-# Last GIE tag with standalone EPP + flow-control plugins. EPP then moved to llm-d-router.
-GIE_VERSION="${GIE_VERSION:-v1.5.0}"
+# EPP comes from the llm-d-router standalone chart. The InferencePool CRD comes
+# from GAIE; InferenceObjective and InferenceModelRewrite CRDs come from
+# llm-d-router. Chart "v0" is built from router main (llm-d.ai/v1 is only there
+# until the 1.0.0 release). TODO: switch to v1.0.0 once it is released.
+ROUTER_REPO="${ROUTER_REPO:-}"
+ROUTER_CHART_VERSION="${ROUTER_CHART_VERSION:-v0}"
+ROUTER_CRD_REF="${ROUTER_CHART_VERSION}"
+if [ "${ROUTER_CRD_REF}" = "v0" ]; then
+    ROUTER_CRD_REF="main"
+fi
+# Legacy variable name retained; this is the GAIE InferencePool CRD version.
+GIE_VERSION="${GIE_VERSION:-v1.6.2}"
 GIE_EPP_RELEASE="${GIE_EPP_RELEASE:-epp}"
 GIE_OBJECTIVE_PREFIX="${GIE_OBJECTIVE_PREFIX:-batch-sheddable}"
 
@@ -101,7 +110,7 @@ check_prerequisites() {
     esac
     if [ "${ENABLE_DISPATCHER}" = "true" ]; then
         if [ "${ENABLE_GIE}" = "true" ]; then
-            die "ENABLE_GIE=true cannot be combined with ENABLE_DISPATCHER=true. Use 'make dev-deploy-gie' or ENABLE_DISPATCHER=false ENABLE_GIE=true make dev-deploy for sync GIE."
+            die "ENABLE_GIE=true cannot be combined with ENABLE_DISPATCHER=true. Use 'make dev-deploy-gie' or ENABLE_DISPATCHER=false ENABLE_GIE=true make dev-deploy for sync Router EPP."
         fi
         # These restrictions belong to the fixed dev/E2E fixtures, not the chart.
         local setting
@@ -948,105 +957,99 @@ EOF
     log "vllm-vcr installed. Service: ${sim_name}:8000 (control API :${VLLM_SIM_CONTROL_PORT})"
 }
 
-# ── GIE (Gateway API Inference Extension) ────────────────────────────────────
-
-ensure_gie_repo() {
-    if [ -n "${GIE_REPO}" ] && [ -d "${GIE_REPO}" ]; then
-        log "Using user-provided GIE repo at ${GIE_REPO}"
-    else
-        log "Cloning ${GIE_UPSTREAM_REPO} at ${GIE_VERSION}..."
-        GIE_REPO="$(mktemp -d)/gateway-api-inference-extension"
-        GIE_REPO_TMPDIR="$(dirname "${GIE_REPO}")"
-        git clone --depth 1 --branch "${GIE_VERSION}" "${GIE_UPSTREAM_REPO}" "${GIE_REPO}"
-        log "Cloned GIE repo to ${GIE_REPO}"
-    fi
-
-    if [ ! -f "${GIE_REPO}/config/charts/standalone/Chart.yaml" ]; then
-        die "GIE repo at ${GIE_REPO} does not contain config/charts/standalone/Chart.yaml"
-    fi
-}
+# ── Router EPP and GAIE InferencePool support ─────────────────────────────────
 
 install_gie_crds() {
-    step "Installing GIE CRDs..."
-    kubectl apply -f "${GIE_REPO}/config/crd/bases/"
-    log "GIE CRDs installed."
+    step "Installing InferencePool, InferenceObjective and InferenceModelRewrite CRDs..."
+    local router_crd_base="https://raw.githubusercontent.com/llm-d/llm-d-router/${ROUTER_CRD_REF}/config/crd/bases"
+    if [ -n "${ROUTER_REPO}" ]; then
+        router_crd_base="${ROUTER_REPO}/config/crd/bases"
+    fi
+    kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/${GIE_VERSION}/config/crd/bases/inference.networking.k8s.io_inferencepools.yaml"
+    kubectl apply -f "${router_crd_base}/llm-d.ai_inferenceobjectives.yaml"
+    kubectl apply -f "${router_crd_base}/llm-d.ai_inferencemodelrewrites.yaml"
+    kubectl wait --for=condition=established crd/inferencepools.inference.networking.k8s.io \
+        crd/inferenceobjectives.llm-d.ai crd/inferencemodelrewrites.llm-d.ai --timeout=60s
+    log "CRDs installed."
 }
 
 install_gie_epp() {
     local sim_name="$1"
     local sim_model="$2"
     local release_name="${GIE_EPP_RELEASE}-${sim_model}"
-    step "Installing GIE EPP (standalone) for model '${sim_model}'..."
+    step "Installing router EPP (standalone) for model '${sim_model}'..."
 
-    local chart_dir="${GIE_REPO}/config/charts/standalone"
-    step "Building Helm dependencies for standalone chart..."
-    rm -rf "${chart_dir}/charts"
-    helm dependency build "${chart_dir}"
+    local chart_ref="oci://ghcr.io/llm-d/charts/llm-d-router-standalone"
+    local chart_args=(--version "${ROUTER_CHART_VERSION}")
+    if [ -n "${ROUTER_REPO}" ]; then
+        chart_ref="${ROUTER_REPO}/config/charts/llm-d-router-standalone"
+        chart_args=()
+        step "Building Helm dependencies for standalone chart..."
+        rm -f "${chart_ref}/Chart.lock"
+        rm -rf "${chart_ref}/charts"
+        helm dependency build "${chart_ref}"
+    fi
 
     local values_file
     values_file="$(mktemp)"
     cat > "${values_file}" <<'VALUESEOF'
-inferenceExtension:
-  pluginsCustomConfig:
-    flow-control-plugins.yaml: |
-      apiVersion: inference.networking.x-k8s.io/v1alpha1
-      kind: EndpointPickerConfig
-      featureGates:
-        - "flowControl"
-      plugins:
-        - type: round-robin-fairness-policy
-        - type: global-strict-fairness-policy
-        - type: slo-deadline-ordering-policy
-        - type: utilization-detector
-          parameters:
-            queueDepthThreshold: 1
-            kvCacheUtilThreshold: 0.8
-      flowControl:
-        maxBytes: 4294967296
-        defaultRequestTTL: 30s
-        priorityBands:
-          - priority: 100
-            maxBytes: 1073741824
-            fairnessPolicyRef: round-robin-fairness-policy
-            orderingPolicyRef: fcfs-ordering-policy
-          - priority: -1
-            maxBytes: 3221225472
+router:
+  epp:
+    pluginsConfigFile: "flow-control-plugins.yaml"
+    pluginsCustomConfig:
+      flow-control-plugins.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        featureGates:
+          - "flowControl"
+        plugins:
+          - type: round-robin-fairness-policy
+          - type: global-strict-fairness-policy
+          - type: slo-deadline-ordering-policy
+          - type: utilization-detector
+            parameters:
+              queueDepthThreshold: 1
+              kvCacheUtilThreshold: 0.8
+        flowControl:
+          maxBytes: 4294967296
+          defaultRequestTTL: 30s
+          priorityBands:
+            - priority: 100
+              maxBytes: 1073741824
+              fairnessPolicyRef: round-robin-fairness-policy
+              orderingPolicyRef: fcfs-ordering-policy
+            - priority: -1
+              maxBytes: 3221225472
+              fairnessPolicyRef: global-strict-fairness-policy
+              orderingPolicyRef: slo-deadline-ordering-policy
+          defaultPriorityBand:
+            maxBytes: 536870912
             fairnessPolicyRef: global-strict-fairness-policy
-            orderingPolicyRef: slo-deadline-ordering-policy
-        defaultPriorityBand:
-          maxBytes: 536870912
-          fairnessPolicyRef: global-strict-fairness-policy
-          orderingPolicyRef: fcfs-ordering-policy
-      saturationDetector:
-        pluginRef: utilization-detector
+            orderingPolicyRef: fcfs-ordering-policy
+          saturationDetector:
+            pluginRef: utilization-detector
 VALUESEOF
 
+    # The Envoy ConfigMap name is fixed by default, so give each release its own.
     local helm_args=(
         --namespace "${NAMESPACE}"
-        --set "inferenceExtension.image.tag=${GIE_VERSION}"
-        --set inferenceExtension.monitoring.prometheus.auth.enabled=false
-        --set inferenceExtension.sidecar.enabled=true
-        --set "inferenceExtension.sidecar.configMap.name=envoy-${sim_model}"
-        --set "inferenceExtension.sidecar.volumes[0].name=config"
-        --set "inferenceExtension.sidecar.volumes[0].configMap.name=envoy-${sim_model}"
-        --set inferenceExtension.sidecar.proxyType=envoy
-        --set inferenceExtension.endpointsServer.createInferencePool=true
-        --set "inferencePool.modelServers.matchLabels.app=${sim_name}"
-        --set "inferencePool.targetPorts[0].number=8000"
-        --set inferencePool.modelServerType=vllm
-        --set inferenceExtension.pluginsConfigFile=flow-control-plugins.yaml
-        --set inferenceExtension.resources.requests.cpu=100m
-        --set inferenceExtension.resources.requests.memory=256Mi
-        --set inferenceExtension.resources.limits.memory=512Mi
-        --set "inferenceExtension.flags.zap-log-level=${LOG_VERBOSITY}"
+        --set router.monitoring.prometheus.auth.enabled=false
+        --set "router.proxy.presets.envoy.configMap.name=envoy-${sim_model}"
+        --set "router.modelServers.matchLabels.app=${sim_name}"
+        --set router.epp.resources.requests.cpu=100m
+        --set router.epp.resources.requests.memory=256Mi
+        --set router.epp.resources.limits.memory=512Mi
+        --set router.proxy.resources.requests.cpu=100m
+        --set router.proxy.resources.requests.memory=128Mi
+        --set "router.epp.flags.v=${LOG_VERBOSITY}"
         -f "${values_file}"
     )
 
     if helm status "${release_name}" -n "${NAMESPACE}" &>/dev/null; then
         log "EPP release '${release_name}' already exists. Upgrading..."
-        helm upgrade "${release_name}" "${chart_dir}" "${helm_args[@]}"
+        helm upgrade "${release_name}" "${chart_ref}" ${chart_args[@]+"${chart_args[@]}"} "${helm_args[@]}"
     else
-        helm install "${release_name}" "${chart_dir}" "${helm_args[@]}"
+        helm install "${release_name}" "${chart_ref}" ${chart_args[@]+"${chart_args[@]}"} "${helm_args[@]}"
     fi
     rm -f "${values_file}"
 
@@ -1055,12 +1058,12 @@ VALUESEOF
 }
 
 create_inference_objectives() {
-    step "Creating InferenceObjective CRDs..."
+    step "Creating InferenceObjectives..."
 
     for sim_model in "${VLLM_SIM_MODEL}" "${VLLM_SIM_B_MODEL}"; do
         local pool_name="${GIE_EPP_RELEASE}-${sim_model}"
         kubectl apply -f - <<EOF
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: interactive-default-${sim_model}
@@ -1069,11 +1072,11 @@ metadata:
     app.kubernetes.io/managed-by: batch-gateway-dev
 spec:
   priority: 100
-  poolRef:
-    group: inference.networking.k8s.io
-    name: ${pool_name}
+  poolRefs:
+    - group: inference.networking.k8s.io
+      name: ${pool_name}
 ---
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: ${GIE_OBJECTIVE_PREFIX}-${sim_model}
@@ -1082,9 +1085,9 @@ metadata:
     app.kubernetes.io/managed-by: batch-gateway-dev
 spec:
   priority: -1
-  poolRef:
-    group: inference.networking.k8s.io
-    name: ${pool_name}
+  poolRefs:
+    - group: inference.networking.k8s.io
+      name: ${pool_name}
 EOF
     done
 
@@ -1101,7 +1104,7 @@ install_batch_gateway() {
     if [ "${ENABLE_GIE}" = "true" ]; then
         vllm_sim_url="http://${GIE_EPP_RELEASE}-${VLLM_SIM_MODEL}-epp.${NAMESPACE}.svc.cluster.local:8081"
         vllm_sim_b_url="http://${GIE_EPP_RELEASE}-${VLLM_SIM_B_MODEL}-epp.${NAMESPACE}.svc.cluster.local:8081"
-        log "GIE enabled: routing both models through per-model EPP instances"
+        log "Router EPP mode enabled: routing both models through per-model EPP instances"
     else
         vllm_sim_url="http://${VLLM_SIM_NAME}.${NAMESPACE}.svc.cluster.local:8000"
         vllm_sim_b_url="http://${VLLM_SIM_B_NAME}.${NAMESPACE}.svc.cluster.local:8000"
@@ -1426,7 +1429,7 @@ print_usage() {
     echo "       - sim-model-b   (vllm-vcr at ${VLLM_SIM_B_NAME}, control API :${VLLM_SIM_CONTROL_PORT})"
     if [ "${ENABLE_GIE}" = "true" ]; then
     echo ""
-    echo "     GIE (flow control) is enabled:"
+    echo "     EPP flow control is enabled:"
     echo "       - Requests route through per-model EPP instances"
     echo "       - Each model has its own InferencePool and InferenceObjective"
     echo "       - InferenceObjectives: interactive-default (priority 100), ${GIE_OBJECTIVE_PREFIX} (priority -1)"
@@ -1529,15 +1532,10 @@ main() {
     install_vllm_sim "${VLLM_SIM_NAME}" "${VLLM_SIM_MODEL}" 50 100
     install_vllm_sim "${VLLM_SIM_B_NAME}" "${VLLM_SIM_B_MODEL}" 200 500
     if [ "${ENABLE_GIE}" = "true" ]; then
-        ensure_gie_repo
         install_gie_crds
         install_gie_epp "${VLLM_SIM_NAME}" "${VLLM_SIM_MODEL}"
         install_gie_epp "${VLLM_SIM_B_NAME}" "${VLLM_SIM_B_MODEL}"
         create_inference_objectives
-        if [ -n "${GIE_REPO_TMPDIR:-}" ]; then
-            rm -rf "${GIE_REPO_TMPDIR}"
-            log "Cleaned up cloned GIE repo at ${GIE_REPO_TMPDIR}"
-        fi
     fi
     if [ "${ENABLE_DISPATCHER}" = "true" ]; then
         source "${SCRIPT_DIR}/dev-deploy-dispatcher.sh"

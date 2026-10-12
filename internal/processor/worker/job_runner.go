@@ -51,7 +51,7 @@ import (
 var panicRecoveryTimeout = time.Minute
 
 func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
-	// Restore parent trace context propagated from the apiserver via Redis tags
+	// Restore parent trace context propagated from the apiserver via batch tags
 	if len(params.jobInfo.TraceContext) > 0 {
 		propagator := otel.GetTextMapPropagator()
 		ctx = propagator.Extract(ctx, propagation.MapCarrier(params.jobInfo.TraceContext))
@@ -150,6 +150,11 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 	abortCtx, abortCause := context.WithCancelCause(abortBase)
 	defer abortCause(context.Canceled)
 	params.cancelUser = func() { abortCause(batchctx.ErrCancelled) }
+	// A fenced progress write (jobProgressUpdater) trips this with the neutral
+	// cause context.Canceled. It is deliberately NOT a terminal user/shutdown/
+	// expiry cause: we lost ownership, so the new owner owns the job's terminal
+	// state and we must not write one ourselves.
+	params.onOwnershipLost = func() { abortCause(context.Canceled) }
 
 	// SIGTERM / pod shutdown propagates from the original ctx as ErrShutdown.
 	stopShutdown := context.AfterFunc(ctx, func() { abortCause(batchctx.ErrShutdown) })
@@ -201,6 +206,17 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 	}
 	execSpan.End()
 	params.requestCounts = requestCounts
+	// A neutral abort (context.Canceled — i.e. not expired/cancelled/shutdown)
+	// means a fenced progress write revealed we lost ownership. Stop here WITHOUT
+	// a terminal write: the job now belongs to another processor, which owns the
+	// terminal transition.
+	if abortCtx.Err() != nil && batchctx.Cause(abortCtx) == nil {
+		p.handleOwnershipLost(ctx, params)
+		if requestCounts != nil {
+			metrics.RecordJobProcessingDuration(time.Since(jobStart), metrics.GetSizeBucket(int(requestCounts.Total)))
+		}
+		return
+	}
 	if execErr != nil {
 		p.handleJobError(ctx, params, execErr)
 		// Record processing duration for any job that ran (partially or fully).
@@ -471,6 +487,26 @@ func (p *Processor) handleFailed(
 	metrics.RecordJobProcessed(metrics.ResultFailed, metrics.ReasonSystemError)
 	logger.V(logging.INFO).Info("Job failed handled", "outputFileID", outputFileID, "errorFileID", errorFileID)
 	return nil
+}
+
+// handleOwnershipLost is invoked when a fenced progress write reveals this
+// processor lost ownership of the job (a reclaimer bumped its epoch). It must
+// NOT write a terminal status or upload results: the job now belongs to another
+// processor, which owns the terminal transition. It only releases local
+// resources and records a metric, leaving the DB state to the new owner and the
+// orphan reconciler.
+func (p *Processor) handleOwnershipLost(ctx context.Context, params *jobExecutionParams) {
+	logger := logr.FromContextOrDiscard(ctx)
+	logger.Info("Lost job ownership (progress write fenced out by a reclaimer); aborting without a terminal write",
+		"jobID", params.jobInfo.JobID)
+
+	// Local cleanup only. A detached context so a concurrent abort cannot
+	// interrupt the local artifact removal.
+	ioCtx, ioCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+	defer ioCancel()
+	p.cleanupJobArtifacts(ioCtx, params.jobItem.ID, params.jobItem.TenantID)
+
+	metrics.RecordJobProcessed(metrics.ResultLostOwnership, metrics.ReasonNone)
 }
 
 // recordE2ELatency records the full lifecycle duration from batch submission to terminal state.

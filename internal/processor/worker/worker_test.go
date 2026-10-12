@@ -14,8 +14,20 @@ import (
 
 func TestClientsetFields_Assigned(t *testing.T) {
 	cs := validProcessorClients(t)
-	if cs.BatchDB == nil || cs.FileDB == nil || cs.File == nil || cs.Queue == nil || cs.Status == nil || cs.Event == nil || cs.Inference == nil {
+	if cs.BatchDB == nil || cs.BatchProgressDB == nil || cs.FileDB == nil || cs.File == nil || cs.Queue == nil || cs.Event == nil || cs.Inference == nil {
 		t.Fatalf("expected all clients to be assigned")
+	}
+}
+
+func TestNewProcessor_RequiresProgressClient(t *testing.T) {
+	clients := validProcessorClients(t)
+	clients.BatchProgressDB = nil
+	p, err := NewProcessor(config.NewConfig(), clients, "test-pod", testLogger(t))
+	if err != nil {
+		t.Fatalf("NewProcessor: %v", err)
+	}
+	if err := p.validate(); err == nil {
+		t.Fatal("expected validation error when progress DB client is missing")
 	}
 }
 

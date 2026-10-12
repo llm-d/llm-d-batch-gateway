@@ -1,13 +1,64 @@
 package worker
 
 import (
+	"context"
+	"errors"
 	"testing"
 
+	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/pipeline"
+	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/semaphore"
 	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 )
+
+// errEpochUpdater is a stub epochProgressUpdater returning a fixed error.
+type errEpochUpdater struct{ err error }
+
+func (e errEpochUpdater) UpdateProgressCounts(context.Context, string, int64, *openai.BatchRequestCounts) error {
+	return e.err
+}
+
+func TestJobProgressUpdater_FencedOutSignalsOwnershipLost(t *testing.T) {
+	// A fenced-out progress write (ErrConflict) signals ownership loss via
+	// onFencedOut and is not propagated to the progress tracker.
+	var fencedOut bool
+	u := jobProgressUpdater{
+		inner:       errEpochUpdater{err: db.ErrConflict},
+		jobID:       "job-1",
+		epoch:       5,
+		onFencedOut: func() { fencedOut = true },
+	}
+	if err := u.UpdateProgressCounts(context.Background(), "job-1", &openai.BatchRequestCounts{Total: 1}); err != nil {
+		t.Fatalf("fenced-out write should not propagate to the tracker, got %v", err)
+	}
+	if !fencedOut {
+		t.Fatal("expected onFencedOut to be called on ErrConflict")
+	}
+
+	// A non-conflict error propagates unchanged and does not trip onFencedOut.
+	boom := errors.New("boom")
+	tripped := false
+	u2 := jobProgressUpdater{
+		inner:       errEpochUpdater{err: boom},
+		jobID:       "job-1",
+		epoch:       5,
+		onFencedOut: func() { tripped = true },
+	}
+	if err := u2.UpdateProgressCounts(context.Background(), "job-1", &openai.BatchRequestCounts{Total: 1}); !errors.Is(err, boom) {
+		t.Fatalf("expected non-conflict error to propagate, got %v", err)
+	}
+	if tripped {
+		t.Fatal("onFencedOut must not be called for a non-conflict error")
+	}
+
+	// A nil onFencedOut is safe to skip.
+	u3 := jobProgressUpdater{inner: errEpochUpdater{err: db.ErrConflict}, jobID: "job-1", epoch: 5}
+	if err := u3.UpdateProgressCounts(context.Background(), "job-1", &openai.BatchRequestCounts{Total: 1}); err != nil {
+		t.Fatalf("nil onFencedOut with ErrConflict should not error, got %v", err)
+	}
+}
 
 func TestBuildAIMDModels(t *testing.T) {
 	// Tenant-scoped gateway config, as produced when route_key_method is

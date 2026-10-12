@@ -85,6 +85,18 @@ type DBClient[T any, Q any] interface {
 	DBDelete(ctx context.Context, IDs []string) (deletedIDs []string, err error)
 }
 
+// BatchProgressDBClient is a BatchDBClient that additionally supports
+// in-flight progress updates.
+type BatchProgressDBClient interface {
+	BatchDBClient
+
+	// DBUpdateProgress writes JSON-encoded request counts to the item's status
+	// column, fenced by the item's current epoch. A write carrying a stale epoch
+	// (e.g. from a fenced-out processor incarnation) matches no rows and returns
+	// ErrConflict, so the caller knows it is no longer the owner and can abort.
+	DBUpdateProgress(ctx context.Context, id string, epoch int64, countsJSON []byte) error
+}
+
 // Tags are key-value pairs for filtering items.
 type Tags map[string]string
 
@@ -207,19 +219,8 @@ type BatchEventChannelClient interface {
 	ECProducerSendEvents(ctx context.Context, events []BatchEvent) (sentIDs []string, err error)
 }
 
-// -- Batch jobs temporary status store --
-
-// BatchStatusClient enables to manage temporary job status.
-type BatchStatusClient interface {
-	store.BatchClientAdmin
-
-	// StatusSet stores or updates status data for a job.
-	StatusSet(ctx context.Context, ID string, TTL int, data []byte) (err error)
-
-	// StatusGet retrieves the status data of a job.
-	// If no data exists (nil, nil) is returned.
-	StatusGet(ctx context.Context, ID string) (data []byte, err error)
-
-	// StatusDelete deletes the status data for a job.
-	StatusDelete(ctx context.Context, ID string) (nDeleted int, err error)
+// BatchEventGC removes expired events. The GC process runs the backend's
+// implementation until the context is cancelled.
+type BatchEventGC interface {
+	Run(ctx context.Context) error
 }

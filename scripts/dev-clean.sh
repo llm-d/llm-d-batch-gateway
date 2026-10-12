@@ -10,11 +10,11 @@ source "${SCRIPT_DIR}/dev-common.sh"
 cleanup_kubernetes_resources() {
     step "Cleaning up Kubernetes resources in namespace '${NAMESPACE}'..."
 
-    # Clean up GIE EPP releases and CRDs (if any were deployed with ENABLE_GIE=true).
+    # Clean up Router EPP releases and CRDs (if deployed with ENABLE_GIE=true).
     # Uses managed-by label to scope deletion to resources created by this script.
     local epp_prefix="${GIE_EPP_RELEASE:-epp}"
     for release in $(helm list -n "${NAMESPACE}" -q --filter "^${epp_prefix}-" 2>/dev/null); do
-        log "Uninstalling GIE EPP release '${release}'..."
+        log "Uninstalling Router EPP release '${release}'..."
         helm uninstall "${release}" -n "${NAMESPACE}" || warn "Failed to uninstall EPP release '${release}'"
     done
     kubectl delete inferenceobjective -l app.kubernetes.io/managed-by=batch-gateway-dev -n "${NAMESPACE}" --ignore-not-found=true \

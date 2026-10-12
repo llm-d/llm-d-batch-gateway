@@ -1,0 +1,35 @@
+suite: endpoint removal
+templates:
+  - templates/apiserver-configmap.yaml
+  - templates/processor-configmap.yaml
+tests:
+  - it: should retain processor support while the API server inherits a reduced global list
+    set:
+      global.extraEndpoints: []
+      apiserver.config.batchAPI.extraEndpoints: null
+      processor.config.extraEndpoints:
+        - /v1/classify
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "extra_endpoints:"
+        template: templates/apiserver-configmap.yaml
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'extra_endpoints:\n\s+- "/v1/classify"'
+        template: templates/processor-configmap.yaml
+
+  - it: should remove processor support after draining when its override is reset
+    set:
+      global.extraEndpoints: []
+      apiserver.config.batchAPI.extraEndpoints: null
+      processor.config.extraEndpoints: null
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "extra_endpoints:"
+        template: templates/apiserver-configmap.yaml
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "extra_endpoints:"
+        template: templates/processor-configmap.yaml

@@ -29,6 +29,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/pipeline"
+	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 )
 
 func TestContentPartsPreprocessingAndForwarding(t *testing.T) {
@@ -46,7 +47,11 @@ func TestContentPartsPreprocessingAndForwarding(t *testing.T) {
 			for _, role := range []string{"system", "user", "assistant"} {
 				t.Run(role, func(t *testing.T) {
 					line := []byte(`{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":"text-model","messages":[{"role":"` + role + `","content":` + tc.content + `}]}}` + "\n")
-					meta, err := extractAndValidateLine(line)
+					meta, err := extractAndValidateLine(
+						line,
+						openai.EndpointAllowlist{},
+						openai.EndpointChatCompletions.String(),
+					)
 					checkContentError(t, err)
 					expectedHash := NoPrefixHash
 					if role == "system" && tc.text != "" {
@@ -106,7 +111,11 @@ func TestContentPartsRejectInvalidSystemContent(t *testing.T) {
 	for _, content := range []string{`42`, `true`, `{}`, `[42]`, `[{"type":"text","text":42}]`} {
 		t.Run(content, func(t *testing.T) {
 			line := []byte(`{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":"m","messages":[{"role":"system","content":` + content + `}]}}`)
-			if _, err := extractAndValidateLine(line); err == nil {
+			if _, err := extractAndValidateLine(
+				line,
+				openai.EndpointAllowlist{},
+				openai.EndpointChatCompletions.String(),
+			); err == nil {
 				t.Fatal("accepted invalid message content")
 			}
 		})
@@ -122,7 +131,11 @@ func BenchmarkContentPreprocessing(b *testing.B) {
 			line := []byte(`{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":"m","messages":[{"role":"system","content":"system prompt"},{"role":"user","content":` + tc.content + `}]}}`)
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := extractAndValidateLine(line); err != nil {
+				if _, err := extractAndValidateLine(
+					line,
+					openai.EndpointAllowlist{},
+					openai.EndpointChatCompletions.String(),
+				); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -133,7 +146,11 @@ func BenchmarkContentPreprocessing(b *testing.B) {
 func TestContentPartsSkipNonSystemDecoding(t *testing.T) {
 	// Metadata extraction leaves non-system content to the inference endpoint.
 	line := []byte(`{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":"m","messages":[{"role":"user","content":{"future_content_type":true}},{"role":"system"},{"role":"system","content":null},{"role":"system","content":[]},{"role":"system","content":[{"type":"text","text":"hello"}]},{"role":"system","content":42}]}}`)
-	meta, err := extractAndValidateLine(line)
+	meta, err := extractAndValidateLine(
+		line,
+		openai.EndpointAllowlist{},
+		openai.EndpointChatCompletions.String(),
+	)
 	checkContentError(t, err)
 	h := fnv.New32a()
 	_, err = h.Write([]byte("hello"))

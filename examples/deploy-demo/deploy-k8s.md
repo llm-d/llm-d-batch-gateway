@@ -29,7 +29,7 @@ bash examples/deploy-demo/deploy-k8s.sh install
 | PostgreSQL | Batch metadata store (Bitnami Helm chart) |
 | SeaweedFS | S3-compatible file storage (when `BATCH_STORAGE_TYPE=s3`) |
 | Internal Gateway | ClusterIP gateway for batch processor → LLM inference (bypasses rate limits, preserves AuthPolicy) |
-| InferenceObjective | GIE flow control CRDs — priority-based dispatch (interactive=100, batch=-1). Enabled by default (`ENABLE_FLOW_CONTROL=true`) |
+| InferenceObjective | Router InferenceObjective CRDs — priority-based dispatch (interactive=100, batch=-1). Enabled by default (`ENABLE_FLOW_CONTROL=true`) |
 | batch-gateway | apiserver + processor + gc (Helm chart) |
 | async-processor | Optional llm-d-async dispatcher for async dispatch mode (`ENABLE_DISPATCHER=true`). Routes requests through Redis queues → Internal Gateway → EPP |
 | Prometheus | Scrapes EPP + vLLM metrics for the async dispatch budget (when `ENABLE_DISPATCHER=true`) |
@@ -165,7 +165,7 @@ Use that only on **ephemeral or dedicated** demo clusters. See [issue #309](http
 | `KUADRANT_VERSION` | `1.3.1` | Kuadrant Helm chart version |
 | `ROUTER_CHART_VERSION` | (from llm-d env.sh) | llm-d Router chart/CRD version (auto-detected from LLMD_VERSION) |
 | `ISTIO_VERSION` | `1.29.2` | Istio Helm chart version |
-| `ENABLE_FLOW_CONTROL` | `true` | Enable GIE priority-based flow control |
+| `ENABLE_FLOW_CONTROL` | `true` | Enable Router EPP priority-based flow control |
 | `BATCH_FLOW_CONTROL_OBJECTIVE` | `batch-sheddable` | InferenceObjective name for batch requests (priority -1) |
 | `ENABLE_DISPATCHER` | `false` | Use normal HTTP sync dispatch by default; set `true` to deploy llm-d-async and Prometheus for async dispatch |
 | `DISPATCHER_VERSION` | `v0.7.3` | llm-d-async version (image tag and chart version) |

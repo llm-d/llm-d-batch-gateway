@@ -279,8 +279,6 @@ func waitObservabilityFatalError(ctx context.Context, obsFatalCh <-chan error, w
 func buildProcessorClients(ctx context.Context, cfg *config.ProcessorConfig, processorID string) (*clientset.Clientset, error) {
 	logger := logr.FromContextOrDiscard(ctx)
 
-	cfg.DBClientCfg.RedisCfg.ServiceName = "batch-processor"
-	cfg.DBClientCfg.RedisCfg.EnableTracing = cfg.OTelCfg.RedisTracing
 	cfg.DBClientCfg.PostgreSQLCfg.EnableTracing = cfg.OTelCfg.PostgresqlTracing
 
 	resolved, err := config.ResolveModelGateways(cfg)
@@ -291,7 +289,6 @@ func buildProcessorClients(ctx context.Context, cfg *config.ProcessorConfig, pro
 	opts := []clientset.Option{
 		clientset.WithDB(cfg.DBClientCfg),
 		clientset.WithFile(cfg.FileClientCfg),
-		clientset.WithExchange(cfg.DBClientCfg.RedisCfg),
 	}
 	if resolved.Global != nil {
 		opts = append(opts, clientset.WithGlobalInference(*resolved.Global))

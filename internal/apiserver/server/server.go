@@ -52,14 +52,11 @@ type Server struct {
 func buildClients(ctx context.Context, config *common.ServerConfig) (*clientset.Clientset, error) {
 	logger := logr.FromContextOrDiscard(ctx)
 
-	config.DBClientCfg.RedisCfg.ServiceName = "batch-apiserver"
-	config.DBClientCfg.RedisCfg.EnableTracing = config.OTelCfg.RedisTracing
 	config.DBClientCfg.PostgreSQLCfg.EnableTracing = config.OTelCfg.PostgresqlTracing
 
 	clients, err := clientset.NewClientset(ctx, ucom.ComponentApiserver,
 		clientset.WithDB(config.DBClientCfg),
 		clientset.WithFile(config.FileClientCfg),
-		clientset.WithExchange(config.DBClientCfg.RedisCfg),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create clients: %w", err)
@@ -89,7 +86,10 @@ func New(ctx context.Context, config *common.ServerConfig) (*Server, error) {
 	//   Unmatched: Client → ServeMux → Recovery → RequestMiddleware → SecurityHeaders → NotFoundHandler
 	apiMux := http.NewServeMux()
 	fileHandler := file.NewFileAPIHandler(config, clients)
-	batchHandler := batch.NewBatchAPIHandler(config, clients)
+	batchHandler, err := batch.NewBatchAPIHandler(config, clients)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create batch API handler: %w", err)
+	}
 	apiMiddlewares := []common.RouteMiddleware{
 		middleware.Recovery,                     // outermost: catches panics from all inner layers
 		middleware.NewRequestMiddleware(config), // request ID, tenant, logging, metrics, OTel tracing

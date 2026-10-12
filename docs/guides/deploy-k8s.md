@@ -448,25 +448,25 @@ InferenceObjective resources assign requests to priority bands based on the `x-g
 
 ```bash
 kubectl apply -f - <<EOF
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: ${INTERACTIVE_FLOW_CONTROL_OBJECTIVE}
   namespace: ${LLM_NAMESPACE}
 spec:
   priority: 100
-  poolRef:
-    name: ${LLMD_POOL_NAME}
+  poolRefs:
+    - name: ${LLMD_POOL_NAME}
 ---
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: ${BATCH_FLOW_CONTROL_OBJECTIVE}
   namespace: ${LLM_NAMESPACE}
 spec:
   priority: -1
-  poolRef:
-    name: ${LLMD_POOL_NAME}
+  poolRefs:
+    - name: ${LLMD_POOL_NAME}
 EOF
 ```
 

@@ -23,6 +23,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 	batch_types "github.com/llm-d/llm-d-batch-gateway/internal/shared/types"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/clientset"
+	ucom "github.com/llm-d/llm-d-batch-gateway/internal/util/com"
 
 	httpclient "github.com/llm-d/llm-d-batch-gateway/pkg/clients/http"
 	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
@@ -120,6 +121,99 @@ func TestExecuteJob_SingleModel(t *testing.T) {
 	}
 	if len(bytes.TrimSpace(errBytes)) > 0 {
 		t.Fatalf("expected empty error file, got: %s", errBytes)
+	}
+}
+
+func TestConfiguredEndpointReachesInferenceClientUnchanged(t *testing.T) {
+	for _, endpoint := range []string{"/v1/classify", "/v1/pooling"} {
+		t.Run(endpoint, func(t *testing.T) {
+			ctx := testLoggerCtx(t)
+			cfg := config.NewConfig()
+			cfg.WorkDir = t.TempDir()
+			cfg.ExtraEndpoints = []string{endpoint}
+
+			var receivedEndpoint string
+			inferClient := &mockInferenceClient{
+				generateFn: func(_ context.Context, req *inference.GenerateRequest) (*inference.GenerateResponse, *inference.ClientError) {
+					receivedEndpoint = req.Endpoint
+					return &inference.GenerateResponse{RequestID: req.RequestID, Response: []byte(`{"ok":true}`)}, nil
+				},
+			}
+
+			dbClient := newMockBatchDBClient()
+			fileDBClient := newMockFileDBClient()
+			filesClient := mockfiles.NewMockBatchFilesClient(t.TempDir())
+			clients := &clientset.Clientset{
+				BatchDB:         dbClient,
+				FileDB:          fileDBClient,
+				File:            filesClient,
+				Queue:           mockdb.NewMockBatchPriorityQueueClient(),
+				BatchProgressDB: dbClient,
+				Event:           mockdb.NewMockBatchEventChannelClient(),
+				Inference:       inference.NewSingleClientResolver(inferClient),
+			}
+			t.Cleanup(func() { _ = clients.Inference.Close() })
+			p := mustNewProcessor(t, cfg, clients)
+
+			const (
+				jobID       = "configured-endpoint-job"
+				tenantID    = "tenant-configured-endpoint"
+				inputFileID = "file-configured-endpoint"
+				filename    = "input.jsonl"
+			)
+			request := batch_types.Request{
+				CustomID: "request-1",
+				Method:   "POST",
+				URL:      endpoint,
+				Body:     map[string]interface{}{"model": "model-1", "input": "test"},
+			}
+			line, err := json.Marshal(request)
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			line = append(line, '\n')
+
+			folder, err := ucom.GetFolderNameByTenantID(tenantID)
+			if err != nil {
+				t.Fatalf("GetFolderNameByTenantID() error = %v", err)
+			}
+			if _, err := filesClient.Store(ctx, ucom.FileStorageName(inputFileID, filename), folder, 0, 0, bytes.NewReader(line)); err != nil {
+				t.Fatalf("files.Store() error = %v", err)
+			}
+			if err := fileDBClient.DBStore(ctx, &db.FileItem{
+				BaseIndexes:  db.BaseIndexes{ID: inputFileID, TenantID: tenantID},
+				BaseContents: db.BaseContents{Spec: mustJSON(t, &openai.FileObject{Filename: filename})},
+			}); err != nil {
+				t.Fatalf("file DBStore() error = %v", err)
+			}
+
+			jobInfo := &batch_types.JobInfo{
+				JobID: jobID,
+				BatchJob: &openai.Batch{
+					ID:              jobID,
+					BatchSpec:       openai.BatchSpec{InputFileID: inputFileID, Endpoint: openai.Endpoint(endpoint)},
+					BatchStatusInfo: openai.BatchStatusInfo{Status: openai.BatchStatusInProgress},
+				},
+				TenantID: tenantID,
+			}
+
+			if err := p.preProcessJob(ctx, jobInfo); err != nil {
+				t.Fatalf("preProcessJob() error = %v", err)
+			}
+			counts, err := p.executeJob(ctx, &jobExecutionParams{
+				updater: NewStatusUpdater(dbClient),
+				jobInfo: jobInfo,
+			})
+			if err != nil {
+				t.Fatalf("executeJob() error = %v", err)
+			}
+			if counts.Total != 1 || counts.Completed != 1 || counts.Failed != 0 {
+				t.Fatalf("counts = %+v, want total=1 completed=1 failed=0", counts)
+			}
+			if receivedEndpoint != endpoint {
+				t.Fatalf("inference client received endpoint %q, want configured endpoint %q", receivedEndpoint, endpoint)
+			}
+		})
 	}
 }
 
@@ -1248,8 +1342,6 @@ func TestHandleCancelled_CancelledWriteFails_FallsBackToFailed(t *testing.T) {
 		failStatus: openai.BatchStatusCancelled,
 		failErr:    errors.New("injected: cancelled write failed"),
 	}
-	statusClient := mockdb.NewMockBatchStatusClient()
-
 	jobID := "job-cancel-failover"
 	tenantID := "tenant__tenantA"
 
@@ -1260,14 +1352,13 @@ func TestHandleCancelled_CancelledWriteFails_FallsBackToFailed(t *testing.T) {
 		BatchDB:   failDB,
 		FileDB:    newMockFileDBClient(),
 		File:      mockfiles.NewMockBatchFilesClient(t.TempDir()),
-		Status:    statusClient,
 		Queue:     mockdb.NewMockBatchPriorityQueueClient(),
 		Event:     mockdb.NewMockBatchEventChannelClient(),
 		Inference: inference.NewSingleClientResolver(&mockInferenceClient{}),
 	}
 	p := mustNewProcessor(t, cfg, clients)
 	p.poller = NewPoller(clients.Queue, failDB)
-	updater := NewStatusUpdater(failDB, statusClient, 86400)
+	updater := NewStatusUpdater(failDB)
 
 	createPartialOutputFiles(t, p, jobID, tenantID)
 
@@ -1529,7 +1620,6 @@ func TestUploadPartialResults_OneUploadFails_OtherSurvives(t *testing.T) {
 	cfg.WorkDir = t.TempDir()
 
 	dbClient := newMockBatchDBClient()
-	statusClient := mockdb.NewMockBatchStatusClient()
 	filesClient := &failOnNthCallClient{
 		failN:   1,
 		failErr: errors.New("injected: one-side upload failure"),
@@ -1539,7 +1629,6 @@ func TestUploadPartialResults_OneUploadFails_OtherSurvives(t *testing.T) {
 		BatchDB:   dbClient,
 		FileDB:    newMockFileDBClient(),
 		File:      filesClient,
-		Status:    statusClient,
 		Queue:     mockdb.NewMockBatchPriorityQueueClient(),
 		Inference: inference.NewSingleClientResolver(&fakeInferenceClient{}),
 	}

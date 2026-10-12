@@ -59,6 +59,11 @@ type Reconciler struct {
 	interval        time.Duration
 	dryRun          bool
 	onCycleComplete func(*Result)
+	// refreshLive, when set, re-reads the set of currently-Ready processor pods.
+	// It is invoked at the start of each cycle so the live set reflects actual
+	// pod readiness rather than only the last StatefulSet-stable snapshot — a
+	// freshly-Ready replica is then never mistaken for a dead owner.
+	refreshLive func(ctx context.Context) (map[string]bool, error)
 
 	mu             sync.RWMutex
 	liveProcessors map[string]bool
@@ -102,6 +107,13 @@ func (r *Reconciler) SetLiveProcessors(processors map[string]bool) {
 	defer r.mu.Unlock()
 	r.liveProcessors = processors
 	r.snapshotReady = true
+}
+
+// SetLivePodRefresher installs a callback that re-reads the currently-Ready
+// processor pods. The reconciler invokes it at the start of each cycle so the
+// live set stays fresh even before the StatefulSet reports stable.
+func (r *Reconciler) SetLivePodRefresher(fn func(ctx context.Context) (map[string]bool, error)) {
+	r.refreshLive = fn
 }
 
 func (r *Reconciler) hasSnapshot() bool {
@@ -163,6 +175,18 @@ func (r *Reconciler) run(ctx context.Context) {
 		)
 		r.notifyCycle(result)
 	}()
+
+	// Refresh the live set from currently-Ready pods before triaging. This keeps
+	// a freshly-Ready replica (whose StatefulSet hasn't reported stable yet) from
+	// being mistaken for a dead owner. On error, fall back to the last snapshot.
+	if r.refreshLive != nil {
+		live, err := r.refreshLive(ctx)
+		if err != nil {
+			logger.Error(err, "Reconciler: live pod refresh failed; using last snapshot")
+		} else {
+			r.SetLiveProcessors(live)
+		}
+	}
 
 	if !r.hasSnapshot() {
 		logger.Info("Reconciler: no live processor snapshot yet, skipping cycle")

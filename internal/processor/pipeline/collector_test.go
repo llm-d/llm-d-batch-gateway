@@ -373,13 +373,13 @@ func TestProgressTracker_FlushOnCancel(t *testing.T) {
 	tracker.RecordFailure(nil)
 
 	// Interval is 1 hour, so no tick-based push will fire.
-	// Cancel triggers the final push.
+	// Run pushes once at start, and cancel triggers the final push.
 	cancel()
 	<-done
 
 	calls := updater.getCalls()
-	if calls != 1 {
-		t.Fatalf("push calls = %d, want 1 (final push on cancel)", calls)
+	if calls != 2 {
+		t.Fatalf("push calls = %d, want 2 (initial push and final push on cancel)", calls)
 	}
 	last := updater.getLast()
 	if last.Completed != 2 || last.Failed != 1 {

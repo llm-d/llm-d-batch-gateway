@@ -115,17 +115,20 @@ The v0.9.1 chart exposes Async's canonical `ap.transport` and `ap.transportConfi
 
 Chart v0.9.1 renames the dispatcher Deployment and its immutable selector from `async-processor` to `llm-d-async`. A clean E2E deployment needs no migration, but an existing local cluster previously deployed with chart 0.7.4 must remove the three old test releases before redeploying: `helm uninstall dispatcher dispatcher-scrape dispatcher-prom --namespace default`.
 
-### Tests that need GIE
+### Tests that need an EPP
 
 The AIMD tests and the shed/retry tests (`FlowControl/GIE/RetryOnShed`,
 `FlowControl/GIE/RetryExhaustion`) skip unless the cluster was deployed with
-`ENABLE_GIE=true`. The backpressure they exercise is the EPP shedding batch
+`ENABLE_GIE=true` (legacy flag name). The backpressure they exercise is the EPP shedding batch
 traffic under saturation (429 on an outright reject, 503 when a queued
 request's TTL expires). The tests saturate a model by choking its vllm-vcr
 engine through the control API (`PATCH http://vllm-sim-b:8001/config`) while
 keeping non-sheddable interactive traffic aimed at the same EPP, so batch
 requests are the ones shed; the engine is released the same way. Nothing in
 the deployment fakes a backpressure status.
+
+The `GIE` segment in the test names is retained for compatibility; the current
+deployment path uses the llm-d Router EPP.
 
 ## 3. Cleanup
 

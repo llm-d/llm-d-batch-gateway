@@ -38,6 +38,10 @@ type jobExecutionParams struct {
 
 	eventWatcher *db.BatchEventsChan
 	cancelUser   context.CancelFunc
+	// onOwnershipLost trips the abort context with the neutral cause when a
+	// fenced progress write reveals this processor lost ownership of the job.
+	// Set by runJob, invoked by the per-job progress updater.
+	onOwnershipLost func()
 
 	requestCounts *openai.BatchRequestCounts
 }

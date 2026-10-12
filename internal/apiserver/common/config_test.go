@@ -20,8 +20,11 @@ package common
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestAPIServerConfig(t *testing.T) {
@@ -211,6 +214,38 @@ file_client:
 			}
 		})
 
+	})
+}
+
+func TestBatchAPIExtraEndpoints(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		cfg := ServerConfig{Port: "8080", BatchAPI: BatchAPIConfig{ExtraEndpoints: []string{"/v1/classify", "/v1/pooling"}}}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() unexpected error: %v", err)
+		}
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		cfg := ServerConfig{Port: "8080", BatchAPI: BatchAPIConfig{ExtraEndpoints: []string{"/v1/classify?mode=test"}}}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("Validate() expected error")
+		}
+		if !strings.Contains(err.Error(), "batch_api.extra_endpoints") {
+			t.Errorf("Validate() error = %q, want configuration field context", err)
+		}
+	})
+
+	t.Run("yaml", func(t *testing.T) {
+		var cfg ServerConfig
+		err := yaml.Unmarshal([]byte("batch_api:\n  extra_endpoints:\n    - /v1/classify\n    - /v1/pooling\n"), &cfg)
+		if err != nil {
+			t.Fatalf("yaml.Unmarshal() unexpected error: %v", err)
+		}
+		want := []string{"/v1/classify", "/v1/pooling"}
+		if !reflect.DeepEqual(cfg.BatchAPI.ExtraEndpoints, want) {
+			t.Errorf("ExtraEndpoints = %v, want %v", cfg.BatchAPI.ExtraEndpoints, want)
+		}
 	})
 }
 

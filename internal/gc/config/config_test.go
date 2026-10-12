@@ -117,33 +117,6 @@ file_client:
 	}
 }
 
-func TestLoad_BothDatabaseConfigs(t *testing.T) {
-	// Both redis and postgresql connectivity configs can be present;
-	// db_client.type selects which is used for tables.
-	path := writeTempConfig(t, `
-db_client:
-  type: "postgresql"
-  redis:
-    db: 1
-    enable_tls: false
-  postgresql: {}
-file_client:
-  type: "fs"
-  fs:
-    base_path: "/tmp/files"
-`)
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.DBClientCfg.Type != "postgresql" {
-		t.Errorf("expected db_client.type postgresql, got %s", cfg.DBClientCfg.Type)
-	}
-	if cfg.DBClientCfg.RedisCfg.DB != 1 {
-		t.Errorf("expected redis db 1, got %d", cfg.DBClientCfg.RedisCfg.DB)
-	}
-}
-
 func TestLoad_Defaults(t *testing.T) {
 	path := writeTempConfig(t, `
 db_client:

@@ -73,7 +73,6 @@ func setupTestHandler(t *testing.T) *FileAPIHandler {
 		FileDB:    dbClient,
 		Queue:     nil,
 		Event:     nil,
-		Status:    nil,
 	}
 
 	t.Cleanup(func() { _ = filesClient.Close() })
@@ -257,7 +256,6 @@ func doTestCreateFileStoreValidationErrors(t *testing.T) {
 				BatchDB: nil,
 				Queue:   nil,
 				Event:   nil,
-				Status:  nil,
 			}
 			handler := NewFileAPIHandler(config, clients)
 			req := buildCreateRequest(t)

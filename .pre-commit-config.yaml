@@ -21,6 +21,12 @@ repos:
 
   - repo: local
     hooks:
+      - id: benchmark-unit-tests
+        name: benchmark unit tests
+        entry: python3 -m unittest discover -s benchmarks -p test_*.py
+        language: system
+        pass_filenames: false
+        files: '^benchmarks/.*\.py$'
       - id: go-vet
         name: go vet
         entry: go vet ./...

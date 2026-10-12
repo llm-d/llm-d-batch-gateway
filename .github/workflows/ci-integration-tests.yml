@@ -1,6 +1,10 @@
 name: Integration Tests
 
 on:
+  pull_request:
+    branches:
+      - main
+      - 'release-*'
   push:
     branches:
       - main
@@ -19,7 +23,7 @@ permissions:
 
 jobs:
   integration-tests:
-    name: Integration Tests (${{ matrix.file_client_type }}, ${{ matrix.db_client_type }}, ${{ matrix.exchange_client_type }}${{ matrix.enable_gie == 'true' && ', gie' || '' }}${{ matrix.enable_dispatcher == 'true' && ', dispatcher' || '' }})
+    name: Integration Tests (${{ matrix.file_client_type }}, ${{ matrix.db_client_type }}, ${{ matrix.exchange_client_type }}${{ matrix.enable_gie == 'true' && ', epp' || '' }}${{ matrix.enable_dispatcher == 'true' && ', dispatcher' || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -69,7 +73,7 @@ jobs:
         run: make test-e2e
 
       - name: Open issue on failure
-        if: failure()
+        if: failure() && github.event_name != 'pull_request'
         uses: actions/github-script@v9
         with:
           script: |

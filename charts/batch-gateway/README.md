@@ -72,7 +72,46 @@ helm upgrade my-release ./charts/batch-gateway \
 ```
 
 ## Configuration
+
 For a complete list of parameters, see [values.yaml](./values.yaml).
+
+### Additional inference endpoints
+
+Batch Gateway accepts the standard OpenAI Batch API endpoints by default. To use an endpoint supplied by an OpenAI-compatible backend, add it explicitly to the shared allowlist:
+
+```yaml
+global:
+  extraEndpoints:
+    - /v1/classify
+    - /v1/pooling
+```
+
+The chart renders this list into both the API server and processor configurations. Each value must be a canonical absolute path beginning with exactly one slash. Paths cannot contain a host, query string, fragment, escaped path, dot segments, or repeated slashes. A trailing slash is allowed only for the root path `/`. Invalid values cause startup validation to fail.
+
+For a rolling upgrade, enable new endpoints on processors before API servers can accept batches that use them:
+
+1. Set `processor.config.extraEndpoints` and wait for the processor rollout to complete.
+2. Set `global.extraEndpoints`, which enables the endpoints for the API server as well.
+3. Reset `processor.config.extraEndpoints` to `null` so it inherits the global value.
+
+Both `processor.config.extraEndpoints` and `apiserver.config.batchAPI.extraEndpoints` default to `null`, meaning they inherit `global.extraEndpoints`. Setting either override to a list replaces the global value for that component; an explicit `[]` disables configured extensions for that component.
+
+#### Removing endpoints and rolling back
+
+The processor validates batches against its current endpoint allowlist. Removing an endpoint can therefore cause previously accepted batches to fail preprocessing, including batches still waiting in the queue.
+
+To remove an endpoint safely:
+
+1. Set `processor.config.extraEndpoints` explicitly to the full list of currently supported extensions, including the endpoint being removed. Wait for the processor rollout to complete.
+2. Remove the endpoint from `global.extraEndpoints`. If `apiserver.config.batchAPI.extraEndpoints` is explicitly configured, remove it from that list too. Keep the processor override unchanged. Wait for all API-server replicas to finish rolling out so no replica accepts new batches for the removed endpoint.
+3. Wait until all previously accepted batches using that endpoint, across all tenants, reach a terminal state: `completed`, `failed`, `expired`, or `cancelled`. Include queued and validating batches when checking for unfinished work. Keep the processor override and backend endpoint available during this period.
+4. Remove the endpoint from `processor.config.extraEndpoints`, or reset the override to `null` to inherit the reduced global list. Wait for the processor rollout to complete.
+
+Follow the same drain procedure before rolling back to a processor version that does not support the endpoint. A direct Helm rollback may restore an older allowlist or processor image before accepted batches finish.
+
+This procedure requires operator coordination. Accepted batches do not retain a snapshot of the allowlist that was active when they were created.
+
+The endpoint remains batch-scoped: every request URL in the input JSONL must exactly match the endpoint declared when creating the batch. The configured path is forwarded unchanged in synchronous and asynchronous dispatch modes. Omitting `global.extraEndpoints` preserves the default OpenAI-only behavior.
 
 ## Usage
 
