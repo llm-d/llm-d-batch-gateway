@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
 
 	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
@@ -51,6 +52,7 @@ type Processor struct {
 	cfg               *config.ProcessorConfig
 	endpointAllowlist openai.EndpointAllowlist
 	processorID       string
+	ownerInstanceID   string
 	tokens            semaphore.Semaphore
 	wg                sync.WaitGroup
 
@@ -100,6 +102,7 @@ func NewProcessor(
 		cfg:               cfg,
 		endpointAllowlist: endpointAllowlist,
 		processorID:       processorID,
+		ownerInstanceID:   uuid.NewString(),
 		poller:            poller,
 		updater:           updater,
 		batchDB:           clients.BatchDB,
@@ -116,12 +119,6 @@ func NewProcessor(
 func (p *Processor) Run(ctx context.Context, onReady func()) error {
 	if err := p.prepare(ctx); err != nil {
 		return err
-	}
-
-	p.recoverOwnedJobs(ctx)
-
-	if onReady != nil {
-		onReady()
 	}
 
 	// Two context branches:
@@ -145,6 +142,14 @@ func (p *Processor) Run(ctx context.Context, onReady func()) error {
 		bs.Run(ctx)
 		defer bs.Wait()
 		p.broadcasters = bs
+	}
+
+	if err := p.recoverOwnedJobs(ctx); err != nil {
+		return fmt.Errorf("startup recovery: %w", err)
+	}
+
+	if onReady != nil {
+		onReady()
 	}
 
 	return p.runPollingLoop(pollingCtx, ctx)
