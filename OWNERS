@@ -2,6 +2,7 @@
 
 # List of usernames who may use /lgtm
 reviewers:
+  - acardace
   - aneeshkp
   - lioraron
   - madhugoutham
@@ -10,6 +11,7 @@ reviewers:
 
 # List of usernames who may use /approve
 approvers:
+  - acardace
   - aneeshkp
   - j-mok-dev
   - lioraron
