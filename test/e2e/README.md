@@ -117,11 +117,11 @@ Chart v0.9.1 renames the dispatcher Deployment and its immutable selector from `
 
 ### Tests that need an EPP
 
-The TTL-shedding tests (`FlowControl/GIE/TTLShedding`,
-`FlowControl/GIE/PriorityBandInteraction`, and `AIMD/TTLSheddingAndIsolation`)
-skip unless the cluster was deployed with
-`ENABLE_GIE=true` (legacy flag name). They exercise the EPP evicting batch
-traffic after a queue TTL, and the processor records those requests as
+The EPP-dependent tests (`FlowControl/GIE/TTLShedding`,
+`FlowControl/GIE/PriorityBandInteraction`, `AIMD/TTLSheddingAndIsolation`, and
+`AIMD/Recovery`) skip unless the cluster was deployed with
+`ENABLE_GIE=true` (legacy flag name). The TTL-shedding tests exercise the EPP
+evicting batch traffic after a queue TTL, and the processor records those requests as
 non-retryable `batch_expired` errors. These tests saturate a model by choking
 its vllm-vcr engine through the control API
 (`PATCH http://vllm-sim-b:8001/config`) while keeping non-sheddable interactive

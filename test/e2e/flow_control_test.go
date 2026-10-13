@@ -157,8 +157,8 @@ func doTestTTLShedding(t *testing.T) {
 		t.Errorf("expected %d batch_expired error line(s), got %d", batch.RequestCounts.Failed, got)
 	}
 	outcomesAfter := getEPPBatchOutcomes(t, eppDeploymentFor(testModelB))
-	if evicted := outcomesAfter[eppOutcomeEvictedTTL] - outcomesBefore[eppOutcomeEvictedTTL]; evicted == 0 {
-		t.Error("expected the EPP EvictedTTL outcome to advance")
+	if evicted := outcomesAfter[eppOutcomeEvictedTTL] - outcomesBefore[eppOutcomeEvictedTTL]; evicted != float64(batch.RequestCounts.Failed) {
+		t.Errorf("expected %d new EPP EvictedTTL outcome(s), got %.0f", batch.RequestCounts.Failed, evicted)
 	}
 
 	assertRequestErrors(t, testModelB)

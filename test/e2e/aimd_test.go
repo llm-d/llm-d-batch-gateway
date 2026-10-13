@@ -144,27 +144,6 @@ func chatLine(customID, model, content string, maxTokens int) string {
 func doTestAIMDTTLSheddingAndIsolation(t *testing.T) {
 	const numHealthyRequests = 2
 
-	metricsBefore := scrapeProcessorMetrics(t)
-	limitsBefore := parseGaugeByEndpoint(t, metricsBefore, "batch_processor_aimd_concurrency_limit")
-
-	var limitBeforeHealthy float64
-	var foundChoked, foundHealthy bool
-	for endpoint, limit := range limitsBefore {
-		if isEPPEndpoint(endpoint, testModelB) {
-			foundChoked = true
-		}
-		if isEPPEndpoint(endpoint, testModel) {
-			limitBeforeHealthy = limit
-			foundHealthy = true
-		}
-	}
-	if !foundChoked {
-		t.Fatalf("no AIMD metric found for the EPP endpoint of %q", testModelB)
-	}
-	if !foundHealthy {
-		t.Fatalf("no AIMD metric found for the EPP endpoint of %q", testModel)
-	}
-
 	healthy := make([]string, 0, numHealthyRequests)
 	for i := range numHealthyRequests {
 		healthy = append(healthy, chatLine(fmt.Sprintf("aimd-ok-%d", i+1), testModel, fmt.Sprintf("AIMD baseline %d", i+1), saturationMaxTokens))
@@ -195,12 +174,10 @@ func doTestAIMDTTLSheddingAndIsolation(t *testing.T) {
 			t.Errorf("healthy request %q missing from output file", customID)
 		}
 	}
-
-	assertAIMDIsolation(t, "after shed batch", limitBeforeHealthy)
 }
 
 // assertAIMDIsolation reports AIMD state and verifies the healthy endpoint was
-// not reduced while the other endpoint was under backpressure.
+// not reduced while the other endpoint was under AIMD decrease pressure.
 func assertAIMDIsolation(t *testing.T, phase string, limitBeforeHealthy float64) {
 	t.Helper()
 
@@ -321,17 +298,24 @@ func doTestAIMDRecovery(t *testing.T) {
 	decreasesBefore := parseCounterByEndpoint(t, metricsBefore, "batch_processor_aimd_decreases_total")
 
 	var aimdEndpoint string
-	var baselineLimit, baselineDecreases float64
+	var baselineLimit, baselineDecreases, limitBeforeHealthy float64
+	var foundHealthy bool
 	for endpoint, limit := range limitsBefore {
 		if isEPPEndpoint(endpoint, testModelB) {
 			aimdEndpoint = endpoint
 			baselineLimit = limit
 			baselineDecreases = decreasesBefore[endpoint]
-			break
+		}
+		if isEPPEndpoint(endpoint, testModel) {
+			limitBeforeHealthy = limit
+			foundHealthy = true
 		}
 	}
 	if aimdEndpoint == "" {
 		t.Fatalf("no AIMD metric found for the EPP endpoint of %q", testModelB)
+	}
+	if !foundHealthy {
+		t.Fatalf("no AIMD metric found for the EPP endpoint of %q", testModel)
 	}
 
 	aimdMin, aimdBackoffFactor := getProcessorAIMDSettings(t)
@@ -376,6 +360,7 @@ func doTestAIMDRecovery(t *testing.T) {
 		t.Fatalf("expected AIMD decrease counter above %.0f, got %.0f", baselineDecreases, decreasesAfterFailure)
 	}
 	t.Logf("phase 1: aimd_concurrency_limit{endpoint=%q} = %.0f (before=%.0f, perEndpoint=%d)", aimdEndpoint, recoveryBaselineLimit, baselineLimit, expectedPerEndpoint)
+	assertAIMDIsolation(t, "after injected failure", limitBeforeHealthy)
 
 	patchEngineConfig(t, testSimServiceB, `{"failure_injection_rate":0.0}`)
 
@@ -447,14 +432,14 @@ func waitForAIMDDecreaseSignal(
 	deadline := time.Now().Add(timeout)
 	for {
 		metrics := scrapeProcessorMetrics(t)
-		limit := parseGaugeByEndpoint(t, metrics, "batch_processor_aimd_concurrency_limit")[endpoint]
-		decreases := parseCounterByEndpoint(t, metrics, "batch_processor_aimd_decreases_total")[endpoint]
-		if decreases > baselineDecreases && limit == expectedLimit {
-			return limit, decreases
+		currentLimit := parseGaugeByEndpoint(t, metrics, "batch_processor_aimd_concurrency_limit")[endpoint]
+		currentDecreases := parseCounterByEndpoint(t, metrics, "batch_processor_aimd_decreases_total")[endpoint]
+		if currentDecreases > baselineDecreases && currentLimit == expectedLimit {
+			return currentLimit, currentDecreases
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("AIMD limit did not reach expected %.0f within %v (after=%.0f, decreases=%.0f, baseline decreases=%.0f)",
-				expectedLimit, timeout, limit, decreases, baselineDecreases)
+				expectedLimit, timeout, currentLimit, currentDecreases, baselineDecreases)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
