@@ -18,8 +18,10 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"sync"
@@ -27,6 +29,7 @@ import (
 
 	"github.com/go-logr/logr"
 	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
+	filesapi "github.com/llm-d/llm-d-batch-gateway/internal/files_store/api"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/batchctx"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/metrics"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/converter"
@@ -54,6 +57,9 @@ func (p *Processor) uploadFileAndStoreFileRecord(
 	var attrKey string
 
 	fileID := ucom.NewFileID()
+	if dbJob.Resumable {
+		fileID = stableBatchFileID(dbJob.ID, string(fileType))
+	}
 
 	if fileType == metrics.FileTypeOutput {
 		fileName = jobOutputStorageName(jobInfo.JobID)
@@ -66,6 +72,17 @@ func (p *Processor) uploadFileAndStoreFileRecord(
 		fileSize, err = p.uploadErrorFile(ctx, jobInfo, storageName)
 		attrKey = uotel.AttrErrorFileID
 	}
+	if err != nil && dbJob.Resumable && errors.Is(err, filesapi.ErrFileExists) {
+		var filePath string
+		if fileType == metrics.FileTypeOutput {
+			filePath, err = p.jobOutputFilePath(jobInfo.JobID, jobInfo.TenantID)
+		} else {
+			filePath, err = p.jobErrorFilePath(jobInfo.JobID, jobInfo.TenantID)
+		}
+		if err == nil {
+			fileSize, err = p.verifyStoredJobFile(ctx, filePath, ucom.FileStorageName(fileID, fileName), jobInfo.TenantID)
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -74,10 +91,52 @@ func (p *Processor) uploadFileAndStoreFileRecord(
 	}
 
 	uotel.SetAttr(ctx, attribute.String(attrKey, fileID))
-	if err := p.storeFileRecord(ctx, fileID, fileName, jobInfo.TenantID, fileSize, dbJob.Tags); err != nil {
+	storeRecord := p.storeFileRecord
+	if dbJob.Resumable {
+		storeRecord = p.ensureFileRecord
+	}
+	if err := storeRecord(ctx, fileID, fileName, jobInfo.TenantID, fileSize, dbJob.Tags); err != nil {
 		return "", err
 	}
 	return fileID, nil
+}
+
+// verifyStoredJobFile accepts an existing deterministic object only when its
+// bytes exactly match the local artifact. This turns upload retries into safe
+// reuse without treating a key collision as success.
+func (p *Processor) verifyStoredJobFile(ctx context.Context, filePath, fileName, tenantID string) (int64, error) {
+	folderName, err := ucom.GetFolderNameByTenantID(tenantID)
+	if err != nil {
+		return 0, err
+	}
+	remote, metadata, err := p.files.storage.Retrieve(ctx, fileName, folderName)
+	if err != nil {
+		return 0, fmt.Errorf("retrieve existing artifact %s: %w", fileName, err)
+	}
+	defer remote.Close()
+	local, err := os.Open(filePath)
+	if err != nil {
+		return 0, err
+	}
+	defer local.Close()
+	localInfo, err := local.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if metadata == nil || metadata.Size != localInfo.Size() {
+		return 0, fmt.Errorf("existing artifact %s does not match local size", fileName)
+	}
+	localHash, remoteHash := sha256.New(), sha256.New()
+	if _, err := io.Copy(localHash, local); err != nil {
+		return 0, err
+	}
+	if _, err := io.Copy(remoteHash, remote); err != nil {
+		return 0, err
+	}
+	if string(localHash.Sum(nil)) != string(remoteHash.Sum(nil)) {
+		return 0, fmt.Errorf("existing artifact %s does not match local content", fileName)
+	}
+	return metadata.Size, nil
 }
 
 // finalizationTimeout bounds how long finalizeJob waits for file uploads and DB
@@ -113,6 +172,27 @@ func (p *Processor) finalizeJob(
 	// finalization has begun, narrowing the cancel-vs-complete race window.
 	if err := updater.UpdatePersistentStatus(ioCtx, dbJob, openai.BatchStatusFinalizing, requestCounts, nil); err != nil {
 		return fmt.Errorf("failed to update job status to finalizing: %w", err)
+	}
+	if dbJob.Resumable {
+		manifestStore, manifestOK := p.batchDB.(db.ResumableBatchStore)
+		checkpointStore, checkpointOK := p.batchDB.(db.BatchCheckpointStore)
+		if !manifestOK || !checkpointOK {
+			return fmt.Errorf("database does not support resumable artifact reconstruction")
+		}
+		manifest, err := manifestStore.GetBatchManifest(ioCtx, dbJob.ID)
+		if err != nil {
+			return fmt.Errorf("load final manifest: %w", err)
+		}
+		if manifest == nil {
+			return fmt.Errorf("load final manifest: manifest missing")
+		}
+		checkpoints, err := checkpointStore.BatchResultCheckpoints(ioCtx, dbJob.ID)
+		if err != nil {
+			return fmt.Errorf("load final checkpoints: %w", err)
+		}
+		if err := p.restoreCheckpointArtifacts(manifest, checkpoints, dbJob.TenantID); err != nil {
+			return fmt.Errorf("rebuild final artifacts: %w", err)
+		}
 	}
 
 	// Per the OpenAI batch spec, output_file_id and error_file_id are both optional:
@@ -292,6 +372,35 @@ func (p *Processor) storeFileRecord(
 		return fmt.Errorf("failed to store file record: %w", err)
 	}
 	return nil
+}
+
+// ensureFileRecord makes the metadata half of deterministic publication
+// idempotent. It accepts an existing row only when it describes the same
+// tenant, file identity, name and size.
+func (p *Processor) ensureFileRecord(
+	ctx context.Context,
+	fileID, fileName, tenantID string,
+	size int64,
+	batchTags db.Tags,
+) error {
+	if err := p.storeFileRecord(ctx, fileID, fileName, tenantID, size, batchTags); err == nil {
+		return nil
+	} else {
+		items, _, _, getErr := p.files.db.DBGet(ctx, &db.FileQuery{
+			BaseQuery: db.BaseQuery{IDs: []string{fileID}, TenantID: tenantID},
+		}, true, 0, 1)
+		if getErr != nil || len(items) != 1 {
+			return err
+		}
+		file, convertErr := converter.DBItemToFile(items[0])
+		if convertErr != nil {
+			return err
+		}
+		if items[0].TenantID != tenantID || file.ID != fileID || file.Filename != fileName || file.Bytes != size || file.Purpose != openai.FileObjectPurposeBatchOutput {
+			return fmt.Errorf("existing file record %s does not match deterministic artifact: %w", fileID, err)
+		}
+		return nil
+	}
 }
 
 // resolveOutputExpiration returns the ExpiresAt timestamp for an output or error file.
