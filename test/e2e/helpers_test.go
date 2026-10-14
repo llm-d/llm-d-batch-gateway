@@ -246,6 +246,37 @@ func waitForBatchStatus(t *testing.T, batchID string, timeout time.Duration, tar
 	return nil, nil // unreachable
 }
 
+// waitForTerminalBatch polls a batch until it reaches any terminal status and
+// validates the terminal batch fields. Unlike waitForBatchStatus, it does not
+// validate result files because some tests intentionally produce non-200 output
+// lines. Callers must check the returned status.
+func waitForTerminalBatch(t *testing.T, batchID string, timeout time.Duration) *openai.Batch {
+	t.Helper()
+
+	client := newClient()
+	deadline := time.Now().Add(timeout)
+	if d, ok := t.Deadline(); ok && d.Before(deadline) {
+		deadline = d.Add(-5 * time.Second)
+	}
+
+	for time.Now().Before(deadline) {
+		b, err := client.Batches.Get(context.Background(), batchID)
+		if err != nil {
+			t.Fatalf("retrieve batch failed: %v", err)
+		}
+		t.Logf("batch %s status: %s (completed=%d, failed=%d)",
+			batchID, b.Status, b.RequestCounts.Completed, b.RequestCounts.Failed)
+
+		if terminalBatchStatuses[b.Status] {
+			validateTerminalBatch(t, b)
+			return b
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("batch %s did not reach terminal status within %v", batchID, timeout)
+	return nil
+}
+
 // waitForCompletedRequests polls a batch until at least minCompleted requests
 // have completed. This is used instead of a fixed sleep to make tests
 // deterministic regardless of request-path latency.
