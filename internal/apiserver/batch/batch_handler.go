@@ -538,6 +538,8 @@ func (c *BatchAPIHandler) markCancelling(ctx context.Context, item *api.BatchIte
 			return nil, fmt.Errorf("markCancelling: %w", err)
 		}
 		dbItem.Epoch = item.Epoch
+		expectedResumable := false
+		dbItem.ExpectedResumable = &expectedResumable
 
 		err = c.clients.BatchDB.DBUpdate(ctx, dbItem, item.Status)
 		if err == nil {
