@@ -115,6 +115,8 @@ After recovery, stale directories are removed. Resume-from-checkpoint is not sup
 
 The `batch_startup_recovery_total{status,action}` metric tracks recovery outcomes for operational visibility.
 
+The `resumable` database marker added for [#645](https://github.com/llm-d/llm-d-batch-gateway/issues/645) is currently a reader-side guard only; no production path sets it to `true`. Before a later writer enables resumable rows, this guard-aware version must be deployed to every API server, Processor, and batch-gc instance. Rollback to a marker-unaware version is unsupported while any resumable row remains non-terminal. The initial resumable-recovery implementation must run with one Processor replica, `numWorkers=1`, one Async model queue, PostgreSQL, and batch-gc enabled. Direct Processor scaling and autoscaling are unsupported until multi-replica ownership and takeover are implemented.
+
 --------------------------------------------------------------------
 ### High-Level Architecture
 #### Processor and Worker

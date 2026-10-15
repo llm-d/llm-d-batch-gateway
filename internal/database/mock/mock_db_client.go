@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 	"time"
 
@@ -101,6 +102,27 @@ func (m *MockDBClient[T, Q]) DBGet(
 			}
 			return true
 		})
+
+		// Order by ID like the real database (sync.Map iteration order is random).
+		sort.Slice(allMatches, func(i, j int) bool {
+			if bq.Descending {
+				return m.idGetter(allMatches[i]) > m.idGetter(allMatches[j])
+			}
+			return m.idGetter(allMatches[i]) < m.idGetter(allMatches[j])
+		})
+
+		// Keyset cursor: keep only items strictly after AfterID; it replaces the offset.
+		if bq.AfterID != "" {
+			start = 0
+			kept := allMatches[:0]
+			for _, item := range allMatches {
+				id := m.idGetter(item)
+				if (!bq.Descending && id > bq.AfterID) || (bq.Descending && id < bq.AfterID) {
+					kept = append(kept, item)
+				}
+			}
+			allMatches = kept
+		}
 	}
 
 	// Handle pagination
@@ -152,9 +174,20 @@ func (m *MockDBClient[T, Q]) DBUpdate(ctx context.Context, item *T, expectedStat
 		// Epoch fencing: if the update item has Epoch > 0, check it matches.
 		updateVal := reflect.ValueOf(*item)
 		epochField := updateVal.FieldByName("Epoch")
-		if epochField.IsValid() && epochField.Kind() == reflect.Int64 && epochField.Int() > 0 {
+		bumpEpochField := updateVal.FieldByName("BumpEpoch")
+		bumpEpoch := bumpEpochField.IsValid() && bumpEpochField.Kind() == reflect.Bool && bumpEpochField.Bool()
+		if epochField.IsValid() && epochField.Kind() == reflect.Int64 && (epochField.Int() > 0 || bumpEpoch) {
 			existingEpoch := val.FieldByName("Epoch")
 			if existingEpoch.IsValid() && existingEpoch.Int() != epochField.Int() {
+				return fmt.Errorf("DBUpdate: %w", api.ErrConflict)
+			}
+		}
+
+		expectedResumableField := updateVal.FieldByName("ExpectedResumable")
+		if expectedResumableField.IsValid() && expectedResumableField.Kind() == reflect.Pointer && !expectedResumableField.IsNil() {
+			existingResumable := val.FieldByName("Resumable")
+			if existingResumable.IsValid() && existingResumable.Kind() == reflect.Bool &&
+				existingResumable.Bool() != expectedResumableField.Elem().Bool() {
 				return fmt.Errorf("DBUpdate: %w", api.ErrConflict)
 			}
 		}

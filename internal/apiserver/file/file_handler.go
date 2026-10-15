@@ -439,24 +439,19 @@ func (c *FileAPIHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	order := r.URL.Query().Get(common.QueryParamOrder)
 	purposeStr := r.URL.Query().Get(common.QueryParamPurpose)
 
-	// Validate and parse start
-	// TODO : OpenAI's after is a cursor for use in pagination. after is an object ID that defines your place in the list. For instance, if you make a list request and receive 100 objects, ending with obj_foo, your subsequent call can include after=obj_foo in order to fetch the next page of the list.
-	// We have to use `after` as integer
-	start := 0
-	if after != "" {
-		parsedStart, err := strconv.Atoi(after)
-		if err != nil || parsedStart < 0 {
-			logger.V(logging.DEBUG).Info("invalid after parameter", "after", after)
-			apiErr := openai.NewAPIError(
-				http.StatusBadRequest,
-				"",
-				"Invalid after parameter: must be a non-negative integer cursor",
-				nil,
-			)
-			common.WriteAPIError(w, r, apiErr)
-			return
-		}
-		start = parsedStart
+	// after is the ID of the last file of the previous page (OpenAI cursor).
+	// A non-negative integer offset is still accepted for backward compatibility.
+	start, afterID, err := common.ParseAfter(after, ucom.FileIDPrefix)
+	if err != nil {
+		logger.V(logging.DEBUG).Info("invalid after parameter", "after", after)
+		apiErr := openai.NewAPIError(
+			http.StatusBadRequest,
+			"",
+			"Invalid after parameter: "+err.Error(),
+			nil,
+		)
+		common.WriteAPIError(w, r, apiErr)
+		return
 	}
 
 	// Validate and parse limit (default: 20, range: 1-10000)
@@ -527,6 +522,8 @@ func (c *FileAPIHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 		BaseQuery: dbapi.BaseQuery{
 			TenantID:     tenantID,
 			TagSelectors: nil,
+			AfterID:      afterID,
+			Descending:   order == "desc",
 		},
 	}
 	if purposeStr != "" {
@@ -549,15 +546,6 @@ func (c *FileAPIHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fileObjects = append(fileObjects, *fileObj)
-	}
-
-	// TODO: can Get support sorting directly?
-	// Handle order parameter (reverse for desc since DB returns asc by default)
-	if order == "desc" {
-		// Reverse the slice
-		for i, j := 0, len(fileObjects)-1; i < j; i, j = i+1, j-1 {
-			fileObjects[i], fileObjects[j] = fileObjects[j], fileObjects[i]
-		}
 	}
 
 	// Populate FirstID and LastID
