@@ -32,7 +32,8 @@ global:
   #   postgresql-url        — PostgreSQL connection URL (e.g. postgresql://[user]:[pass]@[host]/[db])
   #   redis-url             — Redis URL for llm-d-async queues (used only when async dispatch is enabled)
   #   inference-api-key     — API key for the inference gateway (optional; omit if not required)
-  #   s3-secret-access-key  — S3 secret access key (required when file_client.type is "s3")
+  #   s3-secret-access-key  — S3 secret access key (required when file_client.type is "s3";
+  #                          not needed for "gcs" when using Workload Identity / ADC)
   # Create with: kubectl create secret generic <name> --from-literal=postgresql-url=postgresql://...
   secretName: "batch-gateway-secrets"
 
@@ -68,7 +69,7 @@ global:
 
   # File client configuration
   fileClient:
-    type: "fs"  # Options: "fs", "s3"
+    type: "fs"  # Options: "fs", "s3", "gcs"
     # Filesystem client configuration (required when type is "fs")
     fs:
       basePath: "/tmp/batch-gateway"
@@ -83,8 +84,36 @@ global:
       prefix: ""
       usePathStyle: false
       autoCreateBucket: true
+    # GCS client configuration (required when type is "gcs").
+    # Authentication uses Application Default Credentials; on GKE this is normally
+    # Workload Identity bound to the component's Kubernetes ServiceAccount via
+    # the iam.gke.io/gcp-service-account annotation (see values.yaml per-component
+    # serviceAccount.annotations). No secret key from /etc/.secrets is required.
+    gcs:
+      bucket: ""
+      prefix: ""
+      projectId: ""            # required only when autoCreateBucket is true
+      autoCreateBucket: false  # opt-in: create the bucket at startup when missing.
+                               # Off by default — the gateway's day-1 job is reading
+                               # and writing objects, not provisioning buckets; when
+                               # enabled the pod's service account needs the far more
+                               # permissive roles/storage.admin instead of the
+                               # least-privilege roles/storage.objectUser.
+                               # When false, create the bucket out-of-band (Terraform,
+                               # gcloud) and grant only object-level roles.
+                               # Only runs at startup under verifyBucketOnStart=true;
+                               # the combination autoCreateBucket=true + verifyBucketOnStart=false
+                               # is rejected by the gcs client's Validate().
+      # verifyBucketOnStart runs a HeadBucket against the configured bucket at
+      # pod startup, failing fast if the bucket is missing or unreachable. Set
+      # to false when the workload service account lacks roles/storage.bucketViewer
+      # (e.g. GKE Workload Identity granted only objectUser), since the HeadBucket
+      # otherwise fails with 403 and prevents the pod from starting. When skipped,
+      # an unreachable/non-existent bucket surfaces as an error on the first object
+      # operation instead.
+      verifyBucketOnStart: true
     # Retry configuration for file storage operations (Store, Retrieve, Delete).
-    # Set maxRetries to 0 to disable. Useful for S3 transient errors.
+    # Set maxRetries to 0 to disable. Useful for S3/GCS transient errors.
     retry:
       maxRetries: 3
       initialBackoff: "1s"
