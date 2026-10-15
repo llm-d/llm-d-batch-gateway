@@ -36,6 +36,9 @@ const (
 	// DefaultReconcilerInterval is the default interval between orphan reconciler cycles.
 	// It also serves as the staleness threshold for in-flight entries.
 	DefaultReconcilerInterval = 60 * time.Minute
+
+	// DefaultEventPurgeInterval is the default interval between expired-event purges.
+	DefaultEventPurgeInterval = 30 * time.Second
 )
 
 // ReconcilerConfig holds the orphan reconciler configuration.
@@ -52,6 +55,11 @@ type CollectorConfig struct {
 	MaxConcurrency int           `yaml:"max_concurrency"`
 }
 
+// EventPurgeConfig configures the periodic removal of expired batch events.
+type EventPurgeConfig struct {
+	Interval time.Duration `yaml:"interval"`
+}
+
 // DefaultMetricsAddr is the default listen address for the metrics HTTP server.
 const DefaultMetricsAddr = ":9091"
 
@@ -62,6 +70,9 @@ type Config struct {
 
 	// Collector holds the collector-specific configuration (interval, concurrency).
 	Collector CollectorConfig `yaml:"collector"`
+
+	// EventPurge configures the periodic removal of expired batch events.
+	EventPurge EventPurgeConfig `yaml:"event_purge"`
 
 	// Reconciler configures the orphan reconciler that detects and recovers
 	// batch jobs stuck in non-terminal states.
@@ -94,6 +105,9 @@ func Load(path string) (*Config, error) {
 			Enabled:  true,
 			Interval: DefaultReconcilerInterval,
 		},
+		EventPurge: EventPurgeConfig{
+			Interval: DefaultEventPurgeInterval,
+		},
 	}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
@@ -109,6 +123,10 @@ func Load(path string) (*Config, error) {
 
 	if cfg.Reconciler.Enabled && cfg.Reconciler.Interval <= 0 {
 		return nil, fmt.Errorf("reconciler.interval must be positive when enabled, got %v", cfg.Reconciler.Interval)
+	}
+
+	if cfg.EventPurge.Interval <= 0 {
+		return nil, fmt.Errorf("event_purge.interval must be positive, got %v", cfg.EventPurge.Interval)
 	}
 
 	if err := validateMetricsAddr(cfg.MetricsAddr); err != nil {
