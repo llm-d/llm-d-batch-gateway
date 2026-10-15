@@ -2,6 +2,7 @@ package inference
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -45,12 +46,20 @@ func (c *asyncSharedClient) Submit(ctx context.Context, req *GenerateRequest) *C
 
 	metadata := make(map[string]string)
 	otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(metadata))
+	payload, err := json.Marshal(req.Params)
+	if err != nil {
+		return &ClientError{
+			Category: httpclient.ErrCategoryInvalidReq,
+			Message:  fmt.Sprintf("marshal async request parameters: %v", err),
+			RawError: err,
+		}
+	}
 
 	reqMsg := &asyncapi.RequestMessage{
 		ID:       req.RequestID,
 		Created:  now.Unix(),
 		Deadline: deadline.Unix(),
-		Payload:  req.Params,
+		Payload:  payload,
 		Headers:  req.Headers,
 		Endpoint: req.Endpoint,
 		Metadata: metadata,

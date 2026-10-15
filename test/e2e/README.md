@@ -107,13 +107,13 @@ ENABLE_DISPATCHER=true make dev-deploy
 ENABLE_DISPATCHER=true make test-e2e TEST_RUN=TestDispatcher
 ```
 
-The harness pins the official llm-d Async v0.9.1 release image, including its multi-architecture manifest digest: `ghcr.io/llm-d/llm-d-async:v0.9.1@sha256:d8db64675b6a5f70486d74de9f28aa2ee88e7e2c4e3ba97ba2078d634c2fd610`. It also pins chart v0.9.1 and verifies that every running dispatcher pod has both the expected image reference and runtime `imageID`. Local source builds remain preloaded into Kind with `imagePullPolicy: Never`; the released image uses `IfNotPresent` so Kubernetes resolves the immutable `tag@digest` reference.
+The harness pins the official llm-d Async v1.0.0 release image, including its multi-architecture manifest digest: `ghcr.io/llm-d/llm-d-async:v1.0.0@sha256:62a3e78320b0423c3c2ed327e6b870f786c3daf48f81a34f9e0332c80905663c`. It also pins chart v1.0.0 and verifies that every running dispatcher pod has both the expected image reference and runtime `imageID`. Local source builds remain preloaded into Kind with `imagePullPolicy: Never`; the released image uses `IfNotPresent` so Kubernetes resolves the immutable `tag@digest` reference.
 
 `TestDispatcher/BatchAPIHardKillRecovery` covers the composed Kubernetes path from the Files and Batch APIs through the Batch Processor, Async, inference, the Processor's replica-specific result queue, and durable output/error files. It complements llm-d Async PR #412's in-process/miniredis component coverage by force-deleting the sole Async pod only after every request is durably claimed, then verifying lease takeover, terminal counts, files, and externally visible deduplication.
 
-The v0.9.1 chart exposes Async's canonical `ap.transport` and `ap.transportConfig` values, including the claim lease and reclaim intervals used by the test. Production durability additionally requires persistent Redis through AOF and/or replication. Roll out claim-aware Async replicas before relying on hard-kill recovery; an older replica can still destructively dequeue work during a mixed-version rollout.
+The v1.0.0 chart exposes Async's canonical `ap.transport` and `ap.transportConfig` values, including the claim lease and reclaim intervals used by the test. Production durability additionally requires persistent Redis through AOF and/or replication. Roll out claim-aware Async replicas before relying on hard-kill recovery; an older replica can still destructively dequeue work during a mixed-version rollout.
 
-Chart v0.9.1 renames the dispatcher Deployment and its immutable selector from `async-processor` to `llm-d-async`. A clean E2E deployment needs no migration, but an existing local cluster previously deployed with chart 0.7.4 must remove the three old test releases before redeploying: `helm uninstall dispatcher dispatcher-scrape dispatcher-prom --namespace default`.
+Chart v1.0.0 renames the dispatcher Deployment and its immutable selector from `async-processor` to `llm-d-async`. A clean E2E deployment needs no migration, but an existing local cluster previously deployed with chart 0.7.4 must remove the three old test releases before redeploying: `helm uninstall dispatcher dispatcher-scrape dispatcher-prom --namespace default`.
 
 ### Tests that need an EPP
 

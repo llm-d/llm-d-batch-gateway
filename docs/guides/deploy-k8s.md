@@ -181,7 +181,7 @@ export BATCH_FLOW_CONTROL_OBJECTIVE=batch-sheddable
 
 # Async dispatcher (optional — set ENABLE_DISPATCHER=true to use)
 export ENABLE_DISPATCHER=false
-export DISPATCHER_VERSION=v0.9.1
+export DISPATCHER_VERSION=v1.0.0
 ```
 
 > **Note**: `GAIE_VERSION`, `ROUTER_CHART_VERSION`, and `ROUTER_GATEWAY_CHART` are automatically sourced from the llm-d repo's `guides/env.sh` after cloning (see step 3.2). You do not need to set them manually.
@@ -1051,11 +1051,11 @@ kubectl rollout status deployment/${PROMETHEUS_NAME} -n ${LLM_NAMESPACE} --timeo
 <details>
 <summary>Deploy async-processor</summary>
 
-> Do not set `result_queue_name` inside `transportConfig.queues`. Batch Processor replicas provide their own result destinations on each request; a static per-queue value overrides that routing in llm-d Async v0.9.1. When upgrading, remove the per-queue override and wait for the Async Processor rollout to complete before upgrading the Batch Processors. Reversing this order strands results even with one Processor replica.
+> Do not set `result_queue_name` inside `transportConfig.queues`. Batch Processor replicas provide their own result destinations on each request; a static per-queue value overrides that routing in llm-d Async v1.0.0. When upgrading, remove the per-queue override and wait for the Async Processor rollout to complete before upgrading the Batch Processors. Reversing this order strands results even with one Processor replica.
 
 ```bash
 DISPATCHER_RELEASE=dispatcher
-DISPATCHER_VERSION=${DISPATCHER_VERSION:-v0.9.1}
+DISPATCHER_VERSION=${DISPATCHER_VERSION:-v1.0.0}
 DISPATCHER_IMAGE="ghcr.io/llm-d/llm-d-async:${DISPATCHER_VERSION}"
 DISPATCHER_CHART="oci://ghcr.io/llm-d/charts/llm-d-async"
 

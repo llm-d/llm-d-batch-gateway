@@ -29,8 +29,8 @@ import (
 )
 
 const (
-	durableAsyncImage  = "ghcr.io/llm-d/llm-d-async:v0.9.1@sha256:d8db64675b6a5f70486d74de9f28aa2ee88e7e2c4e3ba97ba2078d634c2fd610"
-	durableAsyncDigest = "sha256:d8db64675b6a5f70486d74de9f28aa2ee88e7e2c4e3ba97ba2078d634c2fd610"
+	durableAsyncImage  = "ghcr.io/llm-d/llm-d-async:v1.0.0@sha256:62a3e78320b0423c3c2ed327e6b870f786c3daf48f81a34f9e0332c80905663c"
+	durableAsyncDigest = "sha256:62a3e78320b0423c3c2ed327e6b870f786c3daf48f81a34f9e0332c80905663c"
 )
 
 type asyncPod struct {
