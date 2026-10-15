@@ -18,31 +18,55 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
 )
 
-// epochProgressUpdater fences progress writes by an explicit epoch.
-// *StatusUpdater satisfies it.
+// epochProgressUpdater fences progress writes and status checks by an
+// explicit epoch. *StatusUpdater satisfies it.
 type epochProgressUpdater interface {
 	UpdateProgressCounts(ctx context.Context, jobID string, epoch int64, counts *openai.BatchRequestCounts) error
+	CheckJobStatus(ctx context.Context, jobID string, epoch int64) (openai.BatchStatus, error)
 }
 
 // jobProgressUpdater scopes a shared updater to one job's epoch so every
-// progress write for that job is fenced by its ownership epoch.
+// progress write and status check for that job is fenced by its ownership
+// epoch.
 type jobProgressUpdater struct {
 	inner epochProgressUpdater
 	jobID string
 	epoch int64
-	// onFencedOut, when non-nil, is invoked when a progress write is fenced out
-	// by an epoch bump (this processor lost ownership). runJob uses it to abort
-	// without a terminal write.
+	// onFencedOut, when non-nil, is invoked when a progress write or status
+	// check is fenced out by an epoch bump (this processor lost ownership).
+	// runJob uses it to abort without a terminal write.
 	onFencedOut func()
+	// onCancelling, when non-nil, is invoked when a status check finds the job
+	// cancelling. runJob uses it to abort as a user cancel.
+	onCancelling func()
 }
 
 func (u jobProgressUpdater) UpdateProgressCounts(ctx context.Context, jobID string, counts *openai.BatchRequestCounts) error {
-	err := u.inner.UpdateProgressCounts(ctx, u.jobID, u.epoch, counts)
+	return u.fenced(u.inner.UpdateProgressCounts(ctx, u.jobID, u.epoch, counts))
+}
+
+// CheckJobStatus calls onFencedOut when epoch no longer owns the job and
+// onCancelling when the job is cancelling. Other errors are returned.
+func (u jobProgressUpdater) CheckJobStatus(ctx context.Context, jobID string) error {
+	status, err := u.inner.CheckJobStatus(ctx, u.jobID, u.epoch)
+	if err != nil {
+		return u.fenced(err)
+	}
+	if status == openai.BatchStatusCancelling && u.onCancelling != nil {
+		// Backstop for a missed cancel event: the API server persists
+		// cancelling before it sends the event.
+		u.onCancelling()
+	}
+	return nil
+}
+
+// fenced handles an error from a fenced progress write or status check.
+func (u jobProgressUpdater) fenced(err error) error {
 	if err == nil {
 		return nil
 	}
 	if errors.Is(err, db.ErrConflict) {
-		// The write was fenced out by an epoch bump: a reclaimer took ownership.
+		// The call was fenced out by an epoch bump: a reclaimer took ownership.
 		// Signal runJob to abort (neutral cause) without a terminal write. Return
 		// nil so the progress tracker does not log a spurious update failure.
 		if u.onFencedOut != nil {
@@ -99,7 +123,13 @@ func (p *Processor) executeJobAsync(ctx context.Context, params *jobExecutionPar
 
 	tracker := pipeline.NewProgressTracker(
 		modelMap.LineCount,
-		jobProgressUpdater{inner: params.updater, jobID: params.jobInfo.JobID, epoch: jobEpoch, onFencedOut: params.onOwnershipLost},
+		jobProgressUpdater{
+			inner:        params.updater,
+			jobID:        params.jobInfo.JobID,
+			epoch:        jobEpoch,
+			onFencedOut:  params.onOwnershipLost,
+			onCancelling: params.cancelUser,
+		},
 		params.jobInfo.JobID,
 		progressInterval,
 		logger,

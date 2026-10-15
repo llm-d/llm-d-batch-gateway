@@ -3,13 +3,18 @@ package worker
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
+	"github.com/llm-d/llm-d-batch-gateway/internal/processor/batchctx"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/pipeline"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
+	batch_types "github.com/llm-d/llm-d-batch-gateway/internal/shared/types"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/semaphore"
+	httpclient "github.com/llm-d/llm-d-batch-gateway/pkg/clients/http"
 	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 )
 
@@ -18,6 +23,31 @@ type errEpochUpdater struct{ err error }
 
 func (e errEpochUpdater) UpdateProgressCounts(context.Context, string, int64, *openai.BatchRequestCounts) error {
 	return e.err
+}
+
+func (e errEpochUpdater) CheckJobStatus(context.Context, string, int64) (openai.BatchStatus, error) {
+	return "", e.err
+}
+
+// errGetBatchDB is a BatchProgressDBClient whose DBGet always returns err.
+type errGetBatchDB struct {
+	db.BatchProgressDBClient
+	err error
+}
+
+func (d *errGetBatchDB) DBGet(context.Context, *db.BatchQuery, bool, int, int) ([]*db.BatchItem, int, bool, error) {
+	return nil, 0, false, d.err
+}
+
+// progressSpyDB counts the fenced progress writes that reach the database.
+type progressSpyDB struct {
+	db.BatchProgressDBClient
+	writes atomic.Int32
+}
+
+func (d *progressSpyDB) DBUpdateProgress(ctx context.Context, id string, epoch int64, countsJSON []byte) error {
+	defer d.writes.Add(1)
+	return d.BatchProgressDBClient.DBUpdateProgress(ctx, id, epoch, countsJSON)
 }
 
 func TestJobProgressUpdater_FencedOutSignalsOwnershipLost(t *testing.T) {
@@ -57,6 +87,209 @@ func TestJobProgressUpdater_FencedOutSignalsOwnershipLost(t *testing.T) {
 	u3 := jobProgressUpdater{inner: errEpochUpdater{err: db.ErrConflict}, jobID: "job-1", epoch: 5}
 	if err := u3.UpdateProgressCounts(context.Background(), "job-1", &openai.BatchRequestCounts{Total: 1}); err != nil {
 		t.Fatalf("nil onFencedOut with ErrConflict should not error, got %v", err)
+	}
+}
+
+func TestJobProgressUpdater_CheckJobStatus(t *testing.T) {
+	const (
+		jobID = "job-1"
+		epoch = int64(3)
+	)
+	row := func(t *testing.T, epoch int64, status openai.BatchStatus) *db.BatchItem {
+		return &db.BatchItem{
+			BaseIndexes:  db.BaseIndexes{ID: jobID, TenantID: "tenant-1"},
+			BaseContents: db.BaseContents{Status: mustJSON(t, openai.BatchStatusInfo{Status: status})},
+			Epoch:        epoch,
+		}
+	}
+
+	tests := []struct {
+		name           string
+		stored         func(t *testing.T) *db.BatchItem // nil: no row
+		readErr        error
+		wantErr        bool
+		wantFencedOut  bool
+		wantCancelling bool
+	}{
+		{
+			name:   "owned and in progress keeps running",
+			stored: func(t *testing.T) *db.BatchItem { return row(t, epoch, openai.BatchStatusInProgress) },
+		},
+		{
+			name:          "epoch bumped by a reclaimer signals ownership lost",
+			stored:        func(t *testing.T) *db.BatchItem { return row(t, epoch+1, openai.BatchStatusInProgress) },
+			wantFencedOut: true,
+		},
+		{
+			name:          "missing row signals ownership lost",
+			wantFencedOut: true,
+		},
+		{
+			name:          "terminal status signals ownership lost",
+			stored:        func(t *testing.T) *db.BatchItem { return row(t, epoch, openai.BatchStatusFailed) },
+			wantFencedOut: true,
+		},
+		{
+			name:           "cancelling status signals a user cancel",
+			stored:         func(t *testing.T) *db.BatchItem { return row(t, epoch, openai.BatchStatusCancelling) },
+			wantCancelling: true,
+		},
+		{
+			name:          "cancelling under a newer epoch is left to the new owner",
+			stored:        func(t *testing.T) *db.BatchItem { return row(t, epoch+1, openai.BatchStatusCancelling) },
+			wantFencedOut: true,
+		},
+		{
+			name:    "transient read error is returned and keeps the job running",
+			stored:  func(t *testing.T) *db.BatchItem { return row(t, epoch, openai.BatchStatusInProgress) },
+			readErr: errors.New("connection reset"),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			batchDB := newMockBatchDBClient()
+			if tt.stored != nil {
+				if err := batchDB.DBStore(context.Background(), tt.stored(t)); err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+			}
+			if tt.readErr != nil {
+				batchDB = &errGetBatchDB{BatchProgressDBClient: batchDB, err: tt.readErr}
+			}
+
+			var fencedOut, cancelling bool
+			u := jobProgressUpdater{
+				inner:        NewStatusUpdater(batchDB),
+				jobID:        jobID,
+				epoch:        epoch,
+				onFencedOut:  func() { fencedOut = true },
+				onCancelling: func() { cancelling = true },
+			}
+			err := u.CheckJobStatus(context.Background(), jobID)
+			if tt.wantErr != (err != nil) {
+				t.Fatalf("CheckJobStatus() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if fencedOut != tt.wantFencedOut {
+				t.Errorf("onFencedOut called = %v, want %v", fencedOut, tt.wantFencedOut)
+			}
+			if cancelling != tt.wantCancelling {
+				t.Errorf("onCancelling called = %v, want %v", cancelling, tt.wantCancelling)
+			}
+		})
+	}
+}
+
+// TestExecuteJob_QuietIntervalStatusChange verifies that a job with a long
+// running request and no completions still stops when its row changes: the
+// progress tracker checks the row on every interval, not only after a write.
+func TestExecuteJob_QuietIntervalStatusChange(t *testing.T) {
+	const epoch = int64(1)
+
+	tests := []struct {
+		name string
+		// change edits the stored row while no counts are pending.
+		change    func(t *testing.T, item *db.BatchItem)
+		wantCause error // nil: ownership lost (neutral cause)
+	}{
+		{
+			name:   "epoch bump aborts the job as lost ownership",
+			change: func(_ *testing.T, item *db.BatchItem) { item.Epoch++ },
+		},
+		{
+			name: "cancelling status aborts the job as a user cancel",
+			change: func(t *testing.T, item *db.BatchItem) {
+				item.Status = mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusCancelling})
+			},
+			wantCause: batchctx.ErrCancelled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.NewConfig()
+			cfg.WorkDir = t.TempDir()
+			cfg.ProgressUpdateInterval = 20 * time.Millisecond
+
+			inferStarted := make(chan struct{})
+			mock := &mockInferenceClient{
+				generateFn: func(ctx context.Context, _ *inference.GenerateRequest) (*inference.GenerateResponse, *inference.ClientError) {
+					close(inferStarted)
+					<-ctx.Done()
+					return nil, &inference.ClientError{
+						Category: httpclient.ErrCategoryServer,
+						Message:  "context cancelled",
+						RawError: ctx.Err(),
+					}
+				},
+			}
+			requests := []batch_types.Request{
+				{CustomID: "a", Method: "POST", URL: "/v1/chat/completions", Body: map[string]interface{}{"model": "m1"}},
+			}
+			env, jobInfo := setupExecutionJob(t, cfg, mock, requests, map[string]string{"m1": "m1"})
+
+			newRow := func() *db.BatchItem {
+				return &db.BatchItem{
+					BaseIndexes:  db.BaseIndexes{ID: jobInfo.JobID, TenantID: jobInfo.TenantID},
+					BaseContents: db.BaseContents{Status: mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusInProgress})},
+					Epoch:        epoch,
+				}
+			}
+			if err := env.dbClient.DBStore(context.Background(), newRow()); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			spy := &progressSpyDB{BatchProgressDBClient: env.dbClient}
+
+			// Mirror runJob's abort wiring.
+			ctx, abort := context.WithCancelCause(testLoggerCtx(t))
+			params := &jobExecutionParams{
+				updater:         NewStatusUpdater(spy),
+				jobItem:         newRow(),
+				jobInfo:         jobInfo,
+				cancelUser:      func() { abort(batchctx.ErrCancelled) },
+				onOwnershipLost: func() { abort(context.Canceled) },
+			}
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, _ = env.p.executeJob(ctx, params)
+			}()
+			// Never leave the job running (and logging) past the test.
+			defer func() {
+				abort(context.Canceled)
+				<-done
+			}()
+
+			<-inferStarted
+			// The first tick flushes the initial counts. Change the row after
+			// it, so no further result or write would reveal the change.
+			deadline := time.Now().Add(5 * time.Second)
+			for spy.writes.Load() == 0 {
+				if time.Now().After(deadline) {
+					t.Fatal("initial progress write did not happen")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			changed := newRow()
+			tt.change(t, changed)
+			if err := env.dbClient.DBStore(context.Background(), changed); err != nil {
+				t.Fatalf("change row: %v", err)
+			}
+
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("job kept running after its row changed in a quiet interval")
+			}
+			if ctx.Err() == nil {
+				t.Fatal("job returned without being aborted")
+			}
+			if got := batchctx.Cause(ctx); !errors.Is(got, tt.wantCause) {
+				t.Fatalf("abort cause = %v, want %v", got, tt.wantCause)
+			}
+		})
 	}
 }
 
