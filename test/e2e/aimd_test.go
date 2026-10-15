@@ -12,33 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// AIMD e2e tests verify that the adaptive concurrency controller reacts to
-// backpressure from downstream inference endpoints and that per-endpoint
-// isolation holds.
-//
-// The backpressure is real: the EPP in front of each model sheds
-// batch-sheddable requests (429 on reject, 503 on queue TTL expiry) once its
-// saturation detector sees the model server's waiting queue grow past the
-// configured threshold. The tests
-// provoke that by choking one model's engine through the vllm-vcr control API
-// (one running request, multi-second decode) while the other model stays
-// healthy. These tests therefore require ENABLE_GIE=true (legacy flag name).
-//
-// AIMD itself has no independent spec yet, so its gauges (limit, increase and
-// decrease counters, per endpoint) are logged for inspection rather than
-// asserted. What the tests assert is the mechanism underneath: the EPP shed
-// batch requests, and after the engine is released every request completed.
-//
-// Coverage:
-//   - DecreaseAndIsolation: shedding on the choked model with a healthy model
-//     in the same batch; logs both endpoints' AIMD state.
-//   - Recovery: release the engine, then single-request batches; logs whether
-//     the limit climbed back.
+// AIMD e2e tests verify endpoint isolation and concurrency recovery under real
+// backpressure. TTL shedding covers request outcomes; Recovery uses
+// model-server 5xx injection and asserts AIMD metric changes.
 
 package e2e_test
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -58,20 +42,18 @@ func testAIMD(t *testing.T) {
 	}
 	t.Cleanup(func() { deleteE2ECurlPod(t) })
 
-	t.Run("DecreaseAndIsolation", doTestAIMDDecreaseAndIsolation)
+	t.Run("TTLSheddingAndIsolation", doTestAIMDTTLSheddingAndIsolation)
 	t.Run("Recovery", doTestAIMDRecovery)
 }
 
-// saturationRequests is the size of the batch submitted at a saturated
-// model: twice the processor's perEndpoint concurrency in per-model EPP mode (20), so
-// batch arrivals keep coming as shed requests are retried or give up.
+// saturationRequests is twice the processor's perEndpoint concurrency. It
+// keeps enough batch requests in flight to trigger EPP TTL eviction.
 const saturationRequests = 40
 
 // saturationMaxTokens is the max_tokens of every saturating request. With
 // chokeEngine's 3s decode step a request occupies the single engine slot for
 // 15s, so the interactive workers queued behind it keep the pool saturated
-// continuously, for well over the 4 x 30s TTL cycles an exhausting retry
-// chain needs.
+// continuously until the EPP's 30s queue TTL evicts batch requests.
 const saturationMaxTokens = 5
 
 // chokeEngine caps the simulator's engine at one running request with a
@@ -157,29 +139,10 @@ func chatLine(customID, model, content string, maxTokens int) string {
 	)
 }
 
-// doTestAIMDDecreaseAndIsolation saturates model B (see submitSaturatingBatch)
-// with a couple of requests to model A mixed in, releases the engine once the
-// EPP has shed, and waits for the batch to complete. Every shed request was
-// retried after a shed response, so its completion is an AIMD capacity_retry
-// decrease signal; the resulting AIMD state of both endpoints is logged.
-func doTestAIMDDecreaseAndIsolation(t *testing.T) {
+// doTestAIMDTTLSheddingAndIsolation verifies that healthy-model requests
+// complete while choked-model requests may be recorded as batch_expired errors.
+func doTestAIMDTTLSheddingAndIsolation(t *testing.T) {
 	const numHealthyRequests = 2
-
-	metricsBefore := scrapeProcessorMetrics(t)
-	decreasesBefore := parseCounterByEndpoint(t, metricsBefore, "batch_processor_aimd_decreases_total")
-	limitsBefore := parseGaugeByEndpoint(t, metricsBefore, "batch_processor_aimd_concurrency_limit")
-
-	var decreaseBeforeChoked, limitBeforeHealthy float64
-	for endpoint, count := range decreasesBefore {
-		if isEPPEndpoint(endpoint, testModelB) {
-			decreaseBeforeChoked = count
-		}
-	}
-	for endpoint, limit := range limitsBefore {
-		if isEPPEndpoint(endpoint, testModel) {
-			limitBeforeHealthy = limit
-		}
-	}
 
 	healthy := make([]string, 0, numHealthyRequests)
 	for i := range numHealthyRequests {
@@ -187,41 +150,50 @@ func doTestAIMDDecreaseAndIsolation(t *testing.T) {
 	}
 	batchID, stopLoad := submitSaturatingBatch(t, "aimd-choked", healthy...)
 
-	t.Log("stopping interactive load and releasing the engine so shed requests complete on retry")
+	t.Log("stopping interactive load and releasing the engine")
 	stopLoad()
 	if err := releaseEngine(t, testSimServiceB); err != nil {
 		t.Fatal(err)
 	}
 
-	batch, _ := waitForBatchStatus(t, batchID, 5*time.Minute, openai.BatchStatusCompleted)
+	batch, results := waitForBatchStatus(t, batchID, 5*time.Minute, openai.BatchStatusCompleted)
 	total := int64(saturationRequests + numHealthyRequests)
-	if batch.RequestCounts.Completed != total {
-		t.Fatalf("expected %d completed, got completed=%d failed=%d",
-			total, batch.RequestCounts.Completed, batch.RequestCounts.Failed)
+	if got := batch.RequestCounts.Completed + batch.RequestCounts.Failed; got != total {
+		t.Fatalf("expected completed+failed = %d, got %d", total, got)
 	}
-
-	logAIMD(t, "after shed batch", decreaseBeforeChoked, limitBeforeHealthy)
+	if batch.RequestCounts.Failed == 0 {
+		t.Error("expected at least one TTL-evicted request, got failed=0")
+	}
+	if got := countBatchExpiredErrors(t, results.ErrorBody); got != batch.RequestCounts.Failed {
+		t.Errorf("expected %d batch_expired error line(s), got %d", batch.RequestCounts.Failed, got)
+	}
+	outputCustomIDs := resultCustomIDs(t, results.OutputBody)
+	for i := range numHealthyRequests {
+		customID := fmt.Sprintf("aimd-ok-%d", i+1)
+		if !outputCustomIDs[customID] {
+			t.Errorf("healthy request %q missing from output file", customID)
+		}
+	}
 }
 
-// logAIMD reports the AIMD gauges and decrease deltas for both EPP endpoints.
-// AIMD has no independent spec yet, so these are recorded for inspection and
-// not asserted; the test's pass/fail rests on the EPP shed counter, the
-// output statuses, and batch completion.
-func logAIMD(t *testing.T, phase string, decreaseBeforeChoked, limitBeforeHealthy float64) {
+// assertAIMDIsolation reports AIMD state and verifies the healthy endpoint was
+// not reduced while the other endpoint was under AIMD decrease pressure.
+func assertAIMDIsolation(t *testing.T, phase string, limitBeforeHealthy float64) {
 	t.Helper()
 
 	metrics := scrapeProcessorMetrics(t)
 	expectedPerEndpoint := getProcessorPerEndpointConcurrency(t)
 	aimdLimits := parseGaugeByEndpoint(t, metrics, "batch_processor_aimd_concurrency_limit")
-	aimdDecreases := parseCounterByEndpoint(t, metrics, "batch_processor_aimd_decreases_total")
 	for endpoint, limit := range aimdLimits {
 		switch {
 		case isEPPEndpoint(endpoint, testModelB):
-			t.Logf("%s: choked endpoint limit=%.0f (perEndpoint=%d) decreases delta=%.0f",
-				phase, limit, expectedPerEndpoint, aimdDecreases[endpoint]-decreaseBeforeChoked)
+			t.Logf("%s: choked endpoint limit=%.0f (perEndpoint=%d)", phase, limit, expectedPerEndpoint)
 		case isEPPEndpoint(endpoint, testModel):
 			t.Logf("%s: healthy endpoint limit=%.0f (before=%.0f, perEndpoint=%d)",
 				phase, limit, limitBeforeHealthy, expectedPerEndpoint)
+			if limit < limitBeforeHealthy {
+				t.Errorf("healthy endpoint AIMD limit dropped from %.0f to %.0f; isolation violated", limitBeforeHealthy, limit)
+			}
 		}
 	}
 }
@@ -247,6 +219,35 @@ func getProcessorPerEndpointConcurrency(t *testing.T) int {
 	}
 
 	return *root.Concurrency.PerEndpoint
+}
+
+// getProcessorAIMDSettings reads the deployed processor ConfigMap and returns
+// the configured AIMD minimum limit and backoff factor.
+func getProcessorAIMDSettings(t *testing.T) (int, float64) {
+	t.Helper()
+
+	cmName := fmt.Sprintf("%s-processor-config", testHelmRelease)
+	configYAML := kubectlGetConfigMap(t, cmName)
+
+	var root struct {
+		Concurrency struct {
+			AIMD struct {
+				Min           *int     `yaml:"min"`
+				BackoffFactor *float64 `yaml:"backoff_factor"`
+			} `yaml:"aimd"`
+		} `yaml:"concurrency"`
+	}
+	if err := yaml.Unmarshal([]byte(configYAML), &root); err != nil {
+		t.Fatalf("parse processor config.yaml: %v", err)
+	}
+	if root.Concurrency.AIMD.Min == nil {
+		t.Fatalf("concurrency.aimd.min missing in config:\n%s", configYAML)
+	}
+	if root.Concurrency.AIMD.BackoffFactor == nil {
+		t.Fatalf("concurrency.aimd.backoff_factor missing in config:\n%s", configYAML)
+	}
+
+	return *root.Concurrency.AIMD.Min, *root.Concurrency.AIMD.BackoffFactor
 }
 
 // parseGaugeByEndpoint extracts all {endpoint="..."} values for a gauge metric.
@@ -286,83 +287,162 @@ func parseCounterByEndpoint(t *testing.T, metrics, metricName string) map[string
 	return result
 }
 
-// doTestAIMDRecovery verifies that the AIMD concurrency limit recovers after
-// backpressure subsides:
-//  1. Saturate model B until the EPP sheds, release the engine through the
-//     control API (no rollout needed), and let the batch complete; the
-//     retried requests drive the limit down as they complete.
-//  2. Submit single-request batches to complete several additive-increase
-//     windows, then log whether the exported limit rose above its phase-1
-//     value and whether new decrease signals appeared.
-//
-// AIMD increases by +1 per successful window, so a single large recovery batch
-// can complete before exported metrics clearly reflect the recovery under CI
-// load. Single-request batches make the success windows deterministic.
+// doTestAIMDRecovery verifies that the AIMD concurrency limit decreases on a
+// retryable 5xx response and rises again after the backend recovers.
 func doTestAIMDRecovery(t *testing.T) {
-	t.Log("phase 1: saturating model B to drive the AIMD limit down...")
-	batchID, stopLoad := submitSaturatingBatch(t, "aimd-recov-shed")
-	stopLoad()
-	if err := releaseEngine(t, testSimServiceB); err != nil {
-		t.Fatal(err)
-	}
-	batch, _ := waitForBatchStatus(t, batchID, 5*time.Minute, openai.BatchStatusCompleted)
-	t.Logf("phase 1 batch: completed=%d, failed=%d", batch.RequestCounts.Completed, batch.RequestCounts.Failed)
+	t.Log("phase 1: injecting model B failures to lower the AIMD limit")
 
 	expectedPerEndpoint := getProcessorPerEndpointConcurrency(t)
-	metrics := scrapeProcessorMetrics(t)
-	aimdLimits := parseGaugeByEndpoint(t, metrics, "batch_processor_aimd_concurrency_limit")
-	aimdIncreases := parseCounterByEndpoint(t, metrics, "batch_processor_aimd_increases_total")
-	aimdDecreases := parseCounterByEndpoint(t, metrics, "batch_processor_aimd_decreases_total")
+	metricsBefore := scrapeProcessorMetrics(t)
+	limitsBefore := parseGaugeByEndpoint(t, metricsBefore, "batch_processor_aimd_concurrency_limit")
+	decreasesBefore := parseCounterByEndpoint(t, metricsBefore, "batch_processor_aimd_decreases_total")
 
-	var (
-		aimdEndpoint      string
-		baselineLimit     float64
-		baselineIncreases float64
-		baselineDecreases float64
-	)
-	for endpoint, limit := range aimdLimits {
+	var aimdEndpoint string
+	var baselineLimit, baselineDecreases, limitBeforeHealthy float64
+	var foundHealthy bool
+	for endpoint, limit := range limitsBefore {
 		if isEPPEndpoint(endpoint, testModelB) {
 			aimdEndpoint = endpoint
 			baselineLimit = limit
-			baselineIncreases = aimdIncreases[endpoint]
-			baselineDecreases = aimdDecreases[endpoint]
-			t.Logf("phase 1: aimd_concurrency_limit{endpoint=%q} = %.0f (perEndpoint=%d)", endpoint, limit, expectedPerEndpoint)
-			break
+			baselineDecreases = decreasesBefore[endpoint]
+		}
+		if isEPPEndpoint(endpoint, testModel) {
+			limitBeforeHealthy = limit
+			foundHealthy = true
 		}
 	}
 	if aimdEndpoint == "" {
 		t.Fatalf("no AIMD metric found for the EPP endpoint of %q", testModelB)
 	}
+	if !foundHealthy {
+		t.Fatalf("no AIMD metric found for the EPP endpoint of %q", testModel)
+	}
 
-	// A limit of N needs N clean successes to record one additive increase.
-	// Send more than one full success window so the exported gauge has time to
-	// move above the floor even under CI scrape lag.
-	numRecoveryRequests := 2*int(baselineLimit) + 1
+	aimdMin, aimdBackoffFactor := getProcessorAIMDSettings(t)
+	if baselineLimit <= float64(aimdMin) {
+		t.Logf("AIMD limit is at its minimum (%.0f); submitting successful batches to establish a recoverable baseline", baselineLimit)
+		submitSuccessfulAIMDBatches(t, "aimd-recov-baseline", aimdMin)
+		metricsBefore = scrapeProcessorMetrics(t)
+		limitsBefore = parseGaugeByEndpoint(t, metricsBefore, "batch_processor_aimd_concurrency_limit")
+		decreasesBefore = parseCounterByEndpoint(t, metricsBefore, "batch_processor_aimd_decreases_total")
+		baselineLimit = limitsBefore[aimdEndpoint]
+		baselineDecreases = decreasesBefore[aimdEndpoint]
+		if baselineLimit <= float64(aimdMin) {
+			t.Fatalf("AIMD limit for endpoint %q did not rise above minimum %.0f, got %.0f", aimdEndpoint, float64(aimdMin), baselineLimit)
+		}
+	}
+
+	patchEngineConfig(t, testSimServiceB, `{"failure_injection_rate":1.0,"failure_types":["error"]}`)
+	t.Cleanup(func() {
+		if err := tryPatchEngineConfig(t, testSimServiceB, `{"failure_injection_rate":0.0}`); err != nil {
+			t.Errorf("cleanup: disable failure injection: %v", err)
+		}
+	})
+
+	fileID := mustCreateFile(t, fmt.Sprintf("aimd-recov-fail-%s.jsonl", testRunID),
+		chatLine("aimd-recov-fail", testModelB, "AIMD recovery failure", 2))
+	batchID := mustCreateBatch(t, fileID)
+	batch := waitForTerminalBatch(t, batchID, 2*time.Minute)
+	if batch.Status != openai.BatchStatusCompleted {
+		t.Fatalf("expected failure-injection batch to complete, got status %q", batch.Status)
+	}
+	results := fetchBatchResults(t, batch)
+	if status := outputResponseStatus(t, results.OutputBody); status < http.StatusInternalServerError {
+		t.Fatalf("expected retryable 5xx response, got status %d", status)
+	}
+
+	expectedDecreaseLimit := math.Min(
+		float64(expectedPerEndpoint),
+		math.Max(float64(aimdMin), math.Floor(baselineLimit*aimdBackoffFactor)),
+	)
+	recoveryBaselineLimit, decreasesAfterFailure := waitForAIMDDecreaseSignal(t, aimdEndpoint, expectedDecreaseLimit, baselineDecreases, 30*time.Second)
+	if decreasesAfterFailure <= baselineDecreases {
+		t.Fatalf("expected AIMD decrease counter above %.0f, got %.0f", baselineDecreases, decreasesAfterFailure)
+	}
+	t.Logf("phase 1: aimd_concurrency_limit{endpoint=%q} = %.0f (before=%.0f, perEndpoint=%d)", aimdEndpoint, recoveryBaselineLimit, baselineLimit, expectedPerEndpoint)
+	assertAIMDIsolation(t, "after injected failure", limitBeforeHealthy)
+
+	patchEngineConfig(t, testSimServiceB, `{"failure_injection_rate":0.0}`)
+
+	numRecoveryRequests := 2*int(recoveryBaselineLimit) + 1
 	t.Logf("phase 2: submitting %d single-request batches to trigger AIMD recovery...", numRecoveryRequests)
-	for i := range numRecoveryRequests {
-		recovLine := chatLine(fmt.Sprintf("aimd-recov-ok-%d", i+1), testModelB, fmt.Sprintf("AIMD recover %d", i+1), 2)
-		recovFileID := mustCreateFile(t, fmt.Sprintf("aimd-recov-ok-%s-%02d.jsonl", testRunID, i+1), recovLine)
+	submitSuccessfulAIMDBatches(t, "aimd-recov-ok", numRecoveryRequests)
+
+	increasesBefore := parseCounterByEndpoint(t, scrapeProcessorMetrics(t), "batch_processor_aimd_increases_total")[aimdEndpoint]
+	limit, increases, decreases, recovered := waitForAIMDRecovery(
+		t,
+		aimdEndpoint,
+		recoveryBaselineLimit,
+		increasesBefore,
+		decreasesAfterFailure,
+		60*time.Second,
+		500*time.Millisecond,
+	)
+	if !recovered {
+		t.Fatalf("AIMD limit did not recover above %.0f, got %.0f", recoveryBaselineLimit, limit)
+	}
+	t.Logf("phase 2: aimd_concurrency_limit{endpoint=%q} = %.0f (perEndpoint=%d)", aimdEndpoint, limit, expectedPerEndpoint)
+	t.Logf("aimd_increases_total{endpoint=%q} = %.0f", aimdEndpoint, increases)
+	t.Logf("aimd_decreases_total{endpoint=%q} = %.0f", aimdEndpoint, decreases)
+}
+
+func submitSuccessfulAIMDBatches(t *testing.T, prefix string, count int) {
+	t.Helper()
+
+	for i := range count {
+		recovLine := chatLine(fmt.Sprintf("%s-%d", prefix, i+1), testModelB, fmt.Sprintf("%s %d", prefix, i+1), 2)
+		recovFileID := mustCreateFile(t, fmt.Sprintf("%s-%s-%02d.jsonl", prefix, testRunID, i+1), recovLine)
 		recovBatchID := mustCreateBatch(t, recovFileID)
 
 		recovBatch, _ := waitForBatchStatus(t, recovBatchID, 5*time.Minute, openai.BatchStatusCompleted)
 		if recovBatch.RequestCounts.Completed != 1 || recovBatch.RequestCounts.Failed != 0 {
-			t.Fatalf("expected recovery batch %d to complete cleanly, got completed=%d failed=%d",
+			t.Fatalf("expected successful AIMD batch %d to complete cleanly, got completed=%d failed=%d",
 				i+1, recovBatch.RequestCounts.Completed, recovBatch.RequestCounts.Failed)
 		}
 	}
+}
 
-	limit, increases, decreases, recovered := waitForAIMDRecovery(
-		t,
-		aimdEndpoint,
-		baselineLimit,
-		baselineIncreases,
-		baselineDecreases,
-		60*time.Second,
-		500*time.Millisecond,
-	)
-	t.Logf("phase 2: aimd_concurrency_limit{endpoint=%q} = %.0f (recovered above %.0f: %v)", aimdEndpoint, limit, baselineLimit, recovered)
-	t.Logf("aimd_increases_total{endpoint=%q} = %.0f", aimdEndpoint, increases)
-	t.Logf("aimd_decreases_total{endpoint=%q} = %.0f", aimdEndpoint, decreases)
+// outputResponseStatus returns the status code from a one-line output file.
+func outputResponseStatus(t *testing.T, body string) int {
+	t.Helper()
+
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected one output line, got %d", len(lines))
+	}
+
+	var result batchResultLine
+	if err := json.Unmarshal([]byte(lines[0]), &result); err != nil {
+		t.Fatalf("parse output line: %v", err)
+	}
+	if result.Response == nil {
+		t.Fatal("output line has no response")
+	}
+	return result.Response.StatusCode
+}
+
+func waitForAIMDDecreaseSignal(
+	t *testing.T,
+	endpoint string,
+	expectedLimit, baselineDecreases float64,
+	timeout time.Duration,
+) (limit, decreases float64) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for {
+		metrics := scrapeProcessorMetrics(t)
+		currentLimit := parseGaugeByEndpoint(t, metrics, "batch_processor_aimd_concurrency_limit")[endpoint]
+		currentDecreases := parseCounterByEndpoint(t, metrics, "batch_processor_aimd_decreases_total")[endpoint]
+		if currentDecreases > baselineDecreases && currentLimit == expectedLimit {
+			return currentLimit, currentDecreases
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("AIMD limit did not reach expected %.0f within %v (after=%.0f, decreases=%.0f, baseline decreases=%.0f)",
+				expectedLimit, timeout, currentLimit, currentDecreases, baselineDecreases)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func waitForAIMDRecovery(

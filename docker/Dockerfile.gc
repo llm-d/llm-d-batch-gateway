@@ -1,4 +1,4 @@
-FROM quay.io/projectquay/golang:1.27 AS builder
+FROM --platform=$BUILDPLATFORM quay.io/projectquay/golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -11,7 +11,7 @@ COPY cmd/batch-gc/ cmd/batch-gc/
 COPY internal/ internal/
 COPY pkg/ pkg/
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o bin/batch-gateway-gc ./cmd/batch-gc
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o bin/batch-gateway-gc ./cmd/batch-gc
 
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /

@@ -174,6 +174,7 @@ test-scripts:
 	@echo "Running shell script tests..."
 	@bash scripts/generate-release_test.sh
 	@bash scripts/dev-deploy_test.sh
+	@bash benchmarks/setup_test.sh
 
 ## test-coverage: Run tests with coverage
 test-coverage:
@@ -329,7 +330,7 @@ test-regression:
 ## test-integration: Run integration tests (in-process server with mock backends and external service integration, no cluster needed)
 test-integration:
 	@echo "Running integration tests..."
-	@$(GO) test -v -tags=integration ./... || \
+	@$(GO) test $(GOFLAGS) -v -tags=integration ./... || \
 		(echo "\n❌ Integration tests failed" && exit 1)
 	@echo "\n✅ Integration tests passed!"
 
