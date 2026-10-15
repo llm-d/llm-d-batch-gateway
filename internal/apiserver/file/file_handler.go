@@ -626,6 +626,17 @@ func (c *FileAPIHandler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	storageName := ucom.FileStorageName(fileObj.ID, fileObj.Filename)
 	fileReader, fileMeta, err := c.clients.File.Retrieve(ctx, storageName, folderName)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Info("file content not found in storage", "storageName", storageName, "folderName", folderName)
+			apiErr := openai.NewAPIError(
+				http.StatusNotFound,
+				"",
+				fmt.Sprintf("File content for %s not found", fileObj.ID),
+				nil,
+			)
+			common.WriteAPIError(w, r, apiErr)
+			return
+		}
 		logger.Error(err, "failed to retrieve file content", "storageName", storageName, "folderName", folderName)
 		common.WriteInternalServerError(w, r)
 		return
