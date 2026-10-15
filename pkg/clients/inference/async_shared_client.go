@@ -46,6 +46,12 @@ func (c *asyncSharedClient) Submit(ctx context.Context, req *GenerateRequest) *C
 
 	metadata := make(map[string]string)
 	otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(metadata))
+	model := ""
+	if value, ok := req.Params["model"]; ok {
+		if modelValue, ok := value.(string); ok {
+			model = modelValue
+		}
+	}
 	payload, err := json.Marshal(req.Params)
 	if err != nil {
 		return &ClientError{
@@ -63,6 +69,7 @@ func (c *asyncSharedClient) Submit(ctx context.Context, req *GenerateRequest) *C
 		Headers:  req.Headers,
 		Endpoint: req.Endpoint,
 		Metadata: metadata,
+		Model:    model,
 	}
 
 	if err := c.producer.SubmitRequest(ctx, reqMsg); err != nil {

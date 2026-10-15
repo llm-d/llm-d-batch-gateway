@@ -113,7 +113,7 @@ The harness pins the official llm-d Async v1.0.0 release image, including its mu
 
 The v1.0.0 chart exposes Async's canonical `ap.transport` and `ap.transportConfig` values, including the claim lease and reclaim intervals used by the test. Production durability additionally requires persistent Redis through AOF and/or replication. Roll out claim-aware Async replicas before relying on hard-kill recovery; an older replica can still destructively dequeue work during a mixed-version rollout.
 
-Chart v1.0.0 renames the dispatcher Deployment and its immutable selector from `async-processor` to `llm-d-async`. A clean E2E deployment needs no migration, but an existing local cluster previously deployed with chart 0.7.4 must remove the three old test releases before redeploying: `helm uninstall dispatcher dispatcher-scrape dispatcher-prom --namespace default`.
+Since chart v0.8.0, the dispatcher Deployment and its immutable selector have been named `llm-d-async` instead of `async-processor`. A clean E2E deployment needs no migration, but an existing local cluster previously deployed with chart 0.7.4 must remove the three old test releases before redeploying: `helm uninstall dispatcher dispatcher-scrape dispatcher-prom --namespace default`.
 
 ### Tests that need an EPP
 
