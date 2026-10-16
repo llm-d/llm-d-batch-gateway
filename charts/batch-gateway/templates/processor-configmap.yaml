@@ -154,6 +154,12 @@ data:
         prefix: {{ .Values.global.fileClient.s3.prefix | quote }}
         use_path_style: {{ .Values.global.fileClient.s3.usePathStyle }}
         auto_create_bucket: {{ .Values.global.fileClient.s3.autoCreateBucket }}
+      gcs:
+        bucket: {{ .Values.global.fileClient.gcs.bucket | quote }}
+        prefix: {{ .Values.global.fileClient.gcs.prefix | quote }}
+        project_id: {{ .Values.global.fileClient.gcs.projectId | quote }}
+        auto_create_bucket: {{ .Values.global.fileClient.gcs.autoCreateBucket }}
+        verify_bucket_on_start: {{ .Values.global.fileClient.gcs.verifyBucketOnStart }}
       retry:
         max_retries: {{ .Values.global.fileClient.retry.maxRetries }}
         initial_backoff: {{ .Values.global.fileClient.retry.initialBackoff | quote }}
