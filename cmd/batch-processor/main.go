@@ -39,6 +39,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/interrupt"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
 	uotel "github.com/llm-d/llm-d-batch-gateway/internal/util/otel"
+	"github.com/llm-d/llm-d-batch-gateway/internal/util/shutdown"
 )
 
 func main() {
@@ -81,13 +82,10 @@ func run() error {
 		logger.Error(err, "Failed to initialize tracer")
 		return err
 	}
-	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := shutdownTracer(shutdownCtx); err != nil {
-			logger.Error(err, "Failed to shutdown tracer")
-		}
-	}()
+	// Safety net: flushes the tracer on any early return before the
+	// coordinator below takes ownership (mirrors closeClients below).
+	tracerGuard := shutdown.NewGuard(logger, "flush tracer", 5*time.Second, shutdownTracer)
+	defer tracerGuard.Cleanup()
 
 	// metrics setup
 	if err := metrics.InitMetrics(*cfg); err != nil {
@@ -103,20 +101,30 @@ func run() error {
 	// readiness starts as false and flips right before entering polling loop execution.
 	var ready atomic.Bool
 	// read only channel for observability server's fatal error
-	obsFatalCh := startObservabilityServer(
+	obsFatalCh, shutdownObservability := startObservabilityServer(
 		ctx,
 		cfg,
 		&ready,
 		cancel,
 		cfg.TerminateOnObservabilityFailure,
 	)
+	// Safety net: shuts down the observability server on any early return
+	// before the coordinator below takes ownership.
+	obsGuard := shutdown.NewGuard(logger, "flush observability", 5*time.Second, shutdownObservability)
+	defer obsGuard.Cleanup()
 
 	procClients, err := buildProcessorClients(ctx, cfg, hostname)
 	if err != nil {
 		logger.Error(err, "Failed to build processor clients")
 		return err
 	}
-	defer func() { _ = procClients.Close() }()
+	// Safety net: closes clients on any early return before the coordinator
+	// below takes ownership. Once the coordinator is built, the guards are
+	// disarmed and the coordinator closes them exactly once, in order.
+	// procClients.Close() takes no context, so it can't be bounded by a
+	// timeout; see the identical "close clients" phase below.
+	clientsGuard := shutdown.NewGuard(logger, "close clients", 0, func(context.Context) error { return procClients.Close() })
+	defer clientsGuard.Cleanup()
 
 	// init processor
 	logger.V(logging.INFO).Info("Initializing worker processor", "maxWorkers", cfg.NumWorkers)
@@ -125,22 +133,50 @@ func run() error {
 		logger.Error(err, "Failed to create processor")
 		return err
 	}
+
+	// Stop intake as soon as the shutdown signal arrives (WatchIntake below)
+	// or Run exits early (fallback after proc.Run returns); both precede the
+	// coordinator's drain phase, so the coordinator doesn't need its own
+	// stop-intake step.
+	const flushObservabilityTimeout = 5 * time.Second
+	const flushTracerTimeout = 5 * time.Second
+	coordinator := shutdown.New(logger, cfg.ShutdownTimeout+flushObservabilityTimeout+flushTracerTimeout+shutdown.DefaultSlack)
+	coordinator.Add(shutdown.Phase{
+		Name:    "drain processor",
+		Timeout: cfg.ShutdownTimeout,
+		Run: func(stopCtx context.Context) error {
+			logger.V(logging.INFO).Info("Processor exited, shutting down")
+			proc.Stop(stopCtx)
+			logger.V(logging.INFO).Info("Processor exited gracefully")
+			return nil
+		},
+	})
+	coordinator.Add(shutdown.Phase{
+		Name: "close clients",
+		Run:  func(context.Context) error { return procClients.Close() },
+	})
+	coordinator.Add(shutdown.Phase{
+		Name:    "flush observability",
+		Timeout: flushObservabilityTimeout,
+		Run:     shutdownObservability,
+	})
+	coordinator.Add(shutdown.Phase{
+		Name:    "flush tracer",
+		Timeout: flushTracerTimeout,
+		Run:     shutdownTracer,
+	})
+	clientsGuard.Disarm()
+	obsGuard.Disarm()
+	tracerGuard.Disarm()
 	defer func() {
-		// stop with a fresh timeout ctx (avoid already-cancelled ctx)
-		// timeout should be less than k8s terminationGracePeriodSeconds
-		stopCtx, stopCtxCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		defer stopCtxCancel()
-		logger.V(logging.INFO).Info("Processor exited, shutting down")
-		proc.Stop(stopCtx) // wait for all workers to finish
-		logger.V(logging.INFO).Info("Processor exited gracefully")
+		if shutdownErr := coordinator.Run(context.Background()); shutdownErr != nil {
+			logger.Error(shutdownErr, "Processor graceful shutdown failed")
+		}
 	}()
+	shutdown.WatchIntake(ctx, func() { ready.Store(false) })
 
 	// ready flips to true only after processor pre-flight checks succeed and
 	// right before the polling loop begins accepting work.
-	go func() {
-		<-ctx.Done()
-		ready.Store(false)
-	}()
 	err = proc.Run(ctx, func() {
 		ready.Store(true)
 		logger.V(logging.INFO).Info("Processor polling loop started", "pollInterval", cfg.PollInterval.String())
@@ -169,9 +205,39 @@ func startObservabilityServer(
 	ready *atomic.Bool,
 	cancel context.CancelFunc,
 	terminateOnObservabilityFailure bool,
-) <-chan error {
+) (<-chan error, func(context.Context) error) {
 	logger := logr.FromContextOrDiscard(ctx)
 	errCh := make(chan error, 1)
+
+	m := http.NewServeMux()
+	m.Handle("/metrics", metrics.NewMetricsHandler())
+	m.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	})
+	if cfg.EnablePprof {
+		m.HandleFunc("/debug/pprof/", pprof.Index)
+		m.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		m.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		m.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		m.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		logger.V(logging.INFO).Info("pprof profiling enabled on observability server")
+	}
+	m.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if !ready.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("not ready"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	})
+
+	server := &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           m,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
 	go func() {
 		// event channel - no need to close (1 buffer, max 1 event sent)
@@ -192,47 +258,6 @@ func startObservabilityServer(
 			cancel()
 		}
 
-		m := http.NewServeMux()
-		m.Handle("/metrics", metrics.NewMetricsHandler())
-		m.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("OK"))
-		})
-		if cfg.EnablePprof {
-			m.HandleFunc("/debug/pprof/", pprof.Index)
-			m.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-			m.HandleFunc("/debug/pprof/profile", pprof.Profile)
-			m.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-			m.HandleFunc("/debug/pprof/trace", pprof.Trace)
-			logger.V(logging.INFO).Info("pprof profiling enabled on observability server")
-		}
-		// ready endpoint - indicates the processor is ready to process requests
-		m.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-			if !ready.Load() {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = w.Write([]byte("not ready"))
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("OK"))
-		})
-
-		server := &http.Server{
-			Addr:              cfg.Addr,
-			Handler:           m,
-			ReadHeaderTimeout: 10 * time.Second,
-		}
-
-		go func() {
-			<-ctx.Done()
-			logger.V(logging.INFO).Info("Shutting down observability server")
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := server.Shutdown(shutdownCtx); err != nil {
-				logger.Error(err, "Observability server shutdown failed")
-			}
-		}()
-
 		logger.V(logging.INFO).Info("Start observability server", "addr", cfg.Addr)
 
 		err := server.ListenAndServe()
@@ -243,7 +268,10 @@ func startObservabilityServer(
 		}
 	}()
 
-	return errCh
+	return errCh, func(shutdownCtx context.Context) error {
+		logger.V(logging.INFO).Info("Shutting down observability server")
+		return server.Shutdown(shutdownCtx)
+	}
 }
 
 func waitObservabilityFatalError(ctx context.Context, obsFatalCh <-chan error, wait time.Duration) error {

@@ -28,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/apiserver/server"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/interrupt"
 	uotel "github.com/llm-d/llm-d-batch-gateway/internal/util/otel"
+	"github.com/llm-d/llm-d-batch-gateway/internal/util/shutdown"
 	"k8s.io/klog/v2"
 )
 
@@ -59,11 +60,16 @@ func run() error {
 		logger.Error(err, "Failed to initialize tracer")
 		return err
 	}
+	const flushTracerTimeout = 5 * time.Second
+	tracerShutdown := shutdown.New(logger, flushTracerTimeout+shutdown.DefaultSlack)
+	tracerShutdown.Add(shutdown.Phase{
+		Name:    "flush tracer",
+		Timeout: flushTracerTimeout,
+		Run:     shutdownTracer,
+	})
 	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := shutdownTracer(shutdownCtx); err != nil {
-			logger.Error(err, "Failed to shutdown tracer")
+		if shutdownErr := tracerShutdown.Run(context.Background()); shutdownErr != nil {
+			logger.Error(shutdownErr, "Failed to shutdown tracer")
 		}
 	}()
 
