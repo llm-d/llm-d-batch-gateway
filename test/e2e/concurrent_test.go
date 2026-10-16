@@ -88,3 +88,35 @@ func doTestConcurrentBatches(t *testing.T) {
 			r.index, b.ID, b.RequestCounts.Completed, b.RequestCounts.Failed)
 	}
 }
+
+// TestWaitForBatchStatusGoroutineSafety guards the INFERENG-10907 fix:
+// waitForBatchStatusErr must be safe to call from non-test goroutines. With
+// the previous t.Fatalf-based helper, this exact pattern crashed the whole
+// test binary with a nil-pointer dereference on any wait failure (a
+// transient API error, a wrong terminal status, or a timeout), taking down
+// every subtest scheduled after it.
+func TestWaitForBatchStatusGoroutineSafety(t *testing.T) {
+	const goroutines = 5
+	errs := make([]error, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := range goroutines {
+		go func(idx int) {
+			defer wg.Done()
+			// A batch ID that does not exist: the first poll fails, which is
+			// exactly the failure shape that used to SIGSEGV the binary.
+			_, _, errs[idx] = waitForBatchStatusErr(t,
+				fmt.Sprintf("batch-goroutine-safety-%s-%d", testRunID, idx),
+				30*time.Second, openai.BatchStatusCompleted)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("goroutine %d: expected an error for a nonexistent batch", i)
+		}
+	}
+	// Reaching here at all is the regression: the fatal-helper version of
+	// this pattern never returned from wg.Wait with a live process.
+}
