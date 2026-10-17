@@ -15,7 +15,7 @@ import (
 type JobExecutor struct {
 	source     RequestSource
 	dispatcher RequestDispatcher
-	collector  *ResultCollector
+	collector  *ResultCheckpointer
 	tracker    *ProgressTracker
 	logger     logr.Logger
 }
@@ -23,7 +23,7 @@ type JobExecutor struct {
 type JobExecutorConfig struct {
 	Source     RequestSource
 	Dispatcher RequestDispatcher
-	Collector  *ResultCollector
+	Collector  *ResultCheckpointer
 	Tracker    *ProgressTracker
 	Logger     logr.Logger
 }
@@ -44,7 +44,7 @@ func (je *JobExecutor) Execute(ctx context.Context) (*openai.BatchRequestCounts,
 	dispatchCtx, dispatchCancel := context.WithCancel(ctx)
 	defer dispatchCancel()
 
-	je.collector.onPersistenceFailure = sync.OnceFunc(dispatchCancel)
+	je.collector.setPersistenceFailureHook(sync.OnceFunc(dispatchCancel))
 
 	requestCh := make(chan RequestItem)
 	resultCh := make(chan ResultItem, defaultResultBuffer)

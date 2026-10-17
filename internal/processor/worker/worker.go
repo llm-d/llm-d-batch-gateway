@@ -73,8 +73,9 @@ type Processor struct {
 	batchDB        db.BatchDBClient                // job status lookups
 	event          db.BatchEventChannelClient      // cancel-event subscription
 	inference      *inference.GatewayResolver      // model → gateway routing (sync)
-	asyncInference *inference.AsyncGatewayResolver // model → async client routing
+	asyncInference *inference.AsyncGatewayResolver // model → async client routing (durable pipeline)
 	broadcasters   *broadcasterRegistry            // per-model result broadcasters (async only)
+	resumable      db.ResumableStore               // durable pipeline state (async only)
 	files          *fileManager
 }
 
@@ -89,6 +90,14 @@ func NewProcessor(
 	}
 	if cfg.Concurrency.Global <= 0 {
 		return nil, fmt.Errorf("global semaphore (concurrency.global=%d): %w", cfg.Concurrency.Global, semaphore.ErrCap)
+	}
+	// The resumable pipeline is the only pipeline: activation, entry
+	// checkpointing, and fenced finalization are required to run any batch.
+	if clients.Resumable == nil {
+		return nil, fmt.Errorf("resumable store client is required")
+	}
+	if clients.File == nil {
+		return nil, fmt.Errorf("files store client is required")
 	}
 	endpointAllowlist, err := openai.NewEndpointAllowlist(cfg.ExtraEndpoints)
 	if err != nil {
@@ -106,6 +115,7 @@ func NewProcessor(
 		event:             clients.Event,
 		inference:         clients.Inference,
 		asyncInference:    clients.AsyncInference,
+		resumable:         clients.Resumable,
 		files:             newFileManager(clients.File, clients.FileDB),
 	}, nil
 }
@@ -142,8 +152,10 @@ func (p *Processor) Run(ctx context.Context, onReady func()) error {
 
 	// If async inference is used (llm-d-async), set up a registry of ResultBroadcasters.
 	// These will propagate results from the async queues to the JobExecutor's individual result collectors.
+	// Unrouted deliveries are acknowledged only when the entry store proves no
+	// open entry can still account for them.
 	if p.asyncInference != nil {
-		bs := newBroadcasterRegistry(p.asyncInference, logger)
+		bs := newBroadcasterRegistry(p.asyncInference, logger, residueGate(p.resumable, residueCheckTimeout))
 		bs.Run(ctx)
 		defer bs.Wait()
 		p.broadcasters = bs
@@ -271,7 +283,9 @@ func (p *Processor) runPollingLoop(pollingCtx, jobBaseCtx context.Context) error
 
 		// check queue for available tasks
 		logger.V(logging.DEBUG).Info("Checking queue for available tasks")
-		task, err := p.poller.dequeueOne(pollingCtx)
+		// The resumable lease rides the dequeue: every processor offers one,
+		// so any replica can claim a requeued resumable row.
+		task, err := p.poller.dequeueOne(pollingCtx, p.cfg.Resumable.LeaseDuration)
 
 		// when there's no waiting tasks in the queue or poller returned an error
 		if task == nil || err != nil {
@@ -340,46 +354,49 @@ func (p *Processor) runPollingLoop(pollingCtx, jobBaseCtx context.Context) error
 
 		pollLogger.V(logging.TRACE).Info("Job info object converted")
 
-		if batch_utils.IsJobExpired(task) {
-			pollLogger.V(logging.INFO).Info("Job is expired.")
+		// A requeued resumable row is claimed mid-flight (non-terminal, typically
+		// in_progress): the fresh-row expiry and runnable checks do not apply,
+		// and the resume path in runJob owns the terminal routing (cancelling,
+		// SLO-expired, recovery attempts exhausted).
+		if !task.Resumable {
+			if batch_utils.IsJobExpired(task) {
+				pollLogger.V(logging.INFO).Info("Job is expired.")
 
-			if err := p.updater.UpdatePersistentStatus(pollCtx, jobItem, openai.BatchStatusExpired, nil, nil); err != nil {
-				pollLogger.Error(err, "Failed to update job status in DB", "newStatus", openai.BatchStatusExpired, "slo", task.SLO)
-				recordE2ELatency(jobInfo, metrics.E2EStatusFailed)
-				p.releaseForNextPoll()
-				metrics.RecordJobProcessed(metrics.ResultFailed, metrics.ReasonSystemError)
-				continue
-			}
-
-			p.releaseForNextPoll()
-			recordE2ELatency(jobInfo, metrics.E2EStatusExpired)
-			metrics.RecordJobProcessed(metrics.ResultExpired, metrics.ReasonExpiredDequeue)
-			continue
-		}
-
-		// job is not in runnable state.
-		if !batch_utils.IsJobRunnable(jobInfo.BatchJob) {
-			if jobInfo.BatchJob.Status == openai.BatchStatusCancelling {
-				pollLogger.V(logging.INFO).Info("Job is in cancelling state after dequeue, transitioning to cancelled")
-				if err := p.updater.UpdateCancelledStatus(pollCtx, jobItem, nil, "", ""); err != nil {
-					pollLogger.Error(err, "Failed to update job status to cancelled")
+				if err := p.updater.UpdatePersistentStatus(pollCtx, jobItem, openai.BatchStatusExpired, nil, nil); err != nil {
+					pollLogger.Error(err, "Failed to update job status in DB", "newStatus", openai.BatchStatusExpired, "slo", task.SLO)
 					recordE2ELatency(jobInfo, metrics.E2EStatusFailed)
 					p.releaseForNextPoll()
 					metrics.RecordJobProcessed(metrics.ResultFailed, metrics.ReasonSystemError)
 					continue
 				}
+
 				p.releaseForNextPoll()
-				recordE2ELatency(jobInfo, metrics.E2EStatusCancelled)
-				metrics.RecordCancellation(metrics.CancelPhaseQueued)
-				metrics.RecordJobProcessed(metrics.ResultSuccess, metrics.ReasonNone)
+				recordE2ELatency(jobInfo, metrics.E2EStatusExpired)
+				metrics.RecordJobProcessed(metrics.ResultExpired, metrics.ReasonExpiredDequeue)
+				continue
+			} else if !batch_utils.IsJobRunnable(jobInfo.BatchJob) {
+				if jobInfo.BatchJob.Status == openai.BatchStatusCancelling {
+					pollLogger.V(logging.INFO).Info("Job is in cancelling state after dequeue, transitioning to cancelled")
+					if err := p.updater.UpdateCancelledStatus(pollCtx, jobItem, nil, "", ""); err != nil {
+						pollLogger.Error(err, "Failed to update job status to cancelled")
+						recordE2ELatency(jobInfo, metrics.E2EStatusFailed)
+						p.releaseForNextPoll()
+						metrics.RecordJobProcessed(metrics.ResultFailed, metrics.ReasonSystemError)
+						continue
+					}
+					p.releaseForNextPoll()
+					recordE2ELatency(jobInfo, metrics.E2EStatusCancelled)
+					metrics.RecordCancellation(metrics.CancelPhaseQueued)
+					metrics.RecordJobProcessed(metrics.ResultSuccess, metrics.ReasonNone)
+					continue
+				}
+
+				pollLogger.V(logging.INFO).Info("job is not in processible state. skipping this job.", "status", jobInfo.BatchJob.Status)
+
+				p.releaseForNextPoll()
+				metrics.RecordJobProcessed(metrics.ResultSkipped, metrics.ReasonNotRunnableState)
 				continue
 			}
-
-			pollLogger.V(logging.INFO).Info("job is not in processible state. skipping this job.", "status", jobInfo.BatchJob.Status)
-
-			p.releaseForNextPoll()
-			metrics.RecordJobProcessed(metrics.ResultSkipped, metrics.ReasonNotRunnableState)
-			continue
 		}
 
 		// Guard: if pollingCtx was cancelled between dequeue and here
@@ -391,6 +408,18 @@ func (p *Processor) runPollingLoop(pollingCtx, jobBaseCtx context.Context) error
 			p.releaseForNextPoll()
 			bgCtx, bgSpan := uotel.DetachedContext(pollCtx, "re-enqueue-guard")
 			defer bgSpan.End()
+			if task.Resumable {
+				// The legacy re-enqueue refuses resumable rows; the fenced
+				// requeue returns the batch to the queue directly. Failure
+				// leaves the lease to lapse and the reconciler to requeue.
+				if err := p.resumable.RequeueResumableOrphan(bgCtx, task.ID, p.processorID, task.Epoch, false, true); err != nil {
+					pollLogger.Error(err, "Failed to requeue resumable job during graceful shutdown")
+					metrics.RecordJobProcessed(metrics.ResultFailed, metrics.ReasonGuardShutdown)
+				} else {
+					metrics.RecordJobProcessed(metrics.ResultReEnqueued, metrics.ReasonGuardShutdown)
+				}
+				return nil
+			}
 			if reEnqueueErr := p.poller.enqueueOne(bgCtx, task); reEnqueueErr != nil {
 				pollLogger.Error(reEnqueueErr, "Failed to re-enqueue job during graceful shutdown, marking as failed")
 				if failErr := p.handleFailed(bgCtx, p.updater, jobItem, nil, jobInfo); failErr != nil {
@@ -480,9 +509,6 @@ func (p *Processor) validate() error {
 	}
 	if p.inference != nil && p.asyncInference != nil {
 		return fmt.Errorf("sync and async inference clients are mutually exclusive")
-	}
-	if p.files == nil {
-		return fmt.Errorf("file manager is missing")
 	}
 	return p.files.validate()
 }

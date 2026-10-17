@@ -49,12 +49,17 @@ func TestResumableMarkerFencesStaleGCReadPostgres(t *testing.T) {
 		t.Fatalf("NewPostgresBatchQueueClient: %v", err)
 	}
 	t.Cleanup(func() { _ = queue.Close() })
+	resumable, err := postgresql.NewPostgresResumableStore(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewPostgresResumableStore: %v", err)
+	}
+	t.Cleanup(func() { _ = resumable.Close() })
 	pool, err := pgxpool.New(ctx, url)
 	if err != nil {
 		t.Fatalf("pgxpool: %v", err)
 	}
 	defer pool.Close()
-	r, err := NewReconciler(batchDB, queue, time.Minute, false, nil)
+	r, err := NewReconciler(batchDB, queue, resumable, time.Minute, false, nil)
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
 	}

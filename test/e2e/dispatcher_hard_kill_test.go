@@ -534,6 +534,17 @@ func recoveryResultQueueDepths(ctx context.Context, rdb *redis.Client) (map[stri
 	iter := rdb.Scan(ctx, 0, gateResultQueue+"*", 0).Iterator()
 	for iter.Next(ctx) {
 		queue := iter.Val()
+		// The durable-delivery producer keeps its claim bookkeeping
+		// (result-claimed, result-claim-owners, result-claims-idx) and its
+		// bounded ack tombstones under the same route prefix; only the
+		// result queues themselves are lists.
+		typeName, err := rdb.Type(ctx, queue).Result()
+		if err != nil {
+			return nil, fmt.Errorf("read Redis type for result route key %q: %w", queue, err)
+		}
+		if typeName != "list" {
+			continue
+		}
 		depth, err := rdb.LLen(ctx, queue).Result()
 		if err != nil {
 			return nil, fmt.Errorf("read recovery result queue %q: %w", queue, err)

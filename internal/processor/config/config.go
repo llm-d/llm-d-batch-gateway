@@ -168,6 +168,14 @@ type ResumableConfig struct {
 
 	// FinalizeTimeout bounds the finalization phase of one batch.
 	FinalizeTimeout time.Duration `yaml:"finalize_timeout"`
+
+	// RecoveryWindow bounds how long a resumed batch waits for the stranded
+	// result delivery of an in-flight entry — held under a claim lease on
+	// the previous submitter's per-processor route — before re-submitting
+	// it. It should cover the async result claim lease (default 5m): a
+	// delivery claimed just before the disruption becomes recoverable only
+	// when that lease lapses.
+	RecoveryWindow time.Duration `yaml:"recovery_window"`
 }
 
 type ProcessorConfig struct {
@@ -432,6 +440,7 @@ func NewConfig() *ProcessorConfig {
 			LeaseDuration:       5 * time.Minute,
 			FinalizeConcurrency: 16,
 			FinalizeTimeout:     30 * time.Minute,
+			RecoveryWindow:      5 * time.Minute,
 		},
 	}
 }
@@ -494,6 +503,9 @@ func (c *ProcessorConfig) Validate() error {
 	}
 	if c.Resumable.FinalizeTimeout <= 0 {
 		return fmt.Errorf("resumable.finalize_timeout must be > 0")
+	}
+	if c.Resumable.RecoveryWindow <= 0 {
+		return fmt.Errorf("resumable.recovery_window must be > 0")
 	}
 
 	switch c.RouteKeyMethod {

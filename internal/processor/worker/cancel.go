@@ -71,16 +71,10 @@ func (p *Processor) handleCancelled(ctx context.Context, params *jobExecutionPar
 
 	logger := logr.FromContextOrDiscard(ctx)
 
-	var outputFileID, errorFileID string
-	if params.requestCounts != nil && params.jobInfo != nil {
-		logger.V(logging.INFO).Info("Job cancelled mid-execution, uploading partial results")
-		outputFileID, errorFileID = p.uploadPartialResults(ioCtx, params.jobInfo, params.jobItem)
-	}
-
-	if err := params.updater.UpdateCancelledStatus(ioCtx, params.jobItem, params.requestCounts, outputFileID, errorFileID); err != nil {
+	if err := params.updater.UpdateCancelledStatus(ioCtx, params.jobItem, params.requestCounts, "", ""); err != nil {
 		ioSpan.RecordError(err)
 		logger.Error(err, "Failed to update cancelled status, falling back to failed with file IDs preserved")
-		if failErr := params.updater.UpdateFailedStatus(ioCtx, params.jobItem, params.requestCounts, outputFileID, errorFileID); failErr != nil {
+		if failErr := params.updater.UpdateFailedStatus(ioCtx, params.jobItem, params.requestCounts, "", ""); failErr != nil {
 			ioSpan.RecordError(failErr)
 			return fmt.Errorf("failed to update job status to cancelled (%w) and fallback to failed also failed: %w", err, failErr)
 		}
@@ -103,6 +97,6 @@ func (p *Processor) handleCancelled(ctx context.Context, params *jobExecutionPar
 		metrics.RecordCancellation(metrics.CancelPhaseQueued)
 	}
 	metrics.RecordJobProcessed(metrics.ResultSuccess, metrics.ReasonNone)
-	logger.V(logging.INFO).Info("Job cancelled handled", "outputFileID", outputFileID, "errorFileID", errorFileID)
+	logger.V(logging.INFO).Info("Job cancelled handled")
 	return nil
 }

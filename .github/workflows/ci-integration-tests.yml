@@ -25,7 +25,10 @@ jobs:
   integration-tests:
     name: Integration Tests (${{ matrix.file_client_type }}, ${{ matrix.db_client_type }}, ${{ matrix.exchange_client_type }}${{ matrix.enable_gie == 'true' && ', epp' || '' }}${{ matrix.enable_dispatcher == 'true' && ', dispatcher' || '' }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The e2e suite is bounded by the Makefile's 60m `go test -timeout`; the
+    # resumable scenarios (pod loss, multi-replica takeover) alone add ~15m,
+    # which pushed the dispatcher and epp legs past the previous 30m cap.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

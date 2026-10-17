@@ -20,18 +20,28 @@ import (
 
 // asyncSharedClient decouples submit from collect.
 // GetResult reads directly from the producer — the external ResultBroadcaster
-// handles routing to the correct job.
+// handles routing to the correct job. When the producer supports durable
+// result delivery, ReceiveResult claims results under a lease instead: the
+// result stays recoverable until the consumer's acknowledgement, which the
+// broadcaster hands to the checkpointer to call after the durable checkpoint.
 type asyncSharedClient struct {
 	producer    producer.Producer
+	durable     producer.DurableResultProducer
 	pollTimeout time.Duration
 	logger      logr.Logger
 }
 
 var _ AsyncInferenceClient = (*asyncSharedClient)(nil)
+var _ DurableResultClient = (*asyncSharedClient)(nil)
 
 func newAsyncSharedClient(p producer.Producer, pollTimeout time.Duration, logger logr.Logger) *asyncSharedClient {
+	var durable producer.DurableResultProducer
+	if d, ok := p.(producer.DurableResultProducer); ok {
+		durable = d
+	}
 	return &asyncSharedClient{
 		producer:    p,
+		durable:     durable,
 		pollTimeout: pollTimeout,
 		logger:      logger,
 	}
@@ -93,13 +103,39 @@ func (c *asyncSharedClient) GetResult(ctx context.Context) (*GenerateResponse, e
 		return nil, err
 	}
 
+	return generateResponseFrom(result), nil
+}
+
+// ReceiveResult claims one result under a delivery lease: the result stays
+// recoverable in the queue until the returned ack is called after the
+// consumer's durable checkpoint, closing the crash window the destructive
+// GetResult leaves between the pop and the checkpoint. Producers without the
+// durable capability report ErrDurableResultsUnavailable so the caller falls
+// back to GetResult.
+func (c *asyncSharedClient) ReceiveResult(ctx context.Context) (*GenerateResponse, ResultAck, error) {
+	if c.durable == nil {
+		return nil, nil, ErrDurableResultsUnavailable
+	}
+	pollCtx, pollCancel := context.WithTimeout(ctx, c.pollTimeout)
+	defer pollCancel()
+
+	delivery, err := c.durable.ReceiveResult(pollCtx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return generateResponseFrom(delivery.Result), func(ctx context.Context) error {
+		return c.durable.AckResult(ctx, delivery)
+	}, nil
+}
+
+func generateResponseFrom(result *asyncapi.ResultMessage) *GenerateResponse {
 	return &GenerateResponse{
 		RequestID:    result.ID,
 		Response:     []byte(result.Payload),
 		StatusCode:   result.StatusCode,
 		ErrorCode:    result.ErrorCode,
 		ErrorMessage: result.ErrorMessage,
-	}, nil
+	}
 }
 
 func (c *asyncSharedClient) Cancel(ctx context.Context, ids []string) error {

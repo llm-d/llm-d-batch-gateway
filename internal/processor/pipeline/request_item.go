@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -33,6 +34,11 @@ type ResultItem struct {
 	Error            *OutputError
 	HadCapacityRetry bool
 	SubmittedAt      time.Time
+	// Ack acknowledges the durable delivery this result arrived on; nil on
+	// destructive transports. The checkpointer calls it only after the
+	// result is durably accounted for (checkpointed or dropped as a
+	// duplicate), keeping the delivery recoverable until then.
+	Ack func(ctx context.Context) error
 }
 
 func (r *RequestItem) Canceled() *ResultItem {

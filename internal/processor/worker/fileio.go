@@ -62,22 +62,6 @@ func (p *Processor) jobInputFilePath(jobID, tenantID string) (string, error) {
 	return filepath.Join(jobRootDir, inputFileName), nil
 }
 
-func (p *Processor) jobOutputFilePath(jobID, tenantID string) (string, error) {
-	jobRootDir, err := p.jobRootDir(jobID, tenantID)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(jobRootDir, outputFileName), nil
-}
-
-func (p *Processor) jobErrorFilePath(jobID, tenantID string) (string, error) {
-	jobRootDir, err := p.jobRootDir(jobID, tenantID)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(jobRootDir, errorFileName), nil
-}
-
 // jobOutputStorageName returns the filename used when uploading the output file to shared storage.
 func jobOutputStorageName(jobID string) string {
 	return fmt.Sprintf(outputStorageNameFmt, jobID)

@@ -20,6 +20,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+
+	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 )
 
 // manifestEntry is the per-line metadata accumulated while preprocessing a
@@ -34,6 +36,9 @@ type manifestEntry struct {
 	ResultKey    string
 	ResultBytes  int64
 	ResultSHA256 string
+	// ErrLine is the marshaled error-object line of a rejected entry
+	// (in-memory only), stored as its result object at activation.
+	ErrLine []byte
 }
 
 // requestManifest is the in-memory entry list of a preprocessed batch: the
@@ -48,7 +53,7 @@ func (m *requestManifest) add(e manifestEntry) {
 }
 
 // rejectedEntry records a line rejected during ingestion (e.g. unregistered
-// model), with the metadata of its error-object line.
+// model), with the metadata and bytes of its error-object line.
 func rejectedEntry(batchID string, ordinal int64, customID, requestID, errorCode string, errLine []byte) manifestEntry {
 	sum := sha256.Sum256(errLine)
 	return manifestEntry{
@@ -60,7 +65,32 @@ func rejectedEntry(batchID string, ordinal int64, customID, requestID, errorCode
 		ResultKey:    resumableResultKey(batchID, requestID),
 		ResultBytes:  int64(len(errLine)),
 		ResultSHA256: hex.EncodeToString(sum[:]),
+		ErrLine:      errLine,
 	}
+}
+
+// activationEntries converts the manifest into the entry set for resumable
+// activation: accepted lines activate as pending, rejected lines as failed
+// with the metadata of the error object ingestion wrote for them.
+func (m *requestManifest) activationEntries() []db.ResumableActivationEntry {
+	entries := make([]db.ResumableActivationEntry, len(m.Entries))
+	for i, e := range m.Entries {
+		entry := db.ResumableActivationEntry{
+			RequestID: e.RequestID,
+			Ordinal:   e.Ordinal,
+			CustomID:  e.CustomID,
+			Status:    string(db.ResumableEntryPending),
+		}
+		if e.Rejected {
+			entry.Status = string(db.ResumableEntryFailed)
+			entry.ErrorCode = e.ErrorCode
+			entry.ResultKey = e.ResultKey
+			entry.ResultBytes = e.ResultBytes
+			entry.ResultSHA256 = e.ResultSHA256
+		}
+		entries[i] = entry
+	}
+	return entries
 }
 
 // resumableResultKey is the file-store key of one request's result object.

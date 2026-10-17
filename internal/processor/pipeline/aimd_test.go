@@ -38,16 +38,16 @@ func makeEndpointAIMD(t *testing.T, perEndpoint int) (*semaphore.AdaptiveSemapho
 
 func runPipeline(t *testing.T, items []RequestItem, dispatcher RequestDispatcher) (outputData, errorData []byte, counts *int64, failedCounts *int64) {
 	t.Helper()
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	total := int64(len(items))
 	tracker := NewProgressTracker(total, nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, NewPendingRequests(total), tracker, logr.Discard())
+	pending := NewPendingRequests(total)
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
 		Dispatcher: dispatcher,
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -58,7 +58,7 @@ func runPipeline(t *testing.T, items []RequestItem, dispatcher RequestDispatcher
 	}
 
 	c := tracker.Counts()
-	return readFile(t, outputFile), readFile(t, errorFile), &c.Completed, &c.Failed
+	return sinkOutputBytes(t, sink), sinkErrorBytes(t, sink), &c.Completed, &c.Failed
 }
 
 func TestAIMDSignaling(t *testing.T) {
@@ -318,10 +318,10 @@ func TestAIMDDrain_SLOExpiry_UsesBatchExpired(t *testing.T) {
 	items := makeItems(5, "m1")
 	source := &sliceSource{items: items}
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, NewPendingRequests(int64(len(items))), tracker, logr.Discard())
+	pending := NewPendingRequests(int64(len(items)))
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 	dispatcher, err := NewAIMDDispatcher(direct,
@@ -334,14 +334,14 @@ func TestAIMDDrain_SLOExpiry_UsesBatchExpired(t *testing.T) {
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     source,
 		Dispatcher: NewPreDispatcher(dispatcher),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
 
 	_, _ = executor.Execute(ctx)
 
-	errorData := readFile(t, errorFile)
+	errorData := sinkErrorBytes(t, sink)
 	for _, line := range splitLines(errorData) {
 		var entry outputLine
 		if err := json.Unmarshal(line, &entry); err != nil {
@@ -382,10 +382,10 @@ func TestCancelDrainsUndispatched(t *testing.T) {
 
 	source := &cancelAfterNSource{items: items, cancelAt: 3, cancelFn: func() { cancel(batchctx.ErrCancelled) }}
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, NewPendingRequests(int64(len(items))), tracker, logr.Discard())
+	pending := NewPendingRequests(int64(len(items)))
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 	dispatcher, err := NewAIMDDispatcher(direct,
@@ -398,7 +398,7 @@ func TestCancelDrainsUndispatched(t *testing.T) {
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     source,
 		Dispatcher: dispatcher,
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -406,8 +406,8 @@ func TestCancelDrainsUndispatched(t *testing.T) {
 	_, err = executor.Execute(ctx)
 	_ = err
 
-	outputData := readFile(t, outputFile)
-	errorData := readFile(t, errorFile)
+	outputData := sinkOutputBytes(t, sink)
+	errorData := sinkErrorBytes(t, sink)
 
 	outputLines := countLines(outputData)
 	errorLines := countLines(errorData)
@@ -470,10 +470,10 @@ func TestCancelWithFastRequestsThrottled(t *testing.T) {
 		cancel()
 	}()
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(totalRequests), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, NewPendingRequests(int64(totalRequests)), tracker, logr.Discard())
+	pending := NewPendingRequests(int64(totalRequests))
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 	dispatcher, err := NewAIMDDispatcher(direct,
@@ -486,7 +486,7 @@ func TestCancelWithFastRequestsThrottled(t *testing.T) {
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &ctxSource{items: items},
 		Dispatcher: dispatcher,
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -494,8 +494,8 @@ func TestCancelWithFastRequestsThrottled(t *testing.T) {
 	_, err = executor.Execute(ctx)
 	_ = err
 
-	outputData := readFile(t, outputFile)
-	errorData := readFile(t, errorFile)
+	outputData := sinkOutputBytes(t, sink)
+	errorData := sinkErrorBytes(t, sink)
 
 	outputLines := countLines(outputData)
 	errorLines := countLines(errorData)
@@ -556,10 +556,10 @@ func TestCancelInProgressThrottled(t *testing.T) {
 		cancel()
 	}()
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(totalRequests), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, NewPendingRequests(int64(totalRequests)), tracker, logr.Discard())
+	pending := NewPendingRequests(int64(totalRequests))
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 	dispatcher, err := NewAIMDDispatcher(direct,
@@ -573,7 +573,7 @@ func TestCancelInProgressThrottled(t *testing.T) {
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &ctxSource{items: items},
 		Dispatcher: dispatcher,
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -581,8 +581,8 @@ func TestCancelInProgressThrottled(t *testing.T) {
 	_, err = executor.Execute(ctx)
 	_ = err
 
-	outputData := readFile(t, outputFile)
-	errorData := readFile(t, errorFile)
+	outputData := sinkOutputBytes(t, sink)
+	errorData := sinkErrorBytes(t, sink)
 
 	outputLines := countLines(outputData)
 	errorLines := countLines(errorData)
@@ -666,10 +666,10 @@ func TestCancelInProgress(t *testing.T) {
 		cancel()
 	}()
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(totalRequests), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, NewPendingRequests(int64(totalRequests)), tracker, logr.Discard())
+	pending := NewPendingRequests(int64(totalRequests))
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 	dispatcher, err := NewAIMDDispatcher(direct,
@@ -682,7 +682,7 @@ func TestCancelInProgress(t *testing.T) {
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
 		Dispatcher: dispatcher,
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -690,8 +690,8 @@ func TestCancelInProgress(t *testing.T) {
 	_, err = executor.Execute(ctx)
 	_ = err
 
-	outputData := readFile(t, outputFile)
-	errorData := readFile(t, errorFile)
+	outputData := sinkOutputBytes(t, sink)
+	errorData := sinkErrorBytes(t, sink)
 
 	outputLines := countLines(outputData)
 	errorLines := countLines(errorData)
@@ -744,10 +744,10 @@ func TestExpiration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(numRequests), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, NewPendingRequests(int64(numRequests)), tracker, logr.Discard())
+	pending := NewPendingRequests(int64(numRequests))
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 	dispatcher, err := NewAIMDDispatcher(direct,
@@ -760,7 +760,7 @@ func TestExpiration(t *testing.T) {
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
 		Dispatcher: dispatcher,
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -768,8 +768,8 @@ func TestExpiration(t *testing.T) {
 	_, err = executor.Execute(ctx)
 	_ = err
 
-	outputData := readFile(t, outputFile)
-	errorData := readFile(t, errorFile)
+	outputData := sinkOutputBytes(t, sink)
+	errorData := sinkErrorBytes(t, sink)
 
 	outputLines := countLines(outputData)
 	errorLines := countLines(errorData)
@@ -796,17 +796,17 @@ func TestRetryExhaustion(t *testing.T) {
 
 	items := makeItems(2, "m1")
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, NewPendingRequests(int64(len(items))), tracker, logr.Discard())
+	pending := NewPendingRequests(int64(len(items)))
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
 		Dispatcher: direct,
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -824,7 +824,7 @@ func TestRetryExhaustion(t *testing.T) {
 		t.Errorf("Completed = %d, want 0", counts.Completed)
 	}
 
-	outputData := readFile(t, outputFile)
+	outputData := sinkOutputBytes(t, sink)
 	outputLines := countLines(outputData)
 	if outputLines != 2 {
 		t.Errorf("output lines = %d, want 2 (429 HTTP errors go to output file)", outputLines)

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -306,6 +307,36 @@ func waitForCompletedRequests(t *testing.T, batchID string, minCompleted int64, 
 		time.Sleep(pollInterval)
 	}
 	t.Fatalf("batch %s did not reach %d completed requests within %v", batchID, minCompleted, timeout)
+}
+
+// waitForPartialCompletedRequests waits until a nonzero proper subset of a
+// batch's requests has completed, so disruption tests do not rely on timing.
+func waitForPartialCompletedRequests(t *testing.T, batchID string, total int64, timeout time.Duration) {
+	t.Helper()
+
+	client := newClient()
+	const pollInterval = 500 * time.Millisecond
+
+	deadline := time.Now().Add(timeout)
+	if d, ok := t.Deadline(); ok && d.Before(deadline) {
+		deadline = d.Add(-5 * time.Second)
+	}
+	for time.Now().Before(deadline) {
+		batch, err := client.Batches.Get(context.Background(), batchID)
+		if err != nil {
+			t.Fatalf("retrieve batch failed: %v", err)
+		}
+		if batch.RequestCounts.Completed > 0 && batch.RequestCounts.Completed < total {
+			t.Logf("batch %s has a partial completed set: %d of %d", batchID, batch.RequestCounts.Completed, total)
+			return
+		}
+		if terminalBatchStatuses[batch.Status] {
+			t.Fatalf("batch %s reached terminal status %q before a partial completed set (completed=%d total=%d)",
+				batchID, batch.Status, batch.RequestCounts.Completed, total)
+		}
+		time.Sleep(pollInterval)
+	}
+	t.Fatalf("batch %s did not reach a partial completed set within %v", batchID, timeout)
 }
 
 // waitForIngestionFailure polls a batch until it reaches "failed" status.
@@ -1150,4 +1181,79 @@ func waitForProcessorReady(t *testing.T, timeout time.Duration) {
 		}
 		time.Sleep(time.Second)
 	}
+}
+
+// processorWorkload returns the Processor workload as kind/name.
+func processorWorkload(t *testing.T) string {
+	t.Helper()
+
+	selector := fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/component=processor", testHelmRelease)
+	var workloads []string
+	var discoveryErrors []string
+	for _, kind := range []string{"deployment", "statefulset"} {
+		out, err := exec.Command("kubectl", "get", kind,
+			"-n", testNamespace,
+			"-l", selector,
+			"-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`,
+		).CombinedOutput()
+		if err != nil {
+			discoveryErrors = append(discoveryErrors, fmt.Sprintf("%s: %v: %s", kind, err, strings.TrimSpace(string(out))))
+			continue
+		}
+		for _, name := range strings.Fields(string(out)) {
+			workloads = append(workloads, kind+"/"+name)
+		}
+	}
+	if len(workloads) != 1 {
+		t.Fatalf("find one Processor workload with selector %q: found %v; discovery errors: %v", selector, workloads, discoveryErrors)
+	}
+	return workloads[0]
+}
+
+// processorReplicaCount returns the current replica count of the workload.
+func processorReplicaCount(t *testing.T, workload string) int {
+	t.Helper()
+
+	out, err := exec.Command("kubectl", "get", workload,
+		"-n", testNamespace, "-o", "jsonpath={.spec.replicas}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("get Processor replica count for %s: %v\n%s", workload, err, out)
+	}
+	replicas, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatalf("parse Processor replica count %q: %v", out, err)
+	}
+	return replicas
+}
+
+// scaleProcessorWorkload scales the Processor workload to the given replica
+// count and waits for the rollout to complete.
+func scaleProcessorWorkload(workload string, replicas int) error {
+	out, err := exec.Command("kubectl", "scale", workload,
+		"-n", testNamespace, fmt.Sprintf("--replicas=%d", replicas)).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("scale Processor to %d replicas: %w\n%s", replicas, err, out)
+	}
+	out, err = exec.Command("kubectl", "rollout", "status", workload,
+		"-n", testNamespace, "--timeout=180s").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("wait for %d Processor replicas: %w\n%s", replicas, err, out)
+	}
+	return nil
+}
+
+// processorPodNames returns the names of the Processor pods.
+func processorPodNames(t *testing.T) []string {
+	t.Helper()
+
+	selector := fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/component=processor", testHelmRelease)
+	out, err := exec.Command("kubectl", "get", "pods",
+		"-n", testNamespace,
+		"-l", selector,
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("list Processor pods: %v\n%s", err, out)
+	}
+	return strings.Fields(string(out))
 }

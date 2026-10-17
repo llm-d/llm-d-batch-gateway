@@ -362,6 +362,17 @@ processor:
       resultPollTimeout: "30s"
       models: {}
 
+    # Resumable pipeline tunables — every batch runs resumably, so there is
+    # no enabled flag; dispatchMode only selects the request transport.
+    resumable:
+      # Ownership lease an activated batch holds in Postgres; the owner
+      # renews it at half this interval.
+      leaseDuration: "5m"
+      # Bounds the parallel result-object fetches during finalization.
+      finalizeConcurrency: 16
+      # Budget for one resumable finalization attempt.
+      finalizeTimeout: "30m"
+
     # Sync mode: configure exactly one of globalInferenceGateway or modelGateways.
     # The processor rejects sync config if neither or both are set.
     #

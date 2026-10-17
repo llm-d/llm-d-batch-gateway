@@ -766,3 +766,243 @@ func TestPlanFileSource_Produce_CancellationProducesAllEntries(t *testing.T) {
 		}
 	}
 }
+
+// writeThreeRequestPlan writes an input file and plan with three requests
+// and returns the open input file plus the stable request IDs.
+func writeThreeRequestPlan(t *testing.T, batchID string) (*os.File, string, []string) {
+	t.Helper()
+	dir := t.TempDir()
+	requests := []batch_types.Request{
+		{CustomID: "c-1", Method: "POST", URL: "/v1/chat/completions", Body: map[string]any{"model": "m1", "prompt": "a"}},
+		{CustomID: "c-2", Method: "POST", URL: "/v1/chat/completions", Body: map[string]any{"model": "m1", "prompt": "b"}},
+		{CustomID: "c-3", Method: "POST", URL: "/v1/chat/completions", Body: map[string]any{"model": "m1", "prompt": "c"}},
+	}
+	inputPath := filepath.Join(dir, "input.jsonl")
+	var entries []planEntry
+	f, err := os.Create(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, req := range requests {
+		data, _ := json.Marshal(req)
+		data = append(data, '\n')
+		offset, _ := f.Seek(0, 1)
+		entries = append(entries, planEntry{Offset: offset, Length: uint32(len(data))})
+		if _, err := f.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writePlanFile(t, filepath.Join(dir, "plans"), "m1", entries)
+	inputFile, err := os.Open(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inputFile.Close() })
+	ids := []string{
+		stableBatchRequestID(batchID, "c-1"),
+		stableBatchRequestID(batchID, "c-2"),
+		stableBatchRequestID(batchID, "c-3"),
+	}
+	return inputFile, dir, ids
+}
+
+// TestPlanFileSource_Produce_RecoversInFlightEntries pins the takeover
+// contract: an in-flight entry is pre-stored into the pending set
+// immediately — so its stranded delivery routes to this job — while its
+// re-submission waits out the recovery window, and only entries with no
+// delivery by then fall back to submission.
+func TestPlanFileSource_Produce_RecoversInFlightEntries(t *testing.T) {
+	const batchID = "batch-recover"
+	inputFile, dir, ids := writeThreeRequestPlan(t, batchID)
+
+	client := &mockInferenceClient{}
+	resolver := inference.NewSingleClientResolver(client)
+	defer func() { _ = resolver.Close() }()
+
+	preStored := make(chan pipeline.RequestItem, 1)
+	source := NewPlanFileSource(PlanFileSourceConfig{
+		InputFile:      inputFile,
+		PlansDir:       filepath.Join(dir, "plans"),
+		ModelMap:       &modelMapFile{SafeToModel: map[string]string{"m1": "m1"}, LineCount: 3},
+		Resolver:       resolver,
+		Cfg:            config.NewConfig(),
+		BatchID:        batchID,
+		Recover:        map[string]struct{}{ids[2]: {}},
+		RecoveryWindow: 400 * time.Millisecond,
+		PreStore:       func(item pipeline.RequestItem) { preStored <- item },
+		Logger:         logr.Discard(),
+	})
+
+	// The recovering entry is pre-stored before Produce — and before the
+	// recovery broadcasters start claiming — so its delivery routes to this
+	// job from the start.
+	if err := source.PreStoreRecovering(); err != nil {
+		t.Fatalf("PreStoreRecovering: %v", err)
+	}
+	select {
+	case item := <-preStored:
+		if item.CustomID != "c-3" || item.RequestID != ids[2] {
+			t.Fatalf("pre-stored = %q/%q, want c-3/%s", item.CustomID, item.RequestID, ids[2])
+		}
+	default:
+		t.Fatal("recovering entry was not pre-stored")
+	}
+
+	out := make(chan pipeline.RequestItem)
+	done := make(chan error, 1)
+	go func() { done <- source.Produce(context.Background(), out) }()
+
+	// The two fresh entries stream immediately.
+	for i := range 2 {
+		select {
+		case item := <-out:
+			if item.CustomID != fmt.Sprintf("c-%d", i+1) {
+				t.Fatalf("fresh item %d = %q", i, item.CustomID)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("fresh entry %d was not produced promptly", i)
+		}
+	}
+
+	// The recovering entry is not submitted before the window elapses.
+	select {
+	case item := <-out:
+		t.Fatalf("recovering entry %q submitted before the recovery window elapsed", item.CustomID)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// After the window the unrecovered entry falls back to submission.
+	select {
+	case item := <-out:
+		if item.CustomID != "c-3" {
+			t.Fatalf("deferred item = %q, want c-3", item.CustomID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovering entry was not submitted after the recovery window")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+}
+
+// TestPlanFileSource_Produce_RecoveryWindowSLOCap verifies a batch whose
+// SLO budget is shorter than the recovery window submits the held entries
+// when the SLO caps the wait, not after the full window.
+func TestPlanFileSource_Produce_RecoveryWindowSLOCap(t *testing.T) {
+	const batchID = "batch-slo"
+	inputFile, dir, ids := writeThreeRequestPlan(t, batchID)
+
+	client := &mockInferenceClient{}
+	resolver := inference.NewSingleClientResolver(client)
+	defer func() { _ = resolver.Close() }()
+
+	source := NewPlanFileSource(PlanFileSourceConfig{
+		InputFile:      inputFile,
+		PlansDir:       filepath.Join(dir, "plans"),
+		ModelMap:       &modelMapFile{SafeToModel: map[string]string{"m1": "m1"}, LineCount: 3},
+		Resolver:       resolver,
+		Cfg:            config.NewConfig(),
+		BatchID:        batchID,
+		SLODeadline:    time.Now().Add(150 * time.Millisecond),
+		Recover:        map[string]struct{}{ids[2]: {}},
+		RecoveryWindow: 30 * time.Second,
+		Logger:         logr.Discard(),
+	})
+
+	out := make(chan pipeline.RequestItem)
+	done := make(chan error, 1)
+	go func() { done <- source.Produce(context.Background(), out) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for range 3 {
+		select {
+		case <-out:
+		case <-time.After(time.Until(deadline)):
+			t.Fatal("held entries were not submitted within the SLO-capped window")
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+}
+
+// TestPlanFileSource_Produce_RecoveryWindowEarlyExit pins the happy-path
+// cost model: when the stranded delivery of every held entry is received and
+// checkpointed during the window (its pending-set entry resolves), the
+// source exits the window early instead of idling out the full duration —
+// the fence would drop the held items as terminal duplicates anyway.
+func TestPlanFileSource_Produce_RecoveryWindowEarlyExit(t *testing.T) {
+	const batchID = "batch-early-exit"
+	inputFile, dir, ids := writeThreeRequestPlan(t, batchID)
+
+	client := &mockInferenceClient{}
+	resolver := inference.NewSingleClientResolver(client)
+	defer func() { _ = resolver.Close() }()
+
+	pending := pipeline.NewPendingRequests(3)
+	source := NewPlanFileSource(PlanFileSourceConfig{
+		InputFile:      inputFile,
+		PlansDir:       filepath.Join(dir, "plans"),
+		ModelMap:       &modelMapFile{SafeToModel: map[string]string{"m1": "m1"}, LineCount: 3},
+		Resolver:       resolver,
+		Cfg:            config.NewConfig(),
+		BatchID:        batchID,
+		Recover:        map[string]struct{}{ids[2]: {}},
+		RecoveryWindow: 30 * time.Second,
+		PreStore:       pending.Store,
+		StillPending:   pending.Has,
+		Logger:         logr.Discard(),
+	})
+	if err := source.PreStoreRecovering(); err != nil {
+		t.Fatalf("PreStoreRecovering: %v", err)
+	}
+	if !pending.Has(ids[2]) {
+		t.Fatal("recovering entry not pre-stored into the pending set")
+	}
+
+	out := make(chan pipeline.RequestItem)
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- source.Produce(context.Background(), out) }()
+
+	// The two fresh entries stream immediately.
+	for range 2 {
+		select {
+		case <-out:
+		case <-time.After(2 * time.Second):
+			t.Fatal("fresh entries were not produced promptly")
+		}
+	}
+
+	// The recovering entry is pre-stored; its stranded delivery arrives and
+	// is checkpointed, resolving it out of the pending set.
+	select {
+	case item := <-out:
+		t.Fatalf("recovering entry %q submitted before recovery concluded", item.CustomID)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if !pending.Resolve(&pipeline.ResultItem{RequestID: ids[2]}) {
+		t.Fatal("expected the pre-stored request to resolve")
+	}
+
+	// The window exits early: the held item is emitted well within the
+	// configured 30s window (the fence will drop it as a terminal
+	// duplicate downstream).
+	select {
+	case item := <-out:
+		if item.CustomID != "c-3" {
+			t.Fatalf("held item = %q, want c-3", item.CustomID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovery window did not exit early after every held entry resolved")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("early exit took %v, want well under the 30s window", elapsed)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+}

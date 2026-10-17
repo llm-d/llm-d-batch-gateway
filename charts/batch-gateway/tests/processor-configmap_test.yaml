@@ -456,6 +456,23 @@ tests:
           path: data["config.yaml"]
           pattern: '"sim-model-inject":[\s\S]*inference_pool_name: "sim-pool-inject"'
 
+  - it: should render resumable tunables with defaults
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'resumable:[\s\S]*lease_duration: "5m"[\s\S]*finalize_concurrency: 16[\s\S]*finalize_timeout: "30m"'
+
+  - it: should render resumable tunables when overridden
+    set:
+      processor.config.resumable:
+        leaseDuration: "2m"
+        finalizeConcurrency: 8
+        finalizeTimeout: "10m"
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'resumable:[\s\S]*lease_duration: "2m"[\s\S]*finalize_concurrency: 8[\s\S]*finalize_timeout: "10m"'
+
   - it: should not render send_fairness_header when false (default)
     asserts:
       - notMatchRegex:

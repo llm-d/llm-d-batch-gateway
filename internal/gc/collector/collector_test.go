@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -202,6 +203,52 @@ func TestCollector_Run_DeletesExpiredJobs(t *testing.T) {
 	}
 	if jobs := dbGetBatchByIDs(ctx, batchDB, []string{"expired-job"}); len(jobs) != 0 {
 		t.Error("Expected expired job to be deleted from database")
+	}
+}
+
+func TestCollector_Run_PurgesResumableResultPrefixBeforeRowDelete(t *testing.T) {
+	ctx := context.Background()
+	batchDB := newTestBatchDBClient()
+	fileDB := newTestFileDBClient()
+	filesRoot := t.TempDir()
+	filesClient := newTestFilesClient(filesRoot)
+
+	const tenantID = "tenant-gc-resumable"
+	folderName, err := ucom.GetFolderNameByTenantID(tenantID)
+	if err != nil {
+		t.Fatalf("get folder name: %v", err)
+	}
+
+	job := createTestJob("resumable-job", time.Now().Add(-1*time.Hour).Unix())
+	job.TenantID = tenantID
+	_ = batchDB.DBStore(ctx, job)
+
+	for _, name := range []string{
+		"results/resumable-job/req-1.jsonl",
+		"results/resumable-job/req-2.jsonl",
+		"results/other-job/req-1.jsonl",
+	} {
+		if _, err := filesClient.Store(ctx, name, folderName, 0, 0, strings.NewReader("data")); err != nil {
+			t.Fatalf("store %s: %v", name, err)
+		}
+	}
+
+	gc := NewGarbageCollector(batchDB, fileDB, filesClient, false, defaultInterval, defaultMaxConcurrency, nil)
+	result := gc.run(ctx)
+
+	if result.BatchesDeleted != 1 {
+		t.Errorf("Expected 1 job deleted, got %d", result.BatchesDeleted)
+	}
+	if jobs := dbGetBatchByIDs(ctx, batchDB, []string{"resumable-job"}); len(jobs) != 0 {
+		t.Error("Expected expired job to be deleted from database")
+	}
+	for _, name := range []string{"results/resumable-job/req-1.jsonl", "results/resumable-job/req-2.jsonl"} {
+		if _, _, err := filesClient.Retrieve(ctx, name, folderName); err == nil {
+			t.Errorf("Expected result object %s to be purged", name)
+		}
+	}
+	if _, _, err := filesClient.Retrieve(ctx, "results/other-job/req-1.jsonl", folderName); err != nil {
+		t.Errorf("Expected other job's result objects to survive: %v", err)
 	}
 }
 

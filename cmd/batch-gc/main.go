@@ -139,7 +139,7 @@ func run() error {
 			gcmetrics.RecordCASConflicts(r.Conflicts)
 			gcmetrics.RecordErrors(r.Errors)
 		}
-		rec, err := reconciler.NewReconciler(clients.BatchDB, clients.Queue, cfg.Reconciler.Interval, cfg.DryRun, onCycle)
+		rec, err := reconciler.NewReconciler(clients.BatchDB, clients.Queue, clients.Resumable, cfg.Reconciler.Interval, cfg.DryRun, onCycle)
 		if err != nil {
 			return fmt.Errorf("failed to create reconciler: %w", err)
 		}

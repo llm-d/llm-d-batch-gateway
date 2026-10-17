@@ -494,7 +494,7 @@ test-e2e:
 	@echo "Running E2E tests..."
 	@OUT=$$(mktemp); \
 	echo "Processor observability endpoint: auto-resolved by the e2e test helpers"; \
-	cd test/e2e && $(GO) test -v $(if $(TEST_OUTPUT),-json) -count=1 -timeout=30m $(if $(TEST_RUN),-run $(TEST_RUN)) ./... 2>&1 | tee $$OUT; \
+	cd test/e2e && $(GO) test -v $(if $(TEST_OUTPUT),-json) -count=1 -timeout=60m $(if $(TEST_RUN),-run $(TEST_RUN)) ./... 2>&1 | tee $$OUT; \
 	TEST_EXIT=$${PIPESTATUS[0]}; \
 	PASS_COUNT=$$(grep -- '--- PASS:' $$OUT 2>/dev/null | wc -l | tr -d ' '); \
 	FAIL_COUNT=$$(grep -- '--- FAIL:' $$OUT 2>/dev/null | wc -l | tr -d ' '); \

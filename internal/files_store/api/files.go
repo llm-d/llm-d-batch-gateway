@@ -54,4 +54,31 @@ type BatchFilesClient interface {
 
 	// Delete deletes the file in the specified location.
 	Delete(ctx context.Context, fileName, folderName string) (err error)
+
+	// DeletePrefix deletes every file stored under folderName/prefix and
+	// returns the number of deleted files. A prefix with no stored files is
+	// a no-op. The prefix is matched as a directory prefix: a trailing
+	// slash is appended when missing, so sibling directories sharing the
+	// prefix string are left alone.
+	DeletePrefix(ctx context.Context, folderName, prefix string) (deleted int, err error)
+
+	// OpenStream opens a streaming write for the file. It returns
+	// ErrFileExists when the file is already stored. The file becomes
+	// visible to readers only when the returned StreamWriter is committed.
+	OpenStream(ctx context.Context, fileName, folderName string) (writer StreamWriter, err error)
+}
+
+// StreamWriter incrementally writes one file. Written data becomes visible
+// only after a successful Commit; Abort discards it. Callers must call
+// exactly one of Commit or Abort.
+type StreamWriter interface {
+	io.Writer
+
+	// Commit finalizes the write and makes the file durable and visible.
+	// The returned metadata describes the stored file; LinesNumber is not
+	// tracked by streaming writes.
+	Commit(ctx context.Context) (fileMd *BatchFileMetadata, err error)
+
+	// Abort discards the write and removes any partial data.
+	Abort(ctx context.Context) (err error)
 }

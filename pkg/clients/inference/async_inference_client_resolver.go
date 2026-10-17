@@ -53,7 +53,13 @@ type AsyncGatewayResolver struct {
 	sharedClients   *syncutil.MutexMap[string, *asyncSharedClient] // model → shared client
 	closers         []io.Closer
 	clientFactories map[string]func() AsyncInferenceClient // test-only override
-	logger          logr.Logger
+	// routeBases maps each model to its result-route prefix (before the
+	// consumer suffix); rdb and resultPollTimeout rebuild producers that
+	// consume another processor's route for cross-processor recovery.
+	routeBases        map[string]string
+	rdb               redis.UniversalClient
+	resultPollTimeout time.Duration
+	logger            logr.Logger
 }
 
 // Models returns all configured model IDs.
@@ -139,6 +145,7 @@ func NewAsyncResolver(config AsyncClientConfig, logger logr.Logger) (*AsyncGatew
 	}
 
 	pools := make(map[string]*asyncPool, len(config.Models))
+	routeBases := make(map[string]string, len(config.Models))
 	var closers []io.Closer
 
 	for model, mcfg := range config.Models {
@@ -154,6 +161,7 @@ func NewAsyncResolver(config AsyncClientConfig, logger logr.Logger) (*AsyncGatew
 		}
 		// Each Processor consumes from its own result queue so another healthy
 		// replica cannot consume and discard its results.
+		routeBases[model] = resQueue
 		resQueue = resQueue + ":" + config.ConsumerID
 		logger.Info(
 			"Configured async inference queues",
@@ -187,9 +195,47 @@ func NewAsyncResolver(config AsyncClientConfig, logger logr.Logger) (*AsyncGatew
 	closers = append(closers, rdb)
 
 	return &AsyncGatewayResolver{
-		pools:         pools,
-		sharedClients: syncutil.NewMutexMap[string, *asyncSharedClient](),
-		closers:       closers,
-		logger:        logger,
+		pools:             pools,
+		sharedClients:     syncutil.NewMutexMap[string, *asyncSharedClient](),
+		closers:           closers,
+		routeBases:        routeBases,
+		rdb:               rdb,
+		resultPollTimeout: config.ResultPollTimeout,
+		logger:            logger,
 	}, nil
+}
+
+// recoveryClaimLeaseTTL is the claim lease for producers consuming another
+// processor's result route. A recovery claim only needs to cover the
+// claim→route→checkpoint hop (seconds), unlike a route owner's lease, which
+// bounds crash detection. Two processors may recover different batches from
+// the same dead submitter and occasionally claim each other's deliveries —
+// a foreign claim is held unacked (its entry is open) until the lease
+// lapses, so a short lease turns that mis-claim into a brief bounce instead
+// of a full crash-detection window.
+const recoveryClaimLeaseTTL = 60 * time.Second
+
+// RecoveryClientFor returns a client that consumes the per-processor result
+// route of consumer — the route on which that processor's unacknowledged
+// deliveries are stranded after a disruption. A processor recovering a batch
+// reads the previous submitter's route through it so a completed result is
+// checkpointed instead of re-inferred. The client is receive-only: requests
+// are never submitted through it.
+func (r *AsyncGatewayResolver) RecoveryClientFor(modelID, consumerID string) (AsyncInferenceClient, error) {
+	if r.clientFactories != nil {
+		return nil, fmt.Errorf("recovery clients require a Redis-backed resolver")
+	}
+	base, ok := r.routeBases[modelID]
+	if !ok || r.rdb == nil {
+		return nil, fmt.Errorf("recovery route for model %q is not configured", modelID)
+	}
+	p, err := producer.NewRedisSortedSetProducer(
+		producer.RedisSortedSetConfig{ResultQueueName: base + ":" + consumerID},
+		producer.WithRedisClient(r.rdb),
+		producer.WithResultClaimLeaseTTL(recoveryClaimLeaseTTL),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("recovery producer for model %q consumer %q: %w", modelID, consumerID, err)
+	}
+	return newAsyncSharedClient(p, r.resultPollTimeout, r.logger.WithValues("model", modelID, "recoveryFor", consumerID)), nil
 }

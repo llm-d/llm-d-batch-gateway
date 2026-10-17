@@ -14,7 +14,8 @@ import (
 
 // AsyncDispatcher submits requests to async queues (fire-and-forget).
 // Results arrive via per-model ResultBroadcasters (backed by shared
-// clients) that send directly to resultCh.
+// clients) that send directly to resultCh. The pre-dispatch ownership
+// fence lives in the PreDispatcher wrapping this dispatcher.
 type AsyncDispatcher struct {
 	resolver     *inference.AsyncGatewayResolver
 	broadcasters *BroadcasterGroup
@@ -39,7 +40,7 @@ func NewAsyncDispatcher(
 }
 
 func (d *AsyncDispatcher) Run(ctx context.Context, requestCh <-chan RequestItem, resultCh chan<- ResultItem) error {
-	d.broadcasters.Subscribe(resultCh)
+	d.broadcasters.Subscribe(resultCh, d.pending.Has)
 
 	// Submit phase — fast queue writes.
 	for msg := range requestCh {
@@ -71,11 +72,20 @@ func (d *AsyncDispatcher) Run(ctx context.Context, requestCh <-chan RequestItem,
 	d.pending.Wait(ctx)
 
 	// Best-effort: tell the queue to drop still-pending requests before
-	// dispatch. Use a detached context — ctx is often already cancelled.
-	if ids := d.pending.IDs(); len(ids) > 0 {
-		cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
-		d.cancelPending(cancelCtx, ids)
-		cancelFn()
+	// dispatch — but only when the batch is aborting for good (user cancel,
+	// SLO expiry). A stop that leads to a resume (shutdown, ownership loss)
+	// must not cancel: the queue turns a marked request into a CANCELLED
+	// result, and the next incarnation, which re-submits the same stable
+	// request IDs, would checkpoint that stale result as a request failure.
+	// Leftover submissions are harmless — dispatch is at-least-once and
+	// duplicate results are dropped on commit. Use a detached context —
+	// ctx is often already cancelled.
+	if cause := batchctx.Cause(ctx); errors.Is(cause, batchctx.ErrCancelled) || errors.Is(cause, batchctx.ErrExpired) {
+		if ids := d.pending.IDs(); len(ids) > 0 {
+			cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
+			d.cancelPending(cancelCtx, ids)
+			cancelFn()
+		}
 	}
 
 	// Drain submitted-but-uncollected requests as errors so that
@@ -85,9 +95,10 @@ func (d *AsyncDispatcher) Run(ctx context.Context, requestCh <-chan RequestItem,
 		resultCh <- *msg.Error(code, message)
 	})
 
-	// Unsubscribe removes resultCh from the broadcast list. A concurrent
+	// Unsubscribe removes resultCh from the subscriber list. A concurrent
 	// send from the broadcaster may still race with close(resultCh);
-	// safeChannelSend recovers from the resulting panic.
+	// safeChannelSend recovers from the resulting panic and leaves the
+	// delivery unacked, so its lease redelivers it.
 	d.broadcasters.Unsubscribe(resultCh)
 	close(resultCh)
 

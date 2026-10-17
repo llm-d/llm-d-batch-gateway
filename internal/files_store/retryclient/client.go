@@ -115,6 +115,12 @@ func (c *Client) Retrieve(ctx context.Context, fileName, folderName string) (io.
 	return rc, meta, err
 }
 
+// OpenStream passes through without retrying: a stream cannot be rewound,
+// so a failed attempt cannot be replayed with the same data.
+func (c *Client) OpenStream(ctx context.Context, fileName, folderName string) (api.StreamWriter, error) {
+	return c.inner.OpenStream(ctx, fileName, folderName)
+}
+
 func (c *Client) Delete(ctx context.Context, fileName, folderName string) error {
 	attempts, err := retry.Do(ctx, &c.cfg, func(attempt int) error {
 		if attempt > 1 {
@@ -132,6 +138,28 @@ func (c *Client) Delete(ctx context.Context, fileName, folderName string) error 
 		recordSuccess("delete", c.component)
 	}
 	return err
+}
+
+func (c *Client) DeletePrefix(ctx context.Context, folderName, prefix string) (int, error) {
+	var deleted int
+	attempts, err := retry.Do(ctx, &c.cfg, func(attempt int) error {
+		if attempt > 1 {
+			recordRetry("delete_prefix", c.component)
+			logr.FromContextOrDiscard(ctx).Info("Retrying file delete prefix",
+				"prefix", prefix, "attempt", attempt, "maxRetries", c.cfg.MaxRetries)
+		}
+		var delErr error
+		deleted, delErr = c.inner.DeletePrefix(ctx, folderName, prefix)
+		return delErr
+	})
+	if err != nil {
+		if attempts > c.cfg.MaxRetries {
+			recordExhausted("delete_prefix", c.component)
+		}
+	} else {
+		recordSuccess("delete_prefix", c.component)
+	}
+	return deleted, err
 }
 
 func (c *Client) Close() error {

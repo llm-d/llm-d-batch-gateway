@@ -21,6 +21,7 @@ import (
 	_ "embed"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -48,11 +49,12 @@ func buildNonTerminalCondition(column string) string {
 }
 
 const (
-	colProcessorID      = "processor_id"
-	colPriority         = "priority"
-	colEpoch            = "epoch"
-	colRecoveryAttempts = "recovery_attempts"
-	colResumable        = "resumable"
+	colProcessorID        = "processor_id"
+	colPriority           = "priority"
+	colEpoch              = "epoch"
+	colRecoveryAttempts   = "recovery_attempts"
+	colResumable          = "resumable"
+	colOwnerLeaseExpiryAt = "owner_lease_expires_at"
 )
 
 // Compile-time checks.
@@ -67,7 +69,7 @@ type batchDescriptor struct{}
 func (batchDescriptor) TableName() string { return "batch_items" }
 func (batchDescriptor) Schema() string    { return batchSchemaSql }
 func (batchDescriptor) ExtraColumns() []string {
-	return []string{colProcessorID, colPriority, colEpoch, colRecoveryAttempts, colResumable}
+	return []string{colProcessorID, colPriority, colEpoch, colRecoveryAttempts, colResumable, colOwnerLeaseExpiryAt}
 }
 
 // PostgresBatchDBClient implements api.BatchDBClient using PostgreSQL.
@@ -105,12 +107,17 @@ func (c *PostgresBatchDBClient) DBStore(ctx context.Context, item *api.BatchItem
 	if item.ProcessorID == "" {
 		processorID = nil
 	}
+	var ownerLeaseExpiresAt any
+	if !item.OwnerLeaseExpiresAt.IsZero() {
+		ownerLeaseExpiresAt = item.OwnerLeaseExpiresAt
+	}
 	if err = c.store(ctx, &item.BaseIndexes, &item.BaseContents, map[string]any{
-		colProcessorID:      processorID,
-		colPriority:         item.Priority,
-		colEpoch:            item.Epoch,
-		colRecoveryAttempts: item.RecoveryAttempts,
-		colResumable:        item.Resumable,
+		colProcessorID:        processorID,
+		colPriority:           item.Priority,
+		colEpoch:              item.Epoch,
+		colRecoveryAttempts:   item.RecoveryAttempts,
+		colResumable:          item.Resumable,
+		colOwnerLeaseExpiryAt: ownerLeaseExpiresAt,
 	}); err != nil {
 		return
 	}
@@ -151,14 +158,19 @@ func (c *PostgresBatchDBClient) DBGet(
 		epoch, _ := extras[i][colEpoch].(int64)
 		recoveryAttempts, _ := extras[i][colRecoveryAttempts].(int64)
 		resumable, _ := extras[i][colResumable].(bool)
+		var ownerLeaseExpiresAt time.Time
+		if v, ok := extras[i][colOwnerLeaseExpiryAt].(time.Time); ok {
+			ownerLeaseExpiresAt = v
+		}
 		items[i] = &api.BatchItem{
-			BaseIndexes:      *indexes[i],
-			BaseContents:     *contents[i],
-			ProcessorID:      processorID,
-			Priority:         priority,
-			Epoch:            epoch,
-			RecoveryAttempts: recoveryAttempts,
-			Resumable:        resumable,
+			BaseIndexes:         *indexes[i],
+			BaseContents:        *contents[i],
+			ProcessorID:         processorID,
+			Priority:            priority,
+			Epoch:               epoch,
+			RecoveryAttempts:    recoveryAttempts,
+			Resumable:           resumable,
+			OwnerLeaseExpiresAt: ownerLeaseExpiresAt,
 		}
 	}
 

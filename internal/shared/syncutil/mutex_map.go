@@ -56,6 +56,9 @@ func (mm *MutexMap[K, V]) Delete(key K) {
 	mm.mu.Unlock()
 }
 
+// Range calls fn for each key-value pair, in unspecified order, stopping
+// early when fn returns false. fn runs while the map's mutex is held: it
+// must not block and must not call back into the same MutexMap.
 func (mm *MutexMap[K, V]) Range(fn func(K, V) bool) {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()

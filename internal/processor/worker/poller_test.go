@@ -116,7 +116,7 @@ func TestPoller_DequeueOne_EmptyQueue_ReturnsNil(t *testing.T) {
 
 	p := NewPoller(pq, dbClient)
 
-	task, err := p.dequeueOne(ctx)
+	task, err := p.dequeueOne(ctx, 0)
 	if err != nil {
 		t.Fatalf("DequeueOne() err=%v, want nil", err)
 	}
@@ -139,7 +139,7 @@ func TestPoller_DequeueOne_PQError_ReturnsError(t *testing.T) {
 
 	p := NewPoller(pq, dbClient)
 
-	task, err := p.dequeueOne(ctx)
+	task, err := p.dequeueOne(ctx, 0)
 	if err == nil {
 		t.Fatalf("DequeueOne() err=nil, want error")
 	}
@@ -168,7 +168,7 @@ func TestPoller_DequeueOne_ReturnsFirstTask(t *testing.T) {
 
 	p := NewPoller(pq, dbClient)
 
-	task, err := p.dequeueOne(ctx)
+	task, err := p.dequeueOne(ctx, 0)
 	if err != nil {
 		t.Fatalf("DequeueOne() err=%v, want nil", err)
 	}

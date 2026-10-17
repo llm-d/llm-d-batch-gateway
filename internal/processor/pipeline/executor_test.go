@@ -1,7 +1,6 @@
 package pipeline
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -57,16 +56,15 @@ func TestJobExecutorEndToEnd(t *testing.T) {
 		{RequestID: "req-3", CustomID: "c-3", ModelID: "m1", Endpoint: "/v1/chat/completions"},
 	}
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
 		Dispatcher: NewDirectDispatcher(resolver, logr.Discard()),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -86,7 +84,7 @@ func TestJobExecutorEndToEnd(t *testing.T) {
 		t.Errorf("Failed = %d, want 0", counts.Failed)
 	}
 
-	outputData := readFile(t, outputFile)
+	outputData := sinkOutputBytes(t, sink)
 	lines := bytes.Split(bytes.TrimSpace(outputData), []byte("\n"))
 	if len(lines) != 3 {
 		t.Fatalf("output lines = %d, want 3", len(lines))
@@ -104,7 +102,7 @@ func TestJobExecutorEndToEnd(t *testing.T) {
 		}
 	}
 
-	errorData := readFile(t, errorFile)
+	errorData := sinkErrorBytes(t, sink)
 	if len(bytes.TrimSpace(errorData)) != 0 {
 		t.Errorf("error output = %q, want empty", errorData)
 	}
@@ -121,16 +119,15 @@ func TestJobExecutorWithErrors(t *testing.T) {
 		{RequestID: "req-bad", CustomID: "c-bad", ModelID: "no-such-model", Endpoint: "/v1/chat/completions"},
 	}
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
 		Dispatcher: NewDirectDispatcher(resolver, logr.Discard()),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -144,7 +141,7 @@ func TestJobExecutorWithErrors(t *testing.T) {
 		t.Errorf("Completed(%d) + Failed(%d) != Total(%d)", counts.Completed, counts.Failed, counts.Total)
 	}
 
-	errorData := readFile(t, errorFile)
+	errorData := sinkErrorBytes(t, sink)
 	if len(bytes.TrimSpace(errorData)) == 0 {
 		t.Error("expected error output for unknown model")
 	}
@@ -172,16 +169,15 @@ func TestJobExecutorCancellation(t *testing.T) {
 		cancelFn: cancel,
 	}
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(10, nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     source,
 		Dispatcher: NewDirectDispatcher(resolver, logr.Discard()),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -224,16 +220,15 @@ func TestJobExecutorMultipleModels(t *testing.T) {
 		{RequestID: "req-4", CustomID: "d", ModelID: "m2", Endpoint: "/v1/chat/completions"},
 	}
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
 		Dispatcher: NewDirectDispatcher(resolver, logr.Discard()),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -249,7 +244,7 @@ func TestJobExecutorMultipleModels(t *testing.T) {
 		t.Fatalf("Completed = %d, want 4", counts.Completed)
 	}
 
-	outputData := readFile(t, outputFile)
+	outputData := sinkOutputBytes(t, sink)
 	lines := bytes.Split(bytes.TrimSpace(outputData), []byte("\n"))
 	if len(lines) != 4 {
 		t.Fatalf("output lines = %d, want 4", len(lines))
@@ -269,7 +264,7 @@ func TestJobExecutorMultipleModels(t *testing.T) {
 		}
 	}
 
-	errorData := readFile(t, errorFile)
+	errorData := sinkErrorBytes(t, sink)
 	if len(bytes.TrimSpace(errorData)) != 0 {
 		t.Errorf("expected empty error file, got %q", errorData)
 	}
@@ -287,16 +282,15 @@ func TestJobExecutorMultipleModels_ModelNotFound(t *testing.T) {
 		{RequestID: "req-3", CustomID: "c", ModelID: "m1", Endpoint: "/v1/chat/completions"},
 	}
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
 		Dispatcher: NewDirectDispatcher(resolver, logr.Discard()),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -316,13 +310,13 @@ func TestJobExecutorMultipleModels_ModelNotFound(t *testing.T) {
 		t.Fatalf("Failed = %d, want 1", counts.Failed)
 	}
 
-	outputData := readFile(t, outputFile)
+	outputData := sinkOutputBytes(t, sink)
 	outputLines := splitLines(outputData)
 	if len(outputLines) != 2 {
 		t.Fatalf("output lines = %d, want 2", len(outputLines))
 	}
 
-	errorData := readFile(t, errorFile)
+	errorData := sinkErrorBytes(t, sink)
 	errorLines := splitLines(errorData)
 	if len(errorLines) != 1 {
 		t.Fatalf("error lines = %d, want 1", len(errorLines))
@@ -356,16 +350,15 @@ func TestJobExecutorSeparatesSuccessAndErrors(t *testing.T) {
 		{RequestID: "req-2", CustomID: "r2", ModelID: "m1", Endpoint: "/v1/chat/completions"},
 	}
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
 		Dispatcher: NewDirectDispatcher(resolver, logr.Discard()),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -378,7 +371,7 @@ func TestJobExecutorSeparatesSuccessAndErrors(t *testing.T) {
 		t.Fatalf("counts: completed=%d failed=%d, want completed=1 failed=1", counts.Completed, counts.Failed)
 	}
 
-	outputData := readFile(t, outputFile)
+	outputData := sinkOutputBytes(t, sink)
 	outputLines := splitLines(outputData)
 	if len(outputLines) != 1 {
 		t.Fatalf("output lines = %d, want 1", len(outputLines))
@@ -391,7 +384,7 @@ func TestJobExecutorSeparatesSuccessAndErrors(t *testing.T) {
 		t.Fatalf("output: want response set and error nil, got response=%v error=%v", outLine.Response, outLine.Error)
 	}
 
-	errorData := readFile(t, errorFile)
+	errorData := sinkErrorBytes(t, sink)
 	errorLines := splitLines(errorData)
 	if len(errorLines) != 1 {
 		t.Fatalf("error lines = %d, want 1", len(errorLines))
@@ -437,16 +430,15 @@ func TestJobExecutorHTTPErrorGoesToOutputFile(t *testing.T) {
 		{RequestID: "req-3", CustomID: "r3", ModelID: "m1", Endpoint: "/v1/chat/completions"},
 	}
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
 		Dispatcher: NewDirectDispatcher(resolver, logr.Discard()),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -463,7 +455,7 @@ func TestJobExecutorHTTPErrorGoesToOutputFile(t *testing.T) {
 	}
 
 	// output.jsonl: 200 success + HTTP 422 (HTTP errors go to output per OpenAI spec)
-	outputData := readFile(t, outputFile)
+	outputData := sinkOutputBytes(t, sink)
 	outputLines := splitLines(outputData)
 	if len(outputLines) != 2 {
 		t.Fatalf("output lines = %d, want 2 (200 + 422)", len(outputLines))
@@ -492,7 +484,7 @@ func TestJobExecutorHTTPErrorGoesToOutputFile(t *testing.T) {
 	}
 
 	// error.jsonl: only non-HTTP error (connection refused)
-	errorData := readFile(t, errorFile)
+	errorData := sinkErrorBytes(t, sink)
 	errorLines := splitLines(errorData)
 	if len(errorLines) != 1 {
 		t.Fatalf("error lines = %d, want 1 (non-HTTP error only)", len(errorLines))
@@ -531,16 +523,15 @@ func TestJobExecutorCancellation_AllRequestsAccountedFor(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	source := &cancelAfterNSource{items: items, cancelAt: 1, cancelFn: cancel}
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(total), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     source,
 		Dispatcher: NewDirectDispatcher(resolver, logr.Discard()),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -571,16 +562,15 @@ func TestJobExecutorCancelAfterComplete(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	source := &cancelAfterNSource{items: items, cancelAt: 2, cancelFn: cancel}
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     source,
 		Dispatcher: NewDirectDispatcher(resolver, logr.Discard()),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -593,7 +583,7 @@ func TestJobExecutorCancelAfterComplete(t *testing.T) {
 			counts.Completed)
 	}
 
-	outputData := readFile(t, outputFile)
+	outputData := sinkOutputBytes(t, sink)
 	outputLines := splitLines(outputData)
 	for _, line := range outputLines {
 		var entry outputLine
@@ -684,16 +674,15 @@ func TestDirectDispatcher_MetricsNotDoubleCounted(t *testing.T) {
 	promptBefore := getCounterValue(t, "batch_request_prompt_tokens_total", "m1")
 	genBefore := getCounterValue(t, "batch_request_generation_tokens_total", "m1")
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
 		Dispatcher: NewDirectDispatcher(resolver, logr.Discard()),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -762,20 +751,24 @@ func TestJobExecutor_PersistenceFailureCancelsDispatch(t *testing.T) {
 
 	items := makeItems(total, "m1")
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
+	var checkpointed atomic.Int32
+	sink.fn = func(_ *ResultItem) (bool, error) {
+		if checkpointed.Add(1) > 1 {
+			return false, errors.New("write failed")
+		}
+		return true, nil
+	}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(total), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
-
-	collector.output = bufio.NewWriterSize(&failAfterNWriter{remaining: 1}, 1)
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	source := &throttledSource{items: items, delay: 10 * time.Millisecond}
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     source,
 		Dispatcher: NewPreDispatcher(NewDirectDispatcher(resolver, logr.Discard())),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})
@@ -836,20 +829,24 @@ func TestJobExecutor_PersistenceFailureReturnedNotCanceled(t *testing.T) {
 
 	items := makeItems(total, "m1")
 
-	outputFile := tempFile(t)
-	errorFile := tempFile(t)
+	sink := &fakeSink{}
+	var checkpointed atomic.Int32
+	sink.fn = func(_ *ResultItem) (bool, error) {
+		if checkpointed.Add(1) > 1 {
+			return false, errors.New("write failed")
+		}
+		return true, nil
+	}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(total), nil, "test-job", 0, logr.Discard())
-	collector := NewResultCollector(outputFile, errorFile, pending, tracker, logr.Discard())
-
-	collector.output = bufio.NewWriterSize(&failAfterNWriter{remaining: 1}, 1)
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
 
 	source := &throttledSource{items: items, delay: 10 * time.Millisecond}
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     source,
 		Dispatcher: NewPreDispatcher(NewDirectDispatcher(resolver, logr.Discard())),
-		Collector:  collector,
+		Collector:  checkpointer,
 		Tracker:    tracker,
 		Logger:     logr.Discard(),
 	})

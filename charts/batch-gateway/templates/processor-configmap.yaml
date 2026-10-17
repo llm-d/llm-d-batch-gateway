@@ -73,6 +73,11 @@ data:
       {{- end }}
     {{- end }}
 
+    resumable:
+      lease_duration: {{ .Values.processor.config.resumable.leaseDuration | quote }}
+      finalize_concurrency: {{ .Values.processor.config.resumable.finalizeConcurrency }}
+      finalize_timeout: {{ .Values.processor.config.resumable.finalizeTimeout | quote }}
+
     {{- with .Values.processor.config.globalInferenceGateway }}
     global_inference_gateway:
       url: {{ .url | quote }}

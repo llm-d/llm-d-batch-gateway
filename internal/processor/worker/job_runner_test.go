@@ -286,7 +286,7 @@ func TestHandlePanicRecovery_BeforeInProgress_MarksFailed(t *testing.T) {
 		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: &batch_types.JobInfo{JobID: "job-panic-pre"},
-	}, false, nil)
+	}, nil)
 
 	assertJobStatus(t, dbClient, "job-panic-pre", openai.BatchStatusFailed)
 }
@@ -309,7 +309,7 @@ func TestHandlePanicRecovery_AfterInProgress_WithCounts_MarksFailed(t *testing.T
 		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: &batch_types.JobInfo{JobID: "job-panic-partial"},
-	}, true, counts)
+	}, counts)
 
 	assertJobStatus(t, dbClient, "job-panic-partial", openai.BatchStatusFailed)
 }
@@ -331,7 +331,7 @@ func TestHandlePanicRecovery_AfterInProgress_NilCounts_MarksFailed(t *testing.T)
 		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: &batch_types.JobInfo{JobID: "job-panic-nocounts"},
-	}, true, nil)
+	}, nil)
 
 	assertJobStatus(t, dbClient, "job-panic-nocounts", openai.BatchStatusFailed)
 }
@@ -355,7 +355,7 @@ func TestHandlePanicRecovery_CancelledContext_StillMarksFailed(t *testing.T) {
 		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: &batch_types.JobInfo{JobID: "job-panic-cancelled-ctx"},
-	}, true, nil)
+	}, nil)
 
 	assertJobStatus(t, dbClient, "job-panic-cancelled-ctx", openai.BatchStatusFailed)
 }
@@ -378,7 +378,7 @@ func TestHandlePanicRecovery_DBError_DoesNotCrash(t *testing.T) {
 		updater: NewStatusUpdater(dbClient),
 		jobItem: jobItem,
 		jobInfo: &batch_types.JobInfo{JobID: "job-panic-db-err"},
-	}, true, counts)
+	}, counts)
 
 	assertJobStatus(t, dbClient, "job-panic-db-err", openai.BatchStatusInProgress)
 }
@@ -386,8 +386,8 @@ func TestHandlePanicRecovery_DBError_DoesNotCrash(t *testing.T) {
 func TestHandlePanicRecovery_NilParams_DoesNotPanic(t *testing.T) {
 	ctx := testLoggerCtx(t)
 	p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{})
-	p.handlePanicRecovery(ctx, nil, false, nil)
-	p.handlePanicRecovery(ctx, &jobExecutionParams{}, false, nil)
+	p.handlePanicRecovery(ctx, nil, nil)
+	p.handlePanicRecovery(ctx, &jobExecutionParams{}, nil)
 }
 
 // dbBlockingUpdateWrapper blocks DBUpdate until its context is cancelled,
@@ -448,7 +448,7 @@ func TestHandlePanicRecovery_BlockingDB_ReturnsWithinTimeout(t *testing.T) {
 			updater: NewStatusUpdater(blockingDB),
 			jobItem: jobItem,
 			jobInfo: &batch_types.JobInfo{JobID: "job-panic-block"},
-		}, false, nil)
+		}, nil)
 		close(done)
 	}()
 
@@ -511,17 +511,25 @@ func TestRunJob_Success_CompletesAndCleansArtifacts(t *testing.T) {
 		t.Fatalf("DBStore file item: %v", err)
 	}
 
-	// Seed BatchDB with the job.
-	dbClient := newMockBatchDBClient()
+	// Seed BatchDB with the job. The row carries the queue claim a real
+	// dequeue leaves behind; the resumable store is seeded to match it.
+	dbClient := newSpyBatchDB(newMockBatchDBClient())
 	jobItem := &db.BatchItem{
 		BaseIndexes: db.BaseIndexes{ID: jobID, TenantID: tenantID},
 		BaseContents: db.BaseContents{
 			Status: mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusValidating}),
 		},
+		ProcessorID: "test-processor",
+		Epoch:       1,
+		Resumable:   true,
 	}
 	if err := dbClient.DBStore(ctx, jobItem); err != nil {
 		t.Fatalf("DBStore batch item: %v", err)
 	}
+
+	resumable := mockdb.NewMockResumableStore()
+	resumable.SeedBatch(jobID, "test-processor", 1)
+	mirrorResumableStatusWrites(dbClient, resumable)
 
 	p := mustNewProcessor(t, cfg, &clientset.Clientset{
 		BatchDB:   dbClient,
@@ -530,6 +538,7 @@ func TestRunJob_Success_CompletesAndCleansArtifacts(t *testing.T) {
 		Event:     mockdb.NewMockBatchEventChannelClient(),
 		Queue:     mockdb.NewMockBatchPriorityQueueClient(),
 		Inference: inference.NewSingleClientResolver(&mockInferenceClient{}),
+		Resumable: &rowSyncedResumable{MockResumableStore: resumable, rows: dbClient},
 	})
 
 	jobInfo := &batch_types.JobInfo{
@@ -596,127 +605,6 @@ func assertJobStatus(t *testing.T, dbClient db.BatchProgressDBClient, jobID stri
 	}
 	if status.Status != want {
 		t.Fatalf("job %s: expected status %s, got %s", jobID, want, status.Status)
-	}
-}
-
-// TestRunJob_FinalizeFailedOver_PreservesFileIDsAndDoesNotCallHandleFailed verifies the
-// runJob → finalizeJob → errFinalizeFailedOver integration path. When the completed-status
-// DB write fails inside finalizeJob, the fallback writes "failed" status with file IDs
-// preserved. runJob must NOT call handleFailed again — that would overwrite the file IDs
-// with empty strings, orphaning the already-uploaded files.
-func TestRunJob_FinalizeFailedOver_PreservesFileIDsAndDoesNotCallHandleFailed(t *testing.T) {
-	ctx := testLoggerCtx(t)
-
-	const (
-		jobID       = "job-finalize-failover"
-		tenantID    = "tenant-1"
-		inputFileID = "file-input-failover"
-	)
-
-	cfg := config.NewConfig()
-	cfg.WorkDir = t.TempDir()
-	filesRoot := t.TempDir()
-
-	folderName, err := ucom.GetFolderNameByTenantID(tenantID)
-	if err != nil {
-		t.Fatalf("GetFolderNameByTenantID: %v", err)
-	}
-	storageName := ucom.FileStorageName(inputFileID, "input.jsonl")
-	storageDir := filepath.Join(filesRoot, folderName)
-	if err := os.MkdirAll(storageDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll storage dir: %v", err)
-	}
-
-	inputContent := `{"custom_id":"req-1","method":"POST","url":"/v1/chat/completions","body":{"model":"test-model","messages":[{"role":"user","content":"hello"}]}}` + "\n"
-	if err := os.WriteFile(filepath.Join(storageDir, storageName), []byte(inputContent), 0o644); err != nil {
-		t.Fatalf("WriteFile input: %v", err)
-	}
-
-	fileDBClient := newMockFileDBClient()
-	fileItem, err := converter.FileToDBItem(&openai.FileObject{
-		ID:       inputFileID,
-		Filename: "input.jsonl",
-		Purpose:  openai.FileObjectPurposeBatch,
-		Object:   "file",
-	}, tenantID, db.Tags{})
-	if err != nil {
-		t.Fatalf("FileToDBItem: %v", err)
-	}
-	if err := fileDBClient.DBStore(ctx, fileItem); err != nil {
-		t.Fatalf("DBStore file item: %v", err)
-	}
-
-	// failOnStatusDB makes the completed-status write fail while allowing
-	// the fallback failed-status write to succeed.
-	innerDB := newMockBatchDBClient()
-	failDB := &failOnStatusDB{
-		inner:      innerDB,
-		failStatus: openai.BatchStatusCompleted,
-		failErr:    errors.New("injected: completed write failed"),
-	}
-
-	jobItem := &db.BatchItem{
-		BaseIndexes: db.BaseIndexes{ID: jobID, TenantID: tenantID},
-		BaseContents: db.BaseContents{
-			Status: mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusValidating}),
-		},
-	}
-	if err := innerDB.DBStore(ctx, jobItem); err != nil {
-		t.Fatalf("DBStore batch item: %v", err)
-	}
-
-	p := mustNewProcessor(t, cfg, &clientset.Clientset{
-		BatchDB:   failDB,
-		FileDB:    fileDBClient,
-		File:      mockfiles.NewMockBatchFilesClient(filesRoot),
-		Event:     mockdb.NewMockBatchEventChannelClient(),
-		Queue:     mockdb.NewMockBatchPriorityQueueClient(),
-		Inference: inference.NewSingleClientResolver(&mockInferenceClient{}),
-	})
-	p.poller = NewPoller(mockdb.NewMockBatchPriorityQueueClient(), failDB)
-
-	jobInfo := &batch_types.JobInfo{
-		JobID:    jobID,
-		TenantID: tenantID,
-		BatchJob: &openai.Batch{
-			ID: jobID,
-			BatchSpec: openai.BatchSpec{
-				InputFileID: inputFileID,
-				Endpoint:    "/v1/chat/completions",
-			},
-			BatchStatusInfo: openai.BatchStatusInfo{Status: openai.BatchStatusValidating},
-		},
-	}
-
-	if !p.acquire(context.Background()) {
-		t.Fatalf("expected token acquire before runJob")
-	}
-	p.wg.Add(1)
-	p.runJob(ctx, &jobExecutionParams{
-		updater: NewStatusUpdater(failDB),
-		jobItem: jobItem,
-		jobInfo: jobInfo,
-		task: &db.BatchJobPriority{
-			ID:  jobID,
-			SLO: time.Now().Add(1 * time.Hour),
-		},
-	})
-
-	// DB status must be "failed" (fallback), not "completed" (which was injected to fail).
-	items, _, _, getErr := innerDB.DBGet(ctx, &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{jobID}}}, true, 0, 1)
-	if getErr != nil || len(items) != 1 {
-		t.Fatalf("DBGet: err=%v len=%d", getErr, len(items))
-	}
-	var got openai.BatchStatusInfo
-	if err := json.Unmarshal(items[0].Status, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got.Status != openai.BatchStatusFailed {
-		t.Fatalf("status = %s, want failed (errFinalizeFailedOver path)", got.Status)
-	}
-	// File IDs must be preserved by the failover — handleFailed must NOT have overwritten them.
-	if got.OutputFileID == nil {
-		t.Fatal("output_file_id must be preserved in failover path, got nil")
 	}
 }
 

@@ -33,10 +33,11 @@ import (
 )
 
 type mockFilesClient struct {
-	storeCalls    int
-	retrieveCalls int
-	deleteCalls   int
-	failUntil     int
+	storeCalls        int
+	retrieveCalls     int
+	deleteCalls       int
+	deletePrefixCalls int
+	failUntil         int
 }
 
 func (m *mockFilesClient) Store(_ context.Context, _, _ string, _, _ int64, _ io.Reader) (*api.BatchFileMetadata, error) {
@@ -61,6 +62,18 @@ func (m *mockFilesClient) Delete(_ context.Context, _, _ string) error {
 		return errors.New("transient delete error")
 	}
 	return nil
+}
+
+func (m *mockFilesClient) DeletePrefix(_ context.Context, _, _ string) (int, error) {
+	m.deletePrefixCalls++
+	if m.deletePrefixCalls <= m.failUntil {
+		return 0, errors.New("transient delete prefix error")
+	}
+	return 2, nil
+}
+
+func (m *mockFilesClient) OpenStream(_ context.Context, _, _ string) (api.StreamWriter, error) {
+	return nil, errors.New("not implemented")
 }
 
 func (m *mockFilesClient) Close() error { return nil }
@@ -206,6 +219,22 @@ func TestDelete_SucceedsAfterRetry(t *testing.T) {
 	}
 	if mock.deleteCalls != 3 {
 		t.Fatalf("expected 3 delete calls, got %d", mock.deleteCalls)
+	}
+}
+
+func TestDeletePrefix_SucceedsAfterRetry(t *testing.T) {
+	mock := &mockFilesClient{failUntil: 2}
+	c := New(mock, retryCfg(), "test")
+
+	deleted, err := c.DeletePrefix(context.Background(), "folder", "results/job-1/")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.deletePrefixCalls != 3 {
+		t.Fatalf("expected 3 delete prefix calls, got %d", mock.deletePrefixCalls)
+	}
+	if deleted != 2 {
+		t.Fatalf("expected 2 deleted files, got %d", deleted)
 	}
 }
 
@@ -379,5 +408,20 @@ func TestMetrics_DeleteRetries(t *testing.T) {
 	})
 	if success != 1 {
 		t.Fatalf("file_storage_operations_total{delete,success} = %v, want 1", success)
+	}
+}
+
+func TestOpenStream_PassesThrough(t *testing.T) {
+	mock := &mockFilesClient{}
+	c := New(mock, retryCfg(), "test")
+
+	// Streams cannot be replayed, so OpenStream must forward directly:
+	// the inner client's error surfaces without any retry attempts.
+	_, err := c.OpenStream(context.Background(), "out.jsonl", "folder")
+	if err == nil || err.Error() != "not implemented" {
+		t.Fatalf("expected the inner error, got %v", err)
+	}
+	if mock.storeCalls != 0 {
+		t.Errorf("store calls = %d, want 0", mock.storeCalls)
 	}
 }
