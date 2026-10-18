@@ -79,6 +79,28 @@ func listBatchesPage(t *testing.T, handler *BatchAPIHandler, limit int, after st
 	return rr, resp
 }
 
+func listBatchesPageOrdered(t *testing.T, handler *BatchAPIHandler, limit int, after, order string) (*httptest.ResponseRecorder, openai.ListBatchResponse) {
+	t.Helper()
+	q := url.Values{"limit": {strconv.Itoa(limit)}}
+	if after != "" {
+		q.Set("after", after)
+	}
+	if order != "" {
+		q.Set("order", order)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/batches?"+q.Encode(), nil)
+	rr := httptest.NewRecorder()
+	handler.ListBatches(rr, req)
+
+	var resp openai.ListBatchResponse
+	if rr.Code == http.StatusOK {
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to parse list response: %v", err)
+		}
+	}
+	return rr, resp
+}
+
 // TestListBatchesFollowsLastIDCursor pages through the batch list the way the
 // OpenAI SDK does, passing the previous page's last_id as `after`.
 func TestListBatchesFollowsLastIDCursor(t *testing.T) {
@@ -154,12 +176,117 @@ func TestListBatchesUnknownAfterID(t *testing.T) {
 	handler := setupTestHandler()
 	storeTestBatches(t, handler, 3)
 
-	// "batch_~" sorts after every UUID-based ID, so nothing is left.
-	rr, resp := listBatchesPage(t, handler, 10, "batch_~")
+	// "batch_~" sorts after every UUID-based ID, so in ascending order
+	// nothing follows it.
+	rr, resp := listBatchesPageOrdered(t, handler, 10, "batch_~", "asc")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
 	}
 	if len(resp.Data) != 0 || resp.HasMore {
 		t.Errorf("got %d items has_more=%v, want empty last page", len(resp.Data), resp.HasMore)
+	}
+}
+
+// TestListBatchesOrderDescReturnsNewestFirst verifies that order=desc returns
+// batches sorted by ID descending (newest UUID first), matching OpenAI's
+// default behavior.
+func TestListBatchesOrderDescReturnsNewestFirst(t *testing.T) {
+	const numBatches, pageSize = 5, 5
+
+	handler := setupTestHandler()
+	storeTestBatches(t, handler, numBatches)
+
+	rr, resp := listBatchesPageOrdered(t, handler, pageSize, "", "desc")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	if len(resp.Data) != numBatches {
+		t.Fatalf("got %d batches, want %d", len(resp.Data), numBatches)
+	}
+	// Descending: each ID must be greater than the next (UUID string sort).
+	for i := 1; i < len(resp.Data); i++ {
+		if resp.Data[i-1].ID < resp.Data[i].ID {
+			t.Errorf("desc: batch %d (%s) should sort after batch %d (%s)", i-1, resp.Data[i-1].ID, i, resp.Data[i].ID)
+		}
+	}
+}
+
+// TestListBatchesOrderAscReturnsOldestFirst verifies that order=asc returns
+// batches sorted by ID ascending (oldest UUID first).
+func TestListBatchesOrderAscReturnsOldestFirst(t *testing.T) {
+	const numBatches, pageSize = 5, 5
+
+	handler := setupTestHandler()
+	storeTestBatches(t, handler, numBatches)
+
+	rr, resp := listBatchesPageOrdered(t, handler, pageSize, "", "asc")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	if len(resp.Data) != numBatches {
+		t.Fatalf("got %d batches, want %d", len(resp.Data), numBatches)
+	}
+	// Ascending: each ID must be less than the next (UUID string sort).
+	for i := 1; i < len(resp.Data); i++ {
+		if resp.Data[i-1].ID > resp.Data[i].ID {
+			t.Errorf("asc: batch %d (%s) should sort before batch %d (%s)", i-1, resp.Data[i-1].ID, i, resp.Data[i].ID)
+		}
+	}
+}
+
+// TestListBatchesOrderGlobalAcrossPages verifies that order=desc stays
+// descending across pages when using an ID cursor, not just within one page.
+func TestListBatchesOrderGlobalAcrossPages(t *testing.T) {
+	const numBatches, pageSize = 7, 3
+
+	handler := setupTestHandler()
+	storeTestBatches(t, handler, numBatches)
+
+	for _, order := range []string{"asc", "desc"} {
+		t.Run(order, func(t *testing.T) {
+			var ids []string
+			after := ""
+			for page := 0; page < numBatches+1; page++ {
+				rr, resp := listBatchesPageOrdered(t, handler, pageSize, after, order)
+				if rr.Code != http.StatusOK {
+					t.Fatalf("page %d: status %d: %s", page, rr.Code, rr.Body.String())
+				}
+				for _, b := range resp.Data {
+					ids = append(ids, b.ID)
+				}
+				if !resp.HasMore {
+					break
+				}
+				if resp.LastID == nil || *resp.LastID == "" {
+					t.Fatalf("page %d: has_more but no last_id", page)
+				}
+				after = *resp.LastID
+			}
+
+			if len(ids) != numBatches {
+				t.Fatalf("got %d batches, want %d", len(ids), numBatches)
+			}
+			// Verify global ordering across pages.
+			for i := 1; i < len(ids); i++ {
+				if order == "desc" && ids[i-1] < ids[i] {
+					t.Errorf("desc: page boundary broke order: %s before %s", ids[i-1], ids[i])
+				}
+				if order == "asc" && ids[i-1] > ids[i] {
+					t.Errorf("asc: page boundary broke order: %s before %s", ids[i-1], ids[i])
+				}
+			}
+		})
+	}
+}
+
+// TestListBatchesRejectsInvalidOrder verifies that an invalid order value
+// returns a 400 error.
+func TestListBatchesRejectsInvalidOrder(t *testing.T) {
+	handler := setupTestHandler()
+	storeTestBatches(t, handler, 3)
+
+	rr, _ := listBatchesPageOrdered(t, handler, 10, "", "invalid")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400: %s", rr.Code, rr.Body.String())
 	}
 }

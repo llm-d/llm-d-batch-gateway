@@ -84,12 +84,13 @@ func (pt *ProgressTracker) Run(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			pt.mu.Lock()
-			dirty := pt.dirty
 			pt.dirty = false
 			pt.mu.Unlock()
-			if dirty {
-				pt.push(ctx)
-			}
+			// Always push on every tick, even when counts are unchanged: the
+			// fenced DB write is the processor's only ownership/cancel check,
+			// and a quiet interval (long-running requests, no completions) must
+			// still detect an epoch bump or a cancel (issue #713).
+			pt.push(ctx)
 		}
 	}
 }

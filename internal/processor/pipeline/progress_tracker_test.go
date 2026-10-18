@@ -62,3 +62,33 @@ func TestProgressTracker_Run(t *testing.T) {
 		})
 	}
 }
+
+// TestProgressTracker_PushesOnEveryTickWithoutResults (issue #713) verifies
+// that the tracker pushes on every tick even when no results have arrived.
+// Before the fix, a quiet interval (long-running requests, no completions)
+// skipped the push entirely, so the processor never detected an epoch bump
+// or a cancel until a result finally arrived.
+func TestProgressTracker_PushesOnEveryTickWithoutResults(t *testing.T) {
+	updater := &countingUpdater{}
+	// Short interval so the test is fast; no results will be recorded.
+	tracker := NewProgressTracker(10, updater, "test-job", 20*time.Millisecond, logr.Discard())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = tracker.Run(ctx)
+	}()
+
+	// Wait for at least 3 ticks without recording any results.
+	time.Sleep(80 * time.Millisecond)
+	cancel()
+	<-done
+
+	// The initial push + at least 3 ticks = at least 4 pushes.
+	// Before the fix, only the initial push would happen (the ticker ticks
+	// but dirty=false skips the push).
+	if calls := updater.getCalls(); calls < 4 {
+		t.Fatalf("push calls during quiet interval = %d, want >= 4 (initial + 3 ticks)", calls)
+	}
+}
