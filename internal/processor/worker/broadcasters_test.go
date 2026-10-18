@@ -366,17 +366,18 @@ func TestBroadcasterRegistry_MisClaimCompetingReplicas(t *testing.T) {
 	pendingC.Store(pipeline.RequestItem{RequestID: "req-owned", CustomID: "c-1"})
 	chC := make(chan pipeline.ResultItem, 1)
 	groupC.Subscribe(chC, pendingC.Has)
-	groupC.Start()
 
 	// B's batch ends elsewhere; its stale claim lapses and the redelivery
 	// reaches its rightful owner.
 	cancelB()
+	regB.Wait()
 	if _, err := rdb.ZAdd(context.Background(), idxKey, redis.Z{
 		Member: "req-owned",
 		Score:  float64(time.Now().Add(-time.Hour).UnixMilli()),
 	}).Result(); err != nil {
 		t.Fatalf("backdate claim lease: %v", err)
 	}
+	groupC.Start()
 
 	select {
 	case result := <-chC:
