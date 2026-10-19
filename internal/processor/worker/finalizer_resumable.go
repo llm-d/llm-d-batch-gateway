@@ -289,17 +289,19 @@ func (p *Processor) assembleResumableArtifacts(
 		return nil, "", "", fmt.Errorf("resolve artifact folder: %w", err)
 	}
 
+	outputFileID := stableFileID(jobID, metrics.FileTypeOutput, dbJob.Epoch)
 	output := &artifactWriter{
 		storage: p.files.storage,
 		folder:  folder,
-		key:     ucom.FileStorageName(stableFileID(jobID, metrics.FileTypeOutput, dbJob.Epoch), jobOutputStorageName(jobID)),
-		fileID:  stableFileID(jobID, metrics.FileTypeOutput, dbJob.Epoch),
+		key:     ucom.FileStorageName(outputFileID, jobOutputStorageName(jobID)),
+		fileID:  outputFileID,
 	}
+	errorFileID := stableFileID(jobID, metrics.FileTypeError, dbJob.Epoch)
 	errorW := &artifactWriter{
 		storage: p.files.storage,
 		folder:  folder,
-		key:     ucom.FileStorageName(stableFileID(jobID, metrics.FileTypeError, dbJob.Epoch), jobErrorStorageName(jobID)),
-		fileID:  stableFileID(jobID, metrics.FileTypeError, dbJob.Epoch),
+		key:     ucom.FileStorageName(errorFileID, jobErrorStorageName(jobID)),
+		fileID:  errorFileID,
 	}
 	// Abort is a no-op for a writer that never opened.
 	defer func() {
@@ -377,11 +379,11 @@ func (p *Processor) assembleResumableArtifacts(
 		}
 	}
 
-	outputFileID, err := output.commit(ctx, p, dbJob, jobInfo, jobOutputStorageName(jobID))
+	outputFileID, err = output.commit(ctx, p, dbJob, jobInfo, jobOutputStorageName(jobID))
 	if err != nil {
 		return nil, "", "", err
 	}
-	errorFileID, err := errorW.commit(ctx, p, dbJob, jobInfo, jobErrorStorageName(jobID))
+	errorFileID, err = errorW.commit(ctx, p, dbJob, jobInfo, jobErrorStorageName(jobID))
 	if err != nil {
 		// The output artifact may already be committed with a file record;
 		// surface the partial results so the failed-status fallback can
@@ -533,8 +535,8 @@ func (w *artifactWriter) commit(ctx context.Context, p *Processor, dbJob *db.Bat
 
 // verifyExisting re-reads the committed artifact and checks it matches the
 // bytes this incarnation would have written. The artifact key is derived
-// from the batch and file type, so a match proves the stored object holds
-// this batch's artifact rather than a colliding leftover.
+// from the batch, file type, and ownership epoch, so a match proves the
+// stored object holds this batch's artifact rather than a colliding leftover.
 func (w *artifactWriter) verifyExisting(ctx context.Context) error {
 	reader, _, err := w.storage.Retrieve(ctx, w.key, w.folder)
 	if err != nil {
