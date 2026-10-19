@@ -1,7 +1,7 @@
 # Resumable Batch Jobs Design
 
-- **Revision**: 1
-- **Last Updated**: 2026-10-14
+- **Revision**: 2
+- **Last Updated**: 2026-10-19
 - **Issue**: [#645](https://github.com/llm-d/llm-d-batch-gateway/issues/645)
 
 ---
@@ -100,9 +100,13 @@ one generation the entry set is frozen once finalization began, so a
 same-generation retry re-derives the same key and verifies the committed
 bytes. The winning file IDs are published solely through the fenced terminal
 transition; artifacts committed by losing generations are never referenced
-by a terminal document, and their file records expire and are removed by the
-file GC. The terminal transition is fenced and idempotent, so a crash
-mid-finalization is safely retried by whoever owns the batch next.
+by a terminal document. Losing artifacts and their file records expire after
+the configured output expiration (90 days by default) and are removed by the
+file GC; when output expiration is disabled they are never collected — the
+batch-gc purges only the per-request result objects, so disabled expiration
+means losing artifacts persist indefinitely. The terminal transition is
+fenced and idempotent, so a crash mid-finalization is safely retried by
+whoever owns the batch next.
 
 ---
 
