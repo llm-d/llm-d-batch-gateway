@@ -91,7 +91,17 @@ multipart upload — there are no pod-local output files. Artifact routing
 matches the sync pipeline's classification: a line carrying an error object
 goes to the error file, while a failed request whose result preserved a
 non-2xx HTTP response goes to the output file (the entries row keeps no error
-code for those). The terminal transition is fenced and idempotent, so a crash
+code for those). Artifact keys are scoped by the ownership epoch, so a
+re-finalization after a requeue (which bumps the epoch) writes its own keys:
+it is never blocked by — and never clobbers — an artifact committed by an
+earlier generation whose terminal write failed, even when the replacement
+resolved additional entries in between and derives different bytes. Within
+one generation the entry set is frozen once finalization began, so a
+same-generation retry re-derives the same key and verifies the committed
+bytes. The winning file IDs are published solely through the fenced terminal
+transition; artifacts committed by losing generations are never referenced
+by a terminal document, and their file records expire and are removed by the
+file GC. The terminal transition is fenced and idempotent, so a crash
 mid-finalization is safely retried by whoever owns the batch next.
 
 ---

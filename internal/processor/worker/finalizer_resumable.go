@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"strconv"
 
 	"github.com/go-logr/logr"
 	"golang.org/x/sync/errgroup"
@@ -268,8 +269,10 @@ func (p *Processor) purgeResultObjects(ctx context.Context, jobID, tenantID stri
 // request counts and file IDs. Each page's objects are prefetched and
 // verified (size and SHA-256) with bounded concurrency — resumable.
 // finalize_concurrency parallel fetches — and then written in ordinal order.
-// Artifact file IDs are derived from the batch, so a re-finalization
-// targets the same keys.
+// Artifact file IDs are derived from the batch and the ownership epoch, so
+// a re-finalization after a requeue (which bumps the epoch) writes fresh
+// keys instead of colliding with an earlier generation's committed
+// artifacts.
 //
 // notExecutedCode renders non-terminal entries as synthetic not-executed
 // error lines, for terminalizing a batch that must not resume execution; an
@@ -289,14 +292,14 @@ func (p *Processor) assembleResumableArtifacts(
 	output := &artifactWriter{
 		storage: p.files.storage,
 		folder:  folder,
-		key:     ucom.FileStorageName(stableFileID(jobID, metrics.FileTypeOutput), jobOutputStorageName(jobID)),
-		fileID:  stableFileID(jobID, metrics.FileTypeOutput),
+		key:     ucom.FileStorageName(stableFileID(jobID, metrics.FileTypeOutput, dbJob.Epoch), jobOutputStorageName(jobID)),
+		fileID:  stableFileID(jobID, metrics.FileTypeOutput, dbJob.Epoch),
 	}
 	errorW := &artifactWriter{
 		storage: p.files.storage,
 		folder:  folder,
-		key:     ucom.FileStorageName(stableFileID(jobID, metrics.FileTypeError), jobErrorStorageName(jobID)),
-		fileID:  stableFileID(jobID, metrics.FileTypeError),
+		key:     ucom.FileStorageName(stableFileID(jobID, metrics.FileTypeError, dbJob.Epoch), jobErrorStorageName(jobID)),
+		fileID:  stableFileID(jobID, metrics.FileTypeError, dbJob.Epoch),
 	}
 	// Abort is a no-op for a writer that never opened.
 	defer func() {
@@ -391,11 +394,15 @@ func (p *Processor) assembleResumableArtifacts(
 // artifactWriter lazily opens and finally commits one finalization artifact.
 // An artifact with no entries is never created; its file ID stays empty.
 //
-// A re-finalization of a batch whose earlier incarnation committed the
-// artifact (crash between artifact commit and terminal write) re-derives the
-// same key, so OpenStream refuses with ErrFileExists: the writer then runs in
-// existing mode — no bytes are written, but what this incarnation would write
-// is hashed and counted, then verified against the stored object at commit.
+// A same-generation retry of a finalization that already committed the
+// artifact (an ambiguous terminal-write response within one ownership
+// epoch — the entry set is frozen once finalization began) re-derives the
+// same key, so OpenStream refuses with ErrFileExists: the writer then runs
+// in existing mode — no bytes are written, but what this incarnation would
+// write is hashed and counted, then verified against the stored object at
+// commit. A retry from a later generation derives a different (epoch-scoped)
+// key and writes its own artifact; the earlier generation's object is a
+// loser that no terminal document references.
 type artifactWriter struct {
 	storage  filesapi.BatchFilesClient
 	folder   string
@@ -556,9 +563,18 @@ func (w *artifactWriter) abort(ctx context.Context) error {
 	return err
 }
 
-// stableFileID derives an artifact file ID from the batch and file type, so
-// re-finalization writes the same artifact keys.
-func stableFileID(batchID string, fileType metrics.FileType) string {
-	u := uuid.NewSHA1(uuid.NameSpaceOID, []byte(batchID+"\x00"+string(fileType)))
+// stableFileID derives an artifact file ID from the batch, file type, and
+// ownership epoch, so each ownership generation writes its own artifact
+// keys. A re-finalization after a requeue — which always bumps the epoch
+// (dequeue, GC reclaim, restart claim) — targets a fresh key and can never
+// be blocked by, or clobber, an artifact committed by an earlier generation
+// whose terminal write failed; the entry set is frozen within one
+// generation once finalization began, so a same-generation retry re-derives
+// the same key and bytes (the writer's existing-artifact verification).
+// Artifacts committed by losing generations are never referenced by a
+// terminal document; their file records expire and the file GC collects
+// them.
+func stableFileID(batchID string, fileType metrics.FileType, epoch int64) string {
+	u := uuid.NewSHA1(uuid.NameSpaceOID, []byte(batchID+"\x00"+string(fileType)+"\x00"+strconv.FormatInt(epoch, 10)))
 	return "file_" + u.String()
 }

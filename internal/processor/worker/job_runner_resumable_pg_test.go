@@ -246,7 +246,7 @@ func TestRunJob_Resumable_RequeueClaimResume(t *testing.T) {
 
 	// Output artifact: both incarnations' objects, in input order.
 	outLines := readArtifactLines(t, env,
-		ucom.FileStorageName(stableFileID(jobID, metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID)))
 	if len(outLines) != 2 {
 		t.Fatalf("output artifact lines = %d, want 2", len(outLines))
 	}
