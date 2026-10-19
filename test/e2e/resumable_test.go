@@ -474,8 +474,10 @@ func waitForFinalizationKillWindow(t *testing.T, client *openai.Client, batchID 
 // batch enters the finalizing phase (the whole artifact-assembly window);
 // the precise window is deterministically guarded by the Postgres-backed
 // worker scenario. When even the finalizing phase completes before the
-// delete lands, the batch simply finalized and the completion assertions
-// below still hold; the scenario never fails spuriously.
+// delete lands, the batch simply finalized: the completion assertions
+// below still hold, and the scenario is then skipped naming the missed
+// window — a bare pass would silently claim an interruption that never
+// happened, and a hard fail would flake on a genuinely narrow window.
 //
 // The delete is a force-delete (grace period 0): finalization runs on a
 // context detached from SIGTERM by design, so a graceful delete would let
@@ -513,9 +515,6 @@ func doTestResumableFinalizationInterrupt(t *testing.T) {
 	case killWindowFinalizingPhase:
 		t.Logf("batch %s: finalization under way; force-deleting the processor pod "+
 			"mid-phase before the artifact commit was observed", batchID)
-	case killWindowMissed:
-		t.Logf("batch %s finalized before a kill window opened; asserting completion "+
-			"without an interruption this run", batchID)
 	}
 
 	if window != killWindowMissed {
@@ -564,4 +563,12 @@ func doTestResumableFinalizationInterrupt(t *testing.T) {
 	// Every request accounted for exactly once: full custom_id coverage
 	// across the output and error files, with no duplicates.
 	validateBatchResults(t, batch, *results)
+
+	// A missed kill window is a degraded run, not a happy-path pass: the
+	// batch completed (asserted above), but no interruption was exercised.
+	// The window is genuinely narrow, so the scenario is skipped with its
+	// reason rather than failed.
+	if window == killWindowMissed {
+		t.Skipf("batch %s finalized before a kill window opened; no finalization interruption was exercised this run", batchID)
+	}
 }

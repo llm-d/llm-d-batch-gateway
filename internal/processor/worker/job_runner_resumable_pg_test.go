@@ -454,18 +454,7 @@ func TestRunJob_Resumable_InterruptedFinalizationCompletesAfterRequeue(t *testin
 	// finalization (proving the staging) and once after the replacement
 	// completes (proving it never clobbered them).
 	assertInterruptedArtifacts := func() {
-		t.Helper()
-		staleOutLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 1))
-		if len(staleOutLines) != 1 || staleOutLines[0].ID != stableBatchRequestID(jobID, "req-1") {
-			t.Fatalf("interrupted generation's output artifact = %+v, want its original single-result contents", staleOutLines)
-		}
-		staleErrLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeError, 1))
-		if len(staleErrLines) != 1 || staleErrLines[0].ID != stableBatchRequestID(jobID, "req-2") {
-			t.Fatalf("interrupted generation's error artifact = %+v, want the not-executed req-2 line", staleErrLines)
-		}
-		if staleErrLines[0].Error == nil || staleErrLines[0].Error.Code != string(batch_types.ErrCodeBatchFailed) {
-			t.Fatalf("interrupted generation's error line = %+v, want code %s", staleErrLines[0].Error, batch_types.ErrCodeBatchFailed)
-		}
+		env.assertLosingArtifacts(t, 1, stableBatchRequestID(jobID, "req-1"), stableBatchRequestID(jobID, "req-2"))
 	}
 	assertInterruptedArtifacts()
 
@@ -564,7 +553,11 @@ func TestRunJob_Resumable_InterruptedFinalizationCompletesAfterRequeue(t *testin
 		if !ok || len(choices) != 1 {
 			t.Fatalf("output line %d body = %+v, want one choice", i, outLines[i].Response.Body)
 		}
-		if text, ok := choices[0].(map[string]any)["text"]; !ok || text != wantText {
+		choice, ok := choices[0].(map[string]any)
+		if !ok {
+			t.Fatalf("output line %d choice = %+v, want an object", i, choices[0])
+		}
+		if text, ok := choice["text"]; !ok || text != wantText {
 			t.Fatalf("output line %d choice text = %v, want %q", i, text, wantText)
 		}
 	}

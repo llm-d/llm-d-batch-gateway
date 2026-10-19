@@ -308,6 +308,27 @@ func (e *durableJobEnv) artifactKey(fileType metrics.FileType, epoch int64) stri
 	return ucom.FileStorageName(e.artifactFileID(fileType, epoch), storageName)
 }
 
+// assertLosingArtifacts asserts the losing generation's committed artifacts
+// at the given ownership epoch: the output artifact still holds its original
+// single-result contents — the checkpointed entry's request line — and the
+// error artifact still holds the unresolved entry's not-executed line. The
+// winning generation's finalization wrote fresh epoch-scoped keys, so both
+// survive untouched as unreferenced losers.
+func (e *durableJobEnv) assertLosingArtifacts(t *testing.T, epoch int64, outputRequestID, errorRequestID string) {
+	t.Helper()
+	staleOutLines := readArtifactLines(t, e, e.artifactKey(metrics.FileTypeOutput, epoch))
+	if len(staleOutLines) != 1 || staleOutLines[0].ID != outputRequestID {
+		t.Fatalf("interrupted generation's output artifact = %+v, want its original single-result contents", staleOutLines)
+	}
+	staleErrLines := readArtifactLines(t, e, e.artifactKey(metrics.FileTypeError, epoch))
+	if len(staleErrLines) != 1 || staleErrLines[0].ID != errorRequestID {
+		t.Fatalf("interrupted generation's error artifact = %+v, want the not-executed line for %s", staleErrLines, errorRequestID)
+	}
+	if staleErrLines[0].Error == nil || staleErrLines[0].Error.Code != string(batch_types.ErrCodeBatchFailed) {
+		t.Fatalf("interrupted generation's error line = %+v, want code %s", staleErrLines[0].Error, batch_types.ErrCodeBatchFailed)
+	}
+}
+
 // pendingLineEntry builds the activation entry of one unfinished input line.
 func pendingLineEntry(jobID, customID string, ordinal int64) db.ResumableActivationEntry {
 	return db.ResumableActivationEntry{
@@ -1583,17 +1604,7 @@ func TestFinalizeResumableJob_RefinalizesAfterNewCheckpoints(t *testing.T) {
 	// contents, and the epoch-2 error artifact still holds req-2's
 	// not-executed line. Both stay in storage as unreferenced losers until
 	// their file records expire and the file GC collects them.
-	staleOutLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
-	if len(staleOutLines) != 1 || staleOutLines[0].ID != stableBatchRequestID(jobID, "req-1") {
-		t.Fatalf("interrupted generation's output artifact = %+v, want its original single-result contents", staleOutLines)
-	}
-	staleErrLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeError, 2))
-	if len(staleErrLines) != 1 || staleErrLines[0].ID != stableBatchRequestID(jobID, "req-2") {
-		t.Fatalf("interrupted generation's error artifact = %+v, want the not-executed req-2 line", staleErrLines)
-	}
-	if staleErrLines[0].Error == nil || staleErrLines[0].Error.Code != string(batch_types.ErrCodeBatchFailed) {
-		t.Fatalf("interrupted generation's error line = %+v, want code %s", staleErrLines[0].Error, batch_types.ErrCodeBatchFailed)
-	}
+	env.assertLosingArtifacts(t, 2, stableBatchRequestID(jobID, "req-1"), stableBatchRequestID(jobID, "req-2"))
 
 	// The terminal document references no error artifact for the winning
 	// generation: it produced no error lines, so the losing generation's
