@@ -290,11 +290,22 @@ func (e *durableJobEnv) runResumedJob(t *testing.T, task *db.BatchJobPriority) {
 	<-e.runResumedJobAsync(t, task)
 }
 
-// artifactFileID derives the artifact file ID for the batch's current
-// ownership epoch — the epoch the env's jobItem carries, which each test
-// stages to the epoch its finalization runs at.
-func (e *durableJobEnv) artifactFileID(fileType metrics.FileType) string {
-	return stableFileID(e.jobItem.ID, fileType, e.jobItem.Epoch)
+// artifactFileID derives the artifact file ID for the batch at the given
+// ownership epoch — the epoch the finalization under test runs at. Every
+// call site states the epoch explicitly, so a test can never silently read
+// a stale epoch off the mutable jobItem.
+func (e *durableJobEnv) artifactFileID(fileType metrics.FileType, epoch int64) string {
+	return stableFileID(e.jobItem.ID, fileType, epoch)
+}
+
+// artifactKey derives the storage object key of one of the batch's
+// finalization artifacts at the given ownership epoch.
+func (e *durableJobEnv) artifactKey(fileType metrics.FileType, epoch int64) string {
+	storageName := jobOutputStorageName(e.jobItem.ID)
+	if fileType == metrics.FileTypeError {
+		storageName = jobErrorStorageName(e.jobItem.ID)
+	}
+	return ucom.FileStorageName(e.artifactFileID(fileType, epoch), storageName)
 }
 
 // pendingLineEntry builds the activation entry of one unfinished input line.
@@ -469,8 +480,8 @@ func TestRunJob_Resumable_CompletesDurablePipeline(t *testing.T) {
 	if status.RequestCounts != wantCounts {
 		t.Fatalf("counts = %+v, want %+v", status.RequestCounts, wantCounts)
 	}
-	outFileID := env.artifactFileID(metrics.FileTypeOutput)
-	errFileID := env.artifactFileID(metrics.FileTypeError)
+	outFileID := env.artifactFileID(metrics.FileTypeOutput, 1)
+	errFileID := env.artifactFileID(metrics.FileTypeError, 1)
 	if status.OutputFileID == nil || *status.OutputFileID != outFileID {
 		t.Fatalf("output_file_id = %v, want %s", status.OutputFileID, outFileID)
 	}
@@ -495,7 +506,7 @@ func TestRunJob_Resumable_CompletesDurablePipeline(t *testing.T) {
 
 	// Output artifact: the completed entries' objects plus the preserved 403,
 	// in input order.
-	outKey := ucom.FileStorageName(outFileID, jobOutputStorageName(jobID))
+	outKey := env.artifactKey(metrics.FileTypeOutput, 1)
 	outLines := readArtifactLines(t, env, outKey)
 	if len(outLines) != 3 {
 		t.Fatalf("output artifact lines = %d, want 3", len(outLines))
@@ -511,7 +522,7 @@ func TestRunJob_Resumable_CompletesDurablePipeline(t *testing.T) {
 	}
 
 	// Error artifact: the rejected entry's model_not_found object.
-	errKey := ucom.FileStorageName(errFileID, jobErrorStorageName(jobID))
+	errKey := env.artifactKey(metrics.FileTypeError, 1)
 	errLines := readArtifactLines(t, env, errKey)
 	if len(errLines) != 1 {
 		t.Fatalf("error artifact lines = %d, want 1", len(errLines))
@@ -669,15 +680,13 @@ func TestRunPollingLoop_ResumableRouting(t *testing.T) {
 		}
 
 		// Output artifact: the checkpointed object of the completed entry.
-		outLines := readArtifactLines(t, env,
-			ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+		outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
 		if len(outLines) != 1 || outLines[0].ID != stableBatchRequestID(jobID, "req-1") {
 			t.Fatalf("output artifact = %+v, want the checkpointed req-1 line", outLines)
 		}
 
 		// Error artifact: the pending entry as a not-executed cancelled line.
-		errLines := readArtifactLines(t, env,
-			ucom.FileStorageName(env.artifactFileID(metrics.FileTypeError), jobErrorStorageName(jobID)))
+		errLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeError, 2))
 		if len(errLines) != 1 || errLines[0].ID != stableBatchRequestID(jobID, "req-2") {
 			t.Fatalf("error artifact = %+v, want the not-executed req-2 line", errLines)
 		}
@@ -816,14 +825,12 @@ func TestRunJob_Resumable_PickupRouting(t *testing.T) {
 				t.Fatalf("counts = %+v, want %+v", status.RequestCounts, wantCounts)
 			}
 
-			outLines := readArtifactLines(t, env,
-				ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+			outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
 			if len(outLines) != 1 || outLines[0].ID != stableBatchRequestID(jobID, "req-1") {
 				t.Fatalf("output artifact = %+v, want the checkpointed req-1 line", outLines)
 			}
 
-			errLines := readArtifactLines(t, env,
-				ucom.FileStorageName(env.artifactFileID(metrics.FileTypeError), jobErrorStorageName(jobID)))
+			errLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeError, 2))
 			if len(errLines) != 1 || errLines[0].ID != stableBatchRequestID(jobID, "req-2") {
 				t.Fatalf("error artifact = %+v, want the not-executed req-2 line", errLines)
 			}
@@ -976,8 +983,7 @@ func TestRunJob_Resumable_ResumeSkipsCheckpointedEntries(t *testing.T) {
 	}
 
 	// Output artifact: both incarnations' objects, in input order.
-	outLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+	outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
 	if len(outLines) != 2 {
 		t.Fatalf("output artifact lines = %d, want 2", len(outLines))
 	}
@@ -1043,11 +1049,11 @@ func TestRunJob_Resumable_IntegrityMismatchFailsTheJob(t *testing.T) {
 	if status.RequestCounts != wantCounts {
 		t.Fatalf("counts = %+v, want %+v (the checkpointed entry's counts)", status.RequestCounts, wantCounts)
 	}
-	outFileID := env.artifactFileID(metrics.FileTypeOutput)
+	outFileID := env.artifactFileID(metrics.FileTypeOutput, 2)
 	if status.OutputFileID == nil || *status.OutputFileID != outFileID {
 		t.Fatalf("output_file_id = %v, want the committed artifact %s", status.OutputFileID, outFileID)
 	}
-	outLines := readArtifactLines(t, env, ucom.FileStorageName(outFileID, jobOutputStorageName(jobID)))
+	outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
 	if len(outLines) != 1 || outLines[0].ID != stableBatchRequestID(jobID, "req-1") {
 		t.Fatalf("output artifact = %+v, want the checkpointed req-1 line", outLines)
 	}
@@ -1247,7 +1253,7 @@ func TestFinalizeResumableJob_IntegrityFailureLeavesRowRetryable(t *testing.T) {
 	}
 
 	// The aborted output artifact was never committed.
-	outKey := ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID))
+	outKey := env.artifactKey(metrics.FileTypeOutput, 2)
 	if _, _, err := env.filesClient.Retrieve(context.Background(), outKey, folder); err == nil {
 		t.Fatal("aborted output artifact is visible in storage")
 	}
@@ -1319,7 +1325,7 @@ func TestFinalizeResumableJob_ErrorArtifactCommitFailureKeepsOutput(t *testing.T
 	)
 
 	// Fail only the error artifact's commit; the output artifact commits.
-	errKey := ucom.FileStorageName(env.artifactFileID(metrics.FileTypeError), jobErrorStorageName(jobID))
+	errKey := env.artifactKey(metrics.FileTypeError, 2)
 	env.p.files.storage = &failingCommitFilesClient{
 		MockBatchFilesClient: env.p.files.storage.(*mockfiles.MockBatchFilesClient),
 		failKey:              errKey,
@@ -1336,8 +1342,8 @@ func TestFinalizeResumableJob_ErrorArtifactCommitFailureKeepsOutput(t *testing.T
 
 	// The committed output artifact survives in storage with its file record,
 	// instead of being orphaned by a degraded failed write.
-	outFileID := env.artifactFileID(metrics.FileTypeOutput)
-	outLines := readArtifactLines(t, env, ucom.FileStorageName(outFileID, jobOutputStorageName(jobID)))
+	outFileID := env.artifactFileID(metrics.FileTypeOutput, 2)
+	outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
 	if len(outLines) != 1 || outLines[0].ID != stableBatchRequestID(jobID, "req-1") {
 		t.Fatalf("output artifact = %+v, want the checkpointed req-1 line", outLines)
 	}
@@ -1365,7 +1371,7 @@ func TestFinalizeResumableJob_ErrorArtifactCommitFailureKeepsOutput(t *testing.T
 	if status.OutputFileID == nil || *status.OutputFileID != outFileID {
 		t.Fatalf("output_file_id = %v, want the committed artifact %s", status.OutputFileID, outFileID)
 	}
-	if status.ErrorFileID == nil || *status.ErrorFileID != env.artifactFileID(metrics.FileTypeError) {
+	if status.ErrorFileID == nil || *status.ErrorFileID != env.artifactFileID(metrics.FileTypeError, 2) {
 		t.Fatalf("error_file_id = %v, want the error artifact", status.ErrorFileID)
 	}
 }
@@ -1432,8 +1438,7 @@ func TestFinalizeResumableJob_CancelDuringFinalization(t *testing.T) {
 		t.Fatalf("error_file_id = %v, want nil", status.ErrorFileID)
 	}
 
-	outLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+	outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
 	wantIDs := []string{stableBatchRequestID(jobID, "req-1"), stableBatchRequestID(jobID, "req-2")}
 	if len(outLines) != len(wantIDs) {
 		t.Fatalf("output artifact lines = %d, want %d", len(outLines), len(wantIDs))
@@ -1553,7 +1558,7 @@ func TestFinalizeResumableJob_RefinalizesAfterNewCheckpoints(t *testing.T) {
 	// partial artifact the interrupted epoch-2 finalization committed (which
 	// stays in storage as an unreferenced loser until its file record
 	// expires and the file GC collects it).
-	if stale := stableFileID(jobID, metrics.FileTypeOutput, 2); *status.OutputFileID == stale {
+	if stale := env.artifactFileID(metrics.FileTypeOutput, 2); *status.OutputFileID == stale {
 		t.Fatalf("output_file_id = the stale epoch-2 artifact %s, want the fresh epoch-3 artifact", stale)
 	}
 
@@ -1570,6 +1575,31 @@ func TestFinalizeResumableJob_RefinalizesAfterNewCheckpoints(t *testing.T) {
 		if outLines[i].ID != want {
 			t.Fatalf("output line %d id = %s, want %s", i, outLines[i].ID, want)
 		}
+	}
+
+	// Never clobbers: the replacement wrote fresh epoch-3 keys, so the
+	// interrupted generation's committed artifacts survive untouched — the
+	// epoch-2 output artifact still holds its original single-result
+	// contents, and the epoch-2 error artifact still holds req-2's
+	// not-executed line. Both stay in storage as unreferenced losers until
+	// their file records expire and the file GC collects them.
+	staleOutLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
+	if len(staleOutLines) != 1 || staleOutLines[0].ID != stableBatchRequestID(jobID, "req-1") {
+		t.Fatalf("interrupted generation's output artifact = %+v, want its original single-result contents", staleOutLines)
+	}
+	staleErrLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeError, 2))
+	if len(staleErrLines) != 1 || staleErrLines[0].ID != stableBatchRequestID(jobID, "req-2") {
+		t.Fatalf("interrupted generation's error artifact = %+v, want the not-executed req-2 line", staleErrLines)
+	}
+	if staleErrLines[0].Error == nil || staleErrLines[0].Error.Code != string(batch_types.ErrCodeBatchFailed) {
+		t.Fatalf("interrupted generation's error line = %+v, want code %s", staleErrLines[0].Error, batch_types.ErrCodeBatchFailed)
+	}
+
+	// The terminal document references no error artifact for the winning
+	// generation: it produced no error lines, so the losing generation's
+	// error artifact must not leak into the winner's file IDs.
+	if status.ErrorFileID != nil {
+		t.Fatalf("error_file_id = %v, want nil (the winning generation produced no error lines)", *status.ErrorFileID)
 	}
 }
 
@@ -1613,8 +1643,7 @@ func TestRunJob_Resumable_ArtifactFollowsInputOrderAcrossModels(t *testing.T) {
 		t.Fatalf("counts = %+v, want %+v", status.RequestCounts, wantCounts)
 	}
 
-	outLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+	outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 1))
 	wantIDs := []string{
 		stableBatchRequestID(jobID, "req-1"),
 		stableBatchRequestID(jobID, "req-2"),
@@ -1698,14 +1727,12 @@ func TestRunJob_Resumable_MidRunCancelFinalizesThroughTheFence(t *testing.T) {
 		t.Fatalf("counts = %+v, want %+v", status.RequestCounts, wantCounts)
 	}
 
-	outLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+	outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
 	if len(outLines) != 1 || outLines[0].ID != stableBatchRequestID(jobID, "req-1") {
 		t.Fatalf("output artifact = %+v, want the checkpointed req-1 line", outLines)
 	}
 
-	errLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeError), jobErrorStorageName(jobID)))
+	errLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeError, 2))
 	if len(errLines) != 1 || errLines[0].ID != stableBatchRequestID(jobID, "req-2") {
 		t.Fatalf("error artifact = %+v, want the req-2 line", errLines)
 	}
@@ -1759,14 +1786,12 @@ func TestRunJob_Resumable_MidRunExpiryFinalizesThroughTheFence(t *testing.T) {
 		t.Fatalf("counts = %+v, want %+v", status.RequestCounts, wantCounts)
 	}
 
-	outLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+	outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
 	if len(outLines) != 1 || outLines[0].ID != stableBatchRequestID(jobID, "req-1") {
 		t.Fatalf("output artifact = %+v, want the checkpointed req-1 line", outLines)
 	}
 
-	errLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeError), jobErrorStorageName(jobID)))
+	errLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeError, 2))
 	if len(errLines) != 1 || errLines[0].ID != stableBatchRequestID(jobID, "req-2") {
 		t.Fatalf("error artifact = %+v, want the req-2 line", errLines)
 	}
@@ -1884,13 +1909,11 @@ func TestRunJob_Resumable_CancelDuringPreprocessingFinalizesThroughTheFence(t *t
 
 	// The checkpointed entry's object is the output artifact; the pending
 	// entry is a not-executed cancelled line.
-	outLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+	outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
 	if len(outLines) != 1 || outLines[0].ID != stableBatchRequestID(jobID, "req-1") {
 		t.Fatalf("output artifact = %+v, want the checkpointed req-1 line", outLines)
 	}
-	errLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeError), jobErrorStorageName(jobID)))
+	errLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeError, 2))
 	if len(errLines) != 1 || errLines[0].ID != stableBatchRequestID(jobID, "req-2") {
 		t.Fatalf("error artifact = %+v, want the not-executed req-2 line", errLines)
 	}
@@ -1954,13 +1977,11 @@ func TestRunJob_Resumable_ExpiryDuringPreprocessingFinalizesThroughTheFence(t *t
 		t.Fatalf("counts = %+v, want %+v", status.RequestCounts, wantCounts)
 	}
 
-	outLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+	outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
 	if len(outLines) != 1 || outLines[0].ID != stableBatchRequestID(jobID, "req-1") {
 		t.Fatalf("output artifact = %+v, want the checkpointed req-1 line", outLines)
 	}
-	errLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeError), jobErrorStorageName(jobID)))
+	errLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeError, 2))
 	if len(errLines) != 1 || errLines[0].ID != stableBatchRequestID(jobID, "req-2") {
 		t.Fatalf("error artifact = %+v, want the not-executed req-2 line", errLines)
 	}
@@ -2014,14 +2035,12 @@ func TestHandleJobError_Resumable_MidRunFailureFinalizesThroughTheFence(t *testi
 		t.Fatalf("counts = %+v, want %+v", status.RequestCounts, wantCounts)
 	}
 
-	outLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+	outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 2))
 	if len(outLines) != 1 || outLines[0].ID != stableBatchRequestID(jobID, "req-1") {
 		t.Fatalf("output artifact = %+v, want the checkpointed req-1 line", outLines)
 	}
 
-	errLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeError), jobErrorStorageName(jobID)))
+	errLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeError, 2))
 	if len(errLines) != 1 || errLines[0].ID != stableBatchRequestID(jobID, "req-2") {
 		t.Fatalf("error artifact = %+v, want the not-executed req-2 line", errLines)
 	}
@@ -2098,7 +2117,7 @@ func TestRunJob_Resumable_PanicAfterCheckpointLeavesRowRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetFolderNameByTenantID: %v", err)
 	}
-	outKey := ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID))
+	outKey := env.artifactKey(metrics.FileTypeOutput, 2)
 	if _, _, err := env.filesClient.Retrieve(context.Background(), outKey, folder); err == nil {
 		t.Fatal("aborted output artifact is visible in storage")
 	}

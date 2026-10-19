@@ -34,7 +34,6 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/batch_utils"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/clientset"
-	ucom "github.com/llm-d/llm-d-batch-gateway/internal/util/com"
 	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 )
 
@@ -244,9 +243,10 @@ func TestRunJob_Resumable_RequeueClaimResume(t *testing.T) {
 		t.Fatalf("entry state = %+v, want 2 completed", state)
 	}
 
-	// Output artifact: both incarnations' objects, in input order.
-	outLines := readArtifactLines(t, env,
-		ucom.FileStorageName(env.artifactFileID(metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+	// Output artifact: both incarnations' objects, in input order. The
+	// finalization ran at the epoch the requeue/claim chain left behind:
+	// epoch 3 (1 seeded, 2 from the requeue, 3 from the claim).
+	outLines := readArtifactLines(t, env, env.artifactKey(metrics.FileTypeOutput, 3))
 	if len(outLines) != 2 {
 		t.Fatalf("output artifact lines = %d, want 2", len(outLines))
 	}
