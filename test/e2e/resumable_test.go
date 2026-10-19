@@ -24,18 +24,20 @@ import (
 	"time"
 
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
 )
 
 // testResumable covers the resumable pipeline every batch runs on,
 // regardless of dispatch transport: result checkpointing, cancel semantics,
 // multi-worker throughput, and recovery from Processor pod loss on single-
-// and multi-replica fleets.
+// and multi-replica fleets — mid-execution and mid-finalization.
 func testResumable(t *testing.T) {
 	t.Run("HappyPath", doTestResumableHappyPath)
 	t.Run("CancelMidFlight", doTestResumableCancelMidFlight)
 	t.Run("MultiWorker", doTestResumableMultiWorker)
 	skipIf(t, !testKubectlAvailable, "skipping: kubectl not available", "PodLoss", doTestResumablePodLoss)
 	skipIf(t, !testKubectlAvailable, "skipping: kubectl not available", "MultiReplica", doTestResumableMultiReplica)
+	skipIf(t, !testKubectlAvailable, "skipping: kubectl not available", "FinalizationInterrupt", doTestResumableFinalizationInterrupt)
 }
 
 // doTestResumableHappyPath runs a small batch through the resumable pipeline
@@ -372,4 +374,194 @@ func doTestResumableMultiReplica(t *testing.T) {
 	if results.OutputLines != requests {
 		t.Errorf("output lines = %d, want %d", results.OutputLines, requests)
 	}
+}
+
+// finalizationKillWindow identifies the point in a batch's finalization at
+// which doTestResumableFinalizationInterrupt deletes the Processor pod.
+type finalizationKillWindow int
+
+const (
+	// killWindowMissed: the batch reached a terminal status before either
+	// window was observed; its finalization was not interrupted.
+	killWindowMissed finalizationKillWindow = iota
+	// killWindowCommitToTerminal is the precise crash window: the output
+	// artifact's file record is visible while the batch is still
+	// non-terminal — the observable edge between the artifact commit and
+	// the fenced terminal write.
+	killWindowCommitToTerminal
+	// killWindowFinalizingPhase is the broad fallback: the batch entered
+	// the finalizing phase (artifact assembly) without the file record
+	// having been observed yet.
+	killWindowFinalizingPhase
+)
+
+const (
+	// killWindowPollInterval is far tighter than the other polling helpers'
+	// cadence: the finalizing phase of a small batch lasts only a few
+	// hundred milliseconds, so a coarser poll can step over it entirely.
+	killWindowPollInterval = 100 * time.Millisecond
+	// killWindowListLimit is the files-list page size when watching for the
+	// output artifact's record. Listing orders by file ID, not creation
+	// time, so the record is not guaranteed to appear on an early page;
+	// request the maximum the API accepts.
+	killWindowListLimit = 10000
+)
+
+// waitForFinalizationKillWindow polls a non-terminal batch until one of the
+// finalization kill windows opens and reports which one. The artifact file
+// record is sampled before the batch status so that a poll landing in the
+// narrow commit-to-terminal-write window classifies as that edge rather
+// than as the finalizing phase containing it.
+func waitForFinalizationKillWindow(t *testing.T, client *openai.Client, batchID string, timeout time.Duration) finalizationKillWindow {
+	t.Helper()
+
+	outputFilename := fmt.Sprintf("batch_output_%s.jsonl", batchID)
+
+	deadline := time.Now().Add(timeout)
+	if d, ok := t.Deadline(); ok && d.Before(deadline) {
+		deadline = d.Add(-5 * time.Second)
+	}
+	for time.Now().Before(deadline) {
+		// Sample the file record first: it appears during artifact assembly,
+		// and a sample that lands in the commit-to-terminal-write window must
+		// win over the finalizing-phase fallback checked below.
+		page, err := client.Files.List(context.Background(), openai.FileListParams{
+			Purpose: param.NewOpt("batch_output"),
+			Limit:   param.NewOpt(int64(killWindowListLimit)),
+		})
+		if err != nil {
+			t.Fatalf("list files failed: %v", err)
+		}
+		recordCommitted := false
+		for _, f := range page.Data {
+			if f.Filename == outputFilename {
+				recordCommitted = true
+				break
+			}
+		}
+
+		b, err := client.Batches.Get(context.Background(), batchID)
+		if err != nil {
+			t.Fatalf("retrieve batch failed: %v", err)
+		}
+		if terminalBatchStatuses[b.Status] {
+			t.Logf("batch %s finalized (status %q) before a kill window opened", batchID, b.Status)
+			return killWindowMissed
+		}
+		if recordCommitted {
+			return killWindowCommitToTerminal
+		}
+		if b.Status == openai.BatchStatusFinalizing {
+			return killWindowFinalizingPhase
+		}
+		time.Sleep(killWindowPollInterval)
+	}
+	t.Fatalf("batch %s did not finalize within %v", batchID, timeout)
+	return killWindowMissed
+}
+
+// doTestResumableFinalizationInterrupt force-deletes the Processor pod while
+// a batch is finalizing and asserts the requeued replacement completes the
+// batch with every request accounted for exactly once and a complete output
+// artifact — the user-visible recovery for an interrupted finalization.
+//
+// The crash window is the gap between the output artifact's commit and the
+// fenced terminal write, observed through the files API: the artifact's
+// file record becomes visible while the batch is still non-terminal. The
+// pod is deleted the moment that edge is observed. That window is only
+// milliseconds wide — the fenced terminal write immediately follows the
+// artifact commit — so the watcher falls back to deleting as soon as the
+// batch enters the finalizing phase (the whole artifact-assembly window);
+// the precise window is deterministically guarded by the Postgres-backed
+// worker scenario. When even the finalizing phase completes before the
+// delete lands, the batch simply finalized and the completion assertions
+// below still hold; the scenario never fails spuriously.
+//
+// The delete is a force-delete (grace period 0): finalization runs on a
+// context detached from SIGTERM by design, so a graceful delete would let
+// the dying pod finish its terminal write before it exits. The workload
+// follows PodLoss (pinned simulator latency, staggered max_tokens) so
+// completion progress is observable whether the dispatcher forwards
+// serially (dev-deploy) or concurrently (CI).
+func doTestResumableFinalizationInterrupt(t *testing.T) {
+	// Generous: MultiReplica's requeued duplicates must all be forwarded
+	// through the serial pipeline before this test starts.
+	waitForDispatchQueueDrain(t, dispatcherReqQueue, 8*time.Minute)
+	pinSimLatency(t)
+
+	const requests = 12
+	lines := make([]string, 0, requests)
+	for i := 0; i < requests; i++ {
+		lines = append(lines, fmt.Sprintf(
+			`{"custom_id":"resumable-finalize-interrupt-%d","method":"POST","url":"/v1/chat/completions","body":{"model":"%s","max_tokens":%d,"messages":[{"role":"user","content":"slow %d"}]}}`,
+			i, testSimModel, 40+20*i, i))
+	}
+	fileID := mustCreateFile(t, fmt.Sprintf("resumable-finalize-interrupt-%s.jsonl", testRunID), strings.Join(lines, "\n"))
+	batchID := mustCreateBatch(t, fileID)
+
+	_, _ = waitForBatchStatus(t, batchID, 2*time.Minute, openai.BatchStatusInProgress)
+
+	// The watcher budget must cover the batch's whole execution, not just
+	// its finalization: on a serially-forwarding dispatcher the staggered
+	// workload runs ~4-5 minutes before finalizing (same budget class as
+	// PodLoss's post-kill completion window).
+	window := waitForFinalizationKillWindow(t, newClient(), batchID, 8*time.Minute)
+	switch window {
+	case killWindowCommitToTerminal:
+		t.Logf("batch %s: output artifact committed while still non-terminal; "+
+			"force-deleting the processor pod inside the commit-to-terminal-write window", batchID)
+	case killWindowFinalizingPhase:
+		t.Logf("batch %s: finalization under way; force-deleting the processor pod "+
+			"mid-phase before the artifact commit was observed", batchID)
+	case killWindowMissed:
+		t.Logf("batch %s finalized before a kill window opened; asserting completion "+
+			"without an interruption this run", batchID)
+	}
+
+	if window != killWindowMissed {
+		selector := fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/component=processor", testHelmRelease)
+		if out, err := exec.Command("kubectl", "delete", "pod",
+			"-n", testNamespace, "-l", selector,
+			"--grace-period=0", "--force", "--wait=true",
+		).CombinedOutput(); err != nil {
+			t.Fatalf("force-delete processor pod: %v\n%s", err, out)
+		}
+		t.Logf("force-deleted processor pod mid-finalization; waiting for replacement")
+
+		// Diagnostic only — which side of the race between the delete and
+		// the fenced terminal write won must not gate the outcome.
+		if b, err := newClient().Batches.Get(context.Background(), batchID); err == nil && !terminalBatchStatuses[b.Status] {
+			t.Logf("finalization interrupted: batch %s is still %q after its owner was killed", batchID, b.Status)
+		}
+
+		waitForProcessorReady(t, 2*time.Minute)
+	}
+
+	batch, results := waitForBatchStatus(t, batchID, 8*time.Minute, openai.BatchStatusCompleted)
+
+	if batch.RequestCounts.Total != requests {
+		t.Errorf("total = %d, want %d", batch.RequestCounts.Total, requests)
+	}
+	if batch.RequestCounts.Completed != requests {
+		t.Errorf("completed = %d, want %d", batch.RequestCounts.Completed, requests)
+	}
+	if batch.RequestCounts.Failed != 0 {
+		t.Errorf("failed = %d, want 0", batch.RequestCounts.Failed)
+	}
+	if batch.OutputFileID == "" || batch.ErrorFileID != "" {
+		t.Errorf("terminal files = output:%q error:%q, want non-empty output and empty error",
+			batch.OutputFileID, batch.ErrorFileID)
+	}
+	if results == nil {
+		t.Fatal("expected non-nil results")
+	}
+	if results.OutputLines != requests {
+		t.Errorf("output lines = %d, want %d", results.OutputLines, requests)
+	}
+	if results.ErrorLines != 0 {
+		t.Errorf("error lines = %d, want 0", results.ErrorLines)
+	}
+	// Every request accounted for exactly once: full custom_id coverage
+	// across the output and error files, with no duplicates.
+	validateBatchResults(t, batch, *results)
 }
