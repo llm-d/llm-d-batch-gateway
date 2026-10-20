@@ -109,7 +109,7 @@ increase(batch_reconciler_errors_total{namespace="<release namespace>"}[<window>
 
 ## Garbage Collector — Event Purge
 
-The GC process periodically purges expired rows from the `batch_events` table (default every 30s, configurable via `event_purge.interval` in the GC config). The purger shares the metrics endpoint above and uses the `batch_gc_` prefix — the going-forward prefix for batch-gc process metrics (the legacy `batch_reconciler_` family predates the collector and purger living in the same binary; it is not renamed for dashboard compatibility).
+The GC process periodically purges expired rows from the `batch_events` table (default every 30s). Non-Helm deployments can tune the cadence via `event_purge.interval` in the GC config file; the Helm chart does not expose `event_purge`, so chart users always run with the 30s default. The purger shares the metrics endpoint above and uses the `batch_gc_` prefix — the going-forward prefix for batch-gc process metrics (the legacy `batch_reconciler_` family predates the collector and purger living in the same binary; it is not renamed for dashboard compatibility).
 
 **Purge Metrics:**
 
