@@ -52,10 +52,15 @@ func doTestConcurrentBatches(t *testing.T) {
 		t.Logf("submitted batch %d: %s (file: %s)", i, batchIDs[i], fid)
 	}
 
-	// Wait for all batches concurrently.
+	// Wait for all batches concurrently. The goroutines must use
+	// waitForBatchStatusErr rather than waitForBatchStatus: t.Fatalf is only
+	// legal on the test goroutine, and called from a spawned goroutine it
+	// would exit just that goroutine, leave the result slot nil, and crash
+	// the verification loop below with a nil dereference (INFERENG-10907).
 	type result struct {
 		index int
 		batch *openai.Batch
+		err   error
 	}
 	results := make([]result, batchCount)
 	var wg sync.WaitGroup
@@ -63,14 +68,26 @@ func doTestConcurrentBatches(t *testing.T) {
 	for i, bid := range batchIDs {
 		go func(idx int, batchID string) {
 			defer wg.Done()
-			b, _ := waitForBatchStatus(t, batchID, 5*time.Minute, openai.BatchStatusCompleted)
-			results[idx] = result{index: idx, batch: b}
+			b, _, err := waitForBatchStatusErr(t, batchID, 5*time.Minute, openai.BatchStatusCompleted)
+			results[idx] = result{index: idx, batch: b, err: err}
 		}(i, bid)
 	}
 	wg.Wait()
 
+	// Report wait failures from the test goroutine. A failed wait leaves its
+	// batch nil, so the verification loop below must skip it instead of
+	// dereferencing it.
+	for _, r := range results {
+		if r.err != nil {
+			t.Errorf("batch %d (%s): wait failed: %v", r.index, batchIDs[r.index], r.err)
+		}
+	}
+
 	// Verify each batch completed independently.
 	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
 		b := r.batch
 		if b.RequestCounts.Total != 2 {
 			t.Errorf("batch %d (%s): total = %d, want 2", r.index, b.ID, b.RequestCounts.Total)
@@ -90,33 +107,58 @@ func doTestConcurrentBatches(t *testing.T) {
 }
 
 // TestWaitForBatchStatusGoroutineSafety guards the INFERENG-10907 fix:
-// waitForBatchStatusErr must be safe to call from non-test goroutines. With
-// the previous t.Fatalf-based helper, this exact pattern crashed the whole
-// test binary with a nil-pointer dereference on any wait failure (a
-// transient API error, a wrong terminal status, or a timeout), taking down
-// every subtest scheduled after it.
+// waiting on batches from goroutines must go through waitForBatchStatusErr,
+// never the t.Fatalf-based waitForBatchStatus wrapper. t.Fatalf only
+// terminates the calling goroutine, so a single failed wait (a transient
+// API error, a wrong terminal status, or a timeout) used to leave the
+// result slot nil and crash the test binary in the caller's verification
+// loop, taking down every subtest scheduled after it.
+//
+// It mirrors doTestConcurrentBatches' exact shape — per-goroutine result
+// slots, errors collected and reported only after wg.Wait, and a
+// verification loop that skips failed waits — against batch IDs that do
+// not exist, the failure shape that used to SIGSEGV the binary.
 func TestWaitForBatchStatusGoroutineSafety(t *testing.T) {
-	const goroutines = 5
-	errs := make([]error, goroutines)
+	const batchCount = 5
+	type result struct {
+		index int
+		batch *openai.Batch
+		err   error
+	}
+	results := make([]result, batchCount)
 	var wg sync.WaitGroup
-	wg.Add(goroutines)
-	for i := range goroutines {
+	wg.Add(batchCount)
+	for i := range batchCount {
 		go func(idx int) {
 			defer wg.Done()
 			// A batch ID that does not exist: the first poll fails, which is
 			// exactly the failure shape that used to SIGSEGV the binary.
-			_, _, errs[idx] = waitForBatchStatusErr(t,
+			b, _, err := waitForBatchStatusErr(t,
 				fmt.Sprintf("batch-goroutine-safety-%s-%d", testRunID, idx),
 				30*time.Second, openai.BatchStatusCompleted)
+			results[idx] = result{index: idx, batch: b, err: err}
 		}(i)
 	}
 	wg.Wait()
 
-	for i, err := range errs {
-		if err == nil {
-			t.Errorf("goroutine %d: expected an error for a nonexistent batch", i)
+	// Every wait must fail: the batches do not exist. A nil error would send
+	// a garbage batch to the guarded verification loop below.
+	for _, r := range results {
+		if r.err == nil {
+			t.Errorf("batch %d: expected an error for a nonexistent batch", r.index)
 		}
 	}
-	// Reaching here at all is the regression: the fatal-helper version of
-	// this pattern never returned from wg.Wait with a live process.
+
+	// The doTestConcurrentBatches verification shape: failed waits are
+	// reported from the test goroutine and their nil batches are skipped,
+	// never dereferenced. Reaching the end of this test at all is the
+	// regression — the fatal-wrapper version of this pattern never returned
+	// from wg.Wait with a live process.
+	for _, r := range results {
+		if r.err != nil {
+			t.Logf("batch %d: wait failed as expected: %v", r.index, r.err)
+			continue
+		}
+		t.Errorf("batch %d: unexpected batch %q for a nonexistent ID", r.index, r.batch.ID)
+	}
 }

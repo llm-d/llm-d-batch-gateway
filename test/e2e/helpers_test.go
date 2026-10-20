@@ -197,8 +197,10 @@ var terminalBatchStatuses = map[openai.BatchStatus]bool{
 	openai.BatchStatusCancelled: true,
 }
 
-// waitForBatchStatus polls a batch until it reaches one of the target
-// statuses and validates the terminal batch fields and result files. It
+// waitForBatchStatus polls a batch by ID until its status is one of the
+// target statuses, then validates the terminal batch fields and result
+// files. It fatals if the batch reaches a terminal state that is not one
+// of the targets, or if the timeout (or test deadline) is exceeded. It
 // calls t.Fatalf on failure, so it must only be called from the test
 // goroutine; goroutines must use waitForBatchStatusErr instead.
 func waitForBatchStatus(t *testing.T, batchID string, timeout time.Duration, targets ...openai.BatchStatus) (*openai.Batch, *batchResults) {
@@ -524,11 +526,10 @@ type batchResultLine struct {
 	} `json:"error"`
 }
 
-// fetchBatchResults downloads the output and error files for a batch
-// and returns their contents. It also verifies Content-Disposition headers.
-// fetchBatchResults downloads a batch's output and error files and counts
-// their lines. It calls t.Fatalf on download failure, so it must only be
-// called from the test goroutine; goroutines must use fetchBatchResultsE.
+// fetchBatchResults downloads a batch's output and error files, verifies
+// their Content-Disposition headers, and returns their contents with line
+// counts. It calls t.Fatalf on download failure, so it must only be called
+// from the test goroutine; goroutines must use fetchBatchResultsE instead.
 func fetchBatchResults(t *testing.T, batch *openai.Batch) batchResults {
 	t.Helper()
 
