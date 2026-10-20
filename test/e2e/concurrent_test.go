@@ -26,6 +26,7 @@ import (
 
 func testConcurrent(t *testing.T) {
 	t.Run("MultipleBatches", doTestConcurrentBatches)
+	t.Run("WaitGoroutineSafety", doTestWaitForBatchStatusGoroutineSafety)
 }
 
 // doTestConcurrentBatches submits 5 batches with different input files
@@ -106,19 +107,26 @@ func doTestConcurrentBatches(t *testing.T) {
 	}
 }
 
-// TestWaitForBatchStatusGoroutineSafety guards the INFERENG-10907 fix:
+// doTestWaitForBatchStatusGoroutineSafety guards the INFERENG-10907 fix:
 // waiting on batches from goroutines must go through waitForBatchStatusErr,
 // never the t.Fatalf-based waitForBatchStatus wrapper. t.Fatalf only
 // terminates the calling goroutine, so a single failed wait (a transient
-// API error, a wrong terminal status, or a timeout) used to leave the
-// result slot nil and crash the test binary in the caller's verification
-// loop, taking down every subtest scheduled after it.
+// API error, a wrong terminal status, or a timeout) used to kill the
+// goroutine before it wrote its result slot; the caller's unguarded
+// verification loop then dereferenced the nil batch and crashed the whole
+// test binary, taking down every subtest scheduled after it.
 //
 // It mirrors doTestConcurrentBatches' exact shape — per-goroutine result
 // slots, errors collected and reported only after wg.Wait, and a
 // verification loop that skips failed waits — against batch IDs that do
-// not exist, the failure shape that used to SIGSEGV the binary.
-func TestWaitForBatchStatusGoroutineSafety(t *testing.T) {
+// not exist, the failure shape that used to crash the binary. If the
+// fatal wrapper ever sneaks back into this pattern, the goroutine dies
+// before writing its result slot, the zero-valued entry fails the
+// "expected an error" assertion below, and the test still catches it —
+// without crashing the binary. It runs under TestE2E (not as a standalone
+// top-level test) so filtered CI runs that drive TestE2E subtests
+// execute it too.
+func doTestWaitForBatchStatusGoroutineSafety(t *testing.T) {
 	const batchCount = 5
 	type result struct {
 		index int
