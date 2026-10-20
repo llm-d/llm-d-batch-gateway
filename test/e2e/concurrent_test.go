@@ -141,24 +141,20 @@ func TestWaitForBatchStatusGoroutineSafety(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Every wait must fail: the batches do not exist. A nil error would send
-	// a garbage batch to the guarded verification loop below.
-	for _, r := range results {
-		if r.err == nil {
-			t.Errorf("batch %d: expected an error for a nonexistent batch", r.index)
-		}
-	}
-
 	// The doTestConcurrentBatches verification shape: failed waits are
 	// reported from the test goroutine and their nil batches are skipped,
-	// never dereferenced. Reaching the end of this test at all is the
-	// regression — the fatal-wrapper version of this pattern never returned
-	// from wg.Wait with a live process.
+	// never dereferenced. Every wait must fail here (the batches do not
+	// exist), and reaching the end of this test at all is the regression —
+	// the fatal-wrapper version of this pattern never returned from wg.Wait
+	// with a live process.
 	for _, r := range results {
 		if r.err != nil {
 			t.Logf("batch %d: wait failed as expected: %v", r.index, r.err)
 			continue
 		}
-		t.Errorf("batch %d: unexpected batch %q for a nonexistent ID", r.index, r.batch.ID)
+		t.Errorf("batch %d: expected an error for a nonexistent batch", r.index)
+		if r.batch != nil {
+			t.Errorf("batch %d: unexpected batch %q for a nonexistent ID", r.index, r.batch.ID)
+		}
 	}
 }

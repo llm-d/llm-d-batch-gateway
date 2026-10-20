@@ -255,8 +255,9 @@ func waitForBatchStatusErr(t *testing.T, batchID string, timeout time.Duration, 
 			if err != nil {
 				return nil, nil, err
 			}
-			// Both validators only use t.Errorf/t.Logf, which are safe from
-			// non-test goroutines.
+			// Everything below only reports failures with t.Errorf/t.Logf
+			// (all downloads went through fetchBatchResultsE above), which is
+			// safe from non-test goroutines: no t.Fatalf may run on this path.
 			validateTerminalBatch(t, b)
 			validateBatchResults(t, b, res)
 			return b, &res, nil
@@ -503,10 +504,16 @@ func validateTerminalBatch(t *testing.T, b *openai.Batch) {
 	}
 }
 
-// batchResults holds downloaded output/error file bodies and derived line counts.
+// batchResults holds downloaded input/output/error file bodies and derived
+// line counts. The input file is fetched alongside the output and error
+// files so that every download failure surfaces as an error from
+// fetchBatchResultsE instead of a t.Fatalf inside a validator, which would
+// not be goroutine-safe.
 type batchResults struct {
+	InputLines  int
 	OutputLines int
 	ErrorLines  int
+	InputBody   string
 	OutputBody  string
 	ErrorBody   string
 }
@@ -526,10 +533,11 @@ type batchResultLine struct {
 	} `json:"error"`
 }
 
-// fetchBatchResults downloads a batch's output and error files, verifies
-// their Content-Disposition headers, and returns their contents with line
-// counts. It calls t.Fatalf on download failure, so it must only be called
-// from the test goroutine; goroutines must use fetchBatchResultsE instead.
+// fetchBatchResults downloads a batch's input, output, and error files,
+// verifies the output/error Content-Disposition headers, and returns their
+// contents with line counts. It calls t.Fatalf on download failure, so it
+// must only be called from the test goroutine; goroutines must use
+// fetchBatchResultsE instead.
 func fetchBatchResults(t *testing.T, batch *openai.Batch) batchResults {
 	t.Helper()
 
@@ -541,12 +549,26 @@ func fetchBatchResults(t *testing.T, batch *openai.Batch) batchResults {
 }
 
 // fetchBatchResultsE is the error-returning core of fetchBatchResults, safe
-// to call from non-test goroutines.
+// to call from non-test goroutines: every failure is returned, never passed
+// to t.Fatalf.
 func fetchBatchResultsE(t *testing.T, batch *openai.Batch) (batchResults, error) {
 	t.Helper()
 
 	var result batchResults
 	client := newClient()
+
+	if batch.InputFileID != "" {
+		resp, err := client.Files.Content(context.Background(), batch.InputFileID)
+		if err != nil {
+			return result, fmt.Errorf("download input file for batch %s failed: %w", batch.ID, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		result.InputBody = strings.TrimSpace(string(body))
+		if result.InputBody != "" {
+			result.InputLines = len(strings.Split(result.InputBody, "\n"))
+		}
+	}
 
 	if batch.OutputFileID != "" {
 		resp, err := client.Files.Content(context.Background(), batch.OutputFileID)
@@ -582,18 +604,22 @@ func fetchBatchResultsE(t *testing.T, batch *openai.Batch) (batchResults, error)
 		}
 	}
 
-	t.Logf("file lines: output=%d, error=%d (batch total=%d)",
-		result.OutputLines, result.ErrorLines, batch.RequestCounts.Total)
+	t.Logf("file lines: input=%d, output=%d, error=%d (batch total=%d)",
+		result.InputLines, result.OutputLines, result.ErrorLines, batch.RequestCounts.Total)
 
 	return result, nil
 }
 
-// validateBatchResults checks all universal invariants on the batch results:
+// validateBatchResults checks all universal invariants on the batch results
+// (which must include the input file body, fetched by fetchBatchResultsE):
 //   - input lines == Total, output lines == Completed, error lines == Failed
 //   - every non-empty input custom_id appears in either the output or error file
 //   - output lines have valid response structure (status_code=200, choices, model)
 //   - error lines have valid error structure (non-empty code and message)
 //   - no duplicate custom_ids within output or error files
+//
+// It only reports failures with t.Errorf/t.Logf, so it is safe to call from
+// non-test goroutines.
 func validateBatchResults(t *testing.T, batch *openai.Batch, result batchResults) {
 	t.Helper()
 
@@ -696,24 +722,15 @@ func validateBatchResults(t *testing.T, batch *openai.Batch, result batchResults
 		}
 	}
 
-	// --- Download input file and validate custom_id coverage ---
-	client := newClient()
-	resp, err := client.Files.Content(context.Background(), batch.InputFileID)
-	if err != nil {
-		t.Fatalf("download input file failed: %v", err)
-	}
-	inputBytes, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	inputBody := strings.TrimSpace(string(inputBytes))
-
-	var inputLines int
-	if inputBody != "" {
-		inputLines = len(strings.Split(inputBody, "\n"))
-	}
+	// --- Validate input file custom_id coverage ---
+	// The input file was already downloaded by fetchBatchResultsE; a download
+	// failure there is a fetch error, not a validation failure, so this
+	// function stays free of t.Fatalf and remains goroutine-safe.
+	inputLines := result.InputLines
 	if int64(inputLines) != batch.RequestCounts.Total {
 		t.Errorf("input lines (%d) != batch total (%d)", inputLines, batch.RequestCounts.Total)
 	}
-	for i, line := range strings.Split(inputBody, "\n") {
+	for i, line := range strings.Split(result.InputBody, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
