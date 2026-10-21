@@ -155,7 +155,8 @@ func (b *ResultBroadcaster) Run(ctx context.Context) {
 			// The receive goroutine closes incomingCh when it exits. Wait for
 			// that close so Run cannot return while an in-flight receive is
 			// still able to claim a delivery.
-			<-incomingCh
+			for range incomingCh {
+			}
 			return
 
 		case received, ok := <-incomingCh:
