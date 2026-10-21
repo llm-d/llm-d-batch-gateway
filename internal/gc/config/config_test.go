@@ -398,6 +398,88 @@ file_client:
 	}
 }
 
+func TestLoad_EventPurge(t *testing.T) {
+	tests := []struct {
+		name         string
+		config       string
+		wantErr      bool
+		wantInterval time.Duration
+	}{
+		{
+			name: "defaults when event_purge absent",
+			config: `
+db_client:
+  type: "postgresql"
+file_client:
+  type: "fs"
+  fs:
+    base_path: "/tmp/files"
+`,
+			wantInterval: DefaultEventPurgeInterval,
+		},
+		{
+			name: "custom interval",
+			config: `
+db_client:
+  type: "postgresql"
+event_purge:
+  interval: 1m
+file_client:
+  type: "fs"
+  fs:
+    base_path: "/tmp/files"
+`,
+			wantInterval: time.Minute,
+		},
+		{
+			name: "error zero interval",
+			config: `
+db_client:
+  type: "postgresql"
+event_purge:
+  interval: 0s
+file_client:
+  type: "fs"
+  fs:
+    base_path: "/tmp/files"
+`,
+			wantErr: true,
+		},
+		{
+			name: "error negative interval",
+			config: `
+db_client:
+  type: "postgresql"
+event_purge:
+  interval: -1s
+file_client:
+  type: "fs"
+  fs:
+    base_path: "/tmp/files"
+`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Load(writeTempConfig(t, tt.config))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.EventPurge.Interval != tt.wantInterval {
+				t.Errorf("event_purge interval = %v, want %v", cfg.EventPurge.Interval, tt.wantInterval)
+			}
+		})
+	}
+}
+
 func TestLoad_MetricsAddr(t *testing.T) {
 	valid := []string{":9091", ":8080", ":1", ":65535"}
 	for _, addr := range valid {

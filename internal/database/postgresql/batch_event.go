@@ -31,9 +31,8 @@ import (
 )
 
 const (
-	eventChanBufSize   = 100
-	channelEvents      = "batch_events"
-	eventSweepInterval = 30 * time.Second
+	eventChanBufSize = 100
+	channelEvents    = "batch_events"
 
 	// eventRescanInterval is how often the dispatcher re-drains every
 	// subscribed job as a delivery backstop (see runEventDispatcher).
@@ -147,57 +146,27 @@ func (c *PostgresBatchEventClient) Close() error {
 	return nil
 }
 
-// PostgresBatchEventGC sweeps expired events independently of event producers
-// and consumers, sharing the GC process's existing batch database pool.
-type PostgresBatchEventGC struct {
-	pool   pgxPool
-	logger logr.Logger
+// PostgresBatchEventPurgeClient removes expired events, sharing the GC
+// process's existing batch database pool.
+type PostgresBatchEventPurgeClient struct {
+	pool pgxPool
 }
 
-var _ api.BatchEventGC = (*PostgresBatchEventGC)(nil)
+var _ api.BatchEventPurgeClient = (*PostgresBatchEventPurgeClient)(nil)
 
-func NewPostgresBatchEventGC(db *PostgresBatchDBClient, logger logr.Logger) (*PostgresBatchEventGC, error) {
+func NewPostgresBatchEventPurgeClient(db *PostgresBatchDBClient) (*PostgresBatchEventPurgeClient, error) {
 	if db == nil || db.pgCore == nil || db.pool == nil {
-		return nil, fmt.Errorf("batch database client is required for event GC")
+		return nil, fmt.Errorf("batch database client is required for event purge")
 	}
-	return &PostgresBatchEventGC{pool: db.pool, logger: logger}, nil
+	return &PostgresBatchEventPurgeClient{pool: db.pool}, nil
 }
 
-func (g *PostgresBatchEventGC) purgeExpired(ctx context.Context) (int64, error) {
-	result, err := g.pool.Exec(ctx, ecPurgeExpiredEventsSQL)
+func (c *PostgresBatchEventPurgeClient) PurgeExpiredEvents(ctx context.Context) (int64, error) {
+	result, err := c.pool.Exec(ctx, ecPurgeExpiredEventsSQL)
 	if err != nil {
 		return 0, fmt.Errorf("purge expired events: %w", err)
 	}
 	return result.RowsAffected(), nil
-}
-
-// Run sweeps once on startup and then every eventSweepInterval until cancelled.
-// The caller owns the batch database pool and must keep it open until Run exits.
-func (g *PostgresBatchEventGC) Run(ctx context.Context) error {
-	sweep := func() {
-		purged, err := g.purgeExpired(ctx)
-		if err != nil {
-			if ctx.Err() == nil {
-				g.logger.Error(err, "event GC: purge failed")
-			}
-		} else if purged > 0 {
-			g.logger.Info("event GC: purged expired events", "purged", purged)
-		}
-	}
-	if ctx.Err() != nil {
-		return nil
-	}
-	sweep()
-	ticker := time.NewTicker(eventSweepInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			sweep()
-		}
-	}
 }
 
 // NewPostgresBatchEventProducer creates an event client for the API server
