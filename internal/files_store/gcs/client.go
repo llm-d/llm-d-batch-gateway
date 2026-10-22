@@ -288,12 +288,14 @@ func (c *Client) ensureBucket(ctx context.Context, autoCreate bool, projectID st
 // backend still has; S3 retains its two-step pattern since its SDK offers no
 // equivalent conditional put that returns a distinguishable error.
 //
-// A Store rejected mid-stream for ErrFileTooLarge or ErrTooManyLines aborts the
-// upload instead of committing it: the writer's context is canceled and Close is
-// never called, so the SDK's resumable session is discarded and no object — not
-// even a partial one — exists at the key afterwards. A retry under the same
-// (fileName, folderName) therefore starts from a clean not-exists rather than
-// tripping the IfDoesNotExist precondition on a truncated object.
+// A Store that trips a mid-stream limit (ErrFileTooLarge, ErrTooManyLines) or
+// fails on any other copy error — including a source read failing after
+// partial data — aborts the upload instead of committing it: the writer's
+// context is canceled and Close is never called, so the SDK's resumable
+// session is discarded and no object — not even a partial one — exists at the
+// key afterwards. A retry under the same (fileName, folderName) therefore
+// starts from a clean not-exists rather than tripping the IfDoesNotExist
+// precondition on a truncated object.
 func (c *Client) Store(ctx context.Context, fileName, folderName string, fileSizeLimit, lineNumLimit int64, reader io.Reader) (
 	*api.BatchFileMetadata, error,
 ) {
@@ -307,7 +309,7 @@ func (c *Client) Store(ctx context.Context, fileName, folderName string, fileSiz
 
 	// wctx is bound to this object's upload: canceling it aborts the SDK's resumable
 	// upload. Close, by contrast, finalizes the session and commits whatever bytes
-	// were streamed — so canceling is the only way to reject a mid-stream limit
+	// were streamed — so canceling is the only way to reject a mid-stream failure
 	// without leaving a partial object behind.
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -317,20 +319,20 @@ func (c *Client) Store(ctx context.Context, fileName, folderName string, fileSiz
 		sizeHint = int64(l.Len())
 	}
 	w := c.newWriter(wctx, key, sizeHint)
-	// Copy to the writer. A write error is surfaced by Close (see Writer.Close docs),
-	// so we Close and prefer its errors over a mid-stream copy error — except when a
-	// size/line limit trips, where we cancel (abort) instead of committing partials.
 	_, copyErr := io.Copy(w, countingReader)
-	switch {
-	case errors.Is(copyErr, api.ErrFileTooLarge):
-		// The limit tripped mid-copy. Abort rather than commit the bytes received so
-		// far: cancel wctx (never Close — Close would finalize the session and commit
-		// a partial object under the new key).
+	if copyErr != nil {
+		// Abort on every copy error, not just the limit sentinels: a source read
+		// that fails mid-stream would otherwise leave Close committing a truncated
+		// object, and the retry would fail with ErrFileExists instead of storing
+		// cleanly on the not-exists precondition.
 		cancel()
-		return nil, api.ErrFileTooLarge
-	case errors.Is(copyErr, api.ErrTooManyLines):
-		cancel()
-		return nil, api.ErrTooManyLines
+		switch {
+		case errors.Is(copyErr, api.ErrFileTooLarge):
+			return nil, api.ErrFileTooLarge
+		case errors.Is(copyErr, api.ErrTooManyLines):
+			return nil, api.ErrTooManyLines
+		}
+		return nil, copyErr
 	}
 	closeErr := w.Close()
 	if err := errors.Join(copyErr, closeErr); err != nil {
