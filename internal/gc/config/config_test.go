@@ -19,6 +19,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -96,6 +97,43 @@ file_client:
 	}
 	if !cfg.FileClientCfg.S3Config.UsePathStyle {
 		t.Error("expected use_path_style to be true")
+	}
+}
+
+func TestLoad_GCSBackend(t *testing.T) {
+	path := writeTempConfig(t, `
+db_client:
+  type: "postgresql"
+file_client:
+  type: "gcs"
+  gcs:
+    bucket: "my-batch-bucket"
+    prefix: "batch/"
+    project_id: "my-project"
+    auto_create_bucket: true
+    verify_bucket_on_start: false
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FileClientCfg.Type != "gcs" {
+		t.Errorf("expected file_client.type gcs, got %s", cfg.FileClientCfg.Type)
+	}
+	if cfg.FileClientCfg.GCSConfig.Bucket != "my-batch-bucket" {
+		t.Errorf("expected bucket my-batch-bucket, got %s", cfg.FileClientCfg.GCSConfig.Bucket)
+	}
+	if cfg.FileClientCfg.GCSConfig.Prefix != "batch/" {
+		t.Errorf("expected prefix batch/, got %s", cfg.FileClientCfg.GCSConfig.Prefix)
+	}
+	if cfg.FileClientCfg.GCSConfig.ProjectID != "my-project" {
+		t.Errorf("expected project_id my-project, got %s", cfg.FileClientCfg.GCSConfig.ProjectID)
+	}
+	if !cfg.FileClientCfg.GCSConfig.AutoCreateBucket {
+		t.Error("expected auto_create_bucket to be true")
+	}
+	if cfg.FileClientCfg.GCSConfig.VerifyBucketOnStart {
+		t.Error("expected verify_bucket_on_start to be false")
 	}
 }
 
@@ -239,11 +277,36 @@ func TestLoad_ErrorInvalidFileClientType(t *testing.T) {
 db_client:
   type: "postgresql"
 file_client:
-  type: "gcs"
+  type: "xyz"
 `)
 	_, err := Load(path)
 	if err == nil {
 		t.Fatal("expected error for invalid file_client.type")
+	}
+	// ValidateType()'s message names fs/s3/gcs/mock (the shared valid set); gc's
+	// local mock rejection is a separate, more specific message (see below).
+	if !strings.Contains(err.Error(), "must be \"fs\", \"s3\", \"gcs\", or \"mock\"") {
+		t.Errorf("expected error message to mention the shared valid set fs/s3/gcs/mock, got: %v", err)
+	}
+}
+
+// TestLoad_ErrorMockFileClientTypeGC verifies gc rejects the mock backend even
+// though the shared ValidateType() accepts it: gc only supports the real object
+// stores (fs/s3/gcs). The rejection message is the gc-local one ("is not supported
+// by gc"), distinct from the shared "must be ..." message for unknown types.
+func TestLoad_ErrorMockFileClientTypeGC(t *testing.T) {
+	path := writeTempConfig(t, `
+db_client:
+  type: "postgresql"
+file_client:
+  type: "mock"
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for mock file_client.type in gc")
+	}
+	if !strings.Contains(err.Error(), "is not supported by gc") {
+		t.Errorf("expected 'is not supported by gc' rejection, got: %v", err)
 	}
 }
 
