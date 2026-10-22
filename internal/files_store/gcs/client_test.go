@@ -139,6 +139,29 @@ func (w *mockWriter) Close() error {
 	return nil
 }
 
+// errAfterReader serves its first failAfter bytes, then fails with the given
+// error (io.ErrUnexpectedEOF when nil) instead of returning EOF.
+type errAfterReader struct {
+	data      []byte
+	failAfter int
+	failed    bool
+}
+
+func (r *errAfterReader) Read(p []byte) (int, error) {
+	if r.failed {
+		return 0, io.ErrUnexpectedEOF
+	}
+	if len(r.data) <= r.failAfter {
+		n := copy(p, r.data)
+		r.data = r.data[n:]
+		return n, nil
+	}
+	n := copy(p, r.data[:r.failAfter])
+	r.data = nil
+	r.failed = true
+	return n, io.ErrUnexpectedEOF
+}
+
 // mockReader wraps stored bytes as an io.ReadCloser and reports size/mtime.
 type mockReader struct {
 	*bytes.Reader
@@ -380,6 +403,37 @@ func TestStore(t *testing.T) {
 		bucket.mu.Unlock()
 		if string(obj.data) != "original" {
 			t.Errorf("existing object must not be overwritten; want %q, got %q", "original", obj.data)
+		}
+	})
+
+	t.Run("aborted upload leaves no partial object and retry stores cleanly", func(t *testing.T) {
+		// Regression guard for a review finding: a source-read error that is
+		// neither limit sentinel must abort the upload, never committing the
+		// bytes read so far. Previously such an error fell through to Close,
+		// which finalized the resumable session and published a truncated
+		// object; the retry then hit ErrFileExists on the partial object.
+		bucket := newMockBucket()
+		client, _ := newTestClient(bucket, "")
+		key := testFolderName + "/partial.txt"
+
+		errReader := &errAfterReader{data: []byte("first chunk of data that will fail mid-read"), failAfter: 10}
+		_, err := client.Store(ctx, "partial.txt", testFolderName, 1024, 0, errReader)
+		if err == nil || errors.Is(err, api.ErrFileExists) {
+			t.Fatalf("expected the read error to surface, got %v", err)
+		}
+
+		if bucket.hasObject(key) {
+			t.Fatalf("failed Store must not leave a partial object under %s", key)
+		}
+
+		// The abort leaves a clean not-exists: the same key must now Store
+		// without tripping the IfDoesNotExist precondition on a ghost object.
+		md, err := client.Store(ctx, "partial.txt", testFolderName, 1024, 0, bytes.NewReader([]byte("complete content")))
+		if err != nil {
+			t.Fatalf("retry after aborted upload should succeed, got %v", err)
+		}
+		if md.Size != int64(len("complete content")) {
+			t.Errorf("expected size %d, got %d", len("complete content"), md.Size)
 		}
 	})
 }
