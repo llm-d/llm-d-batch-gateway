@@ -160,9 +160,13 @@ func gcsTestEnv(t *testing.T) context.Context {
 		t.Skip("GCS_TEST_EMULATOR=1 but no container runtime (docker/podman) available, skipping")
 	}
 
+	// A requested emulator that cannot start must fail the tests, not skip
+	// them: an image-pull failure, bad arguments, or readiness timeout would
+	// otherwise turn every GCS test into a skip while CI still reports green.
 	host, port, cleanup, err := startFakeGCSServer(tool)
 	if err != nil {
-		t.Skipf("failed to start fake-gcs-server, skipping: %v", err)
+		cleanup()
+		t.Fatalf("GCS_TEST_EMULATOR=1 but fake-gcs-server failed to start: %v", err)
 	}
 	t.Cleanup(cleanup)
 
@@ -244,17 +248,19 @@ func startFakeGCSServer(tool string) (host string, port int, cleanup func(), err
 
 // createFakeGCSBucket creates a bucket on fake-gcs-server via the JSON REST API.
 // This mirrors the surface GCS exposes (POST /storage/v1/b?project=…) without
-// pulling the SDK into a setup-side path.
+// pulling the SDK into a setup-side path. The request (and its body) is built
+// inside the retry loop: http.Client.Do consumes and closes the request body,
+// so a reused request would re-send an exhausted reader on the next attempt.
 func createFakeGCSBucket(host string, port int, bucket string) error {
 	endpoint := fmt.Sprintf("http://%s:%d", host, port)
-	body := []byte(fmt.Sprintf(`{"name":%q}`, bucket))
 	url := endpoint + "/storage/v1/b?project=fake-gcs-test-project"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
+	body := []byte(fmt.Sprintf(`{"name":%q}`, bucket))
 	for i := 0; i < 30; i++ {
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
@@ -646,8 +652,11 @@ func TestGCSGetContext(t *testing.T) {
 func TestGCSNewVerifyBucketOnStart(t *testing.T) {
 	gcsTestEnv(t)
 
+	// The name must stay within GCS's 63-character bucket-name limit even with
+	// the UUID appended, so the failure is the missing-bucket path the test
+	// targets — not an invalid-name error.
 	cfg := gcsclient.Config{
-		Bucket:              "definitely-nonexistent-batch-gateway-" + uuid.NewString(),
+		Bucket:              "missing-bucket-" + uuid.NewString(),
 		VerifyBucketOnStart: true,
 		AutoCreateBucket:    false,
 	}
