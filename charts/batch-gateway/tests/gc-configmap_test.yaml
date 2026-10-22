@@ -67,6 +67,33 @@ tests:
           path: data["config.yaml"]
           pattern: 'base_path: "/tmp/batch-gateway"'
 
+  - it: should render gcs file_client config when type is gcs
+    set:
+      global.fileClient.type: "gcs"
+      global.fileClient.gcs.bucket: "my-batch-bucket"
+      global.fileClient.gcs.prefix: "bg"
+      global.fileClient.gcs.projectId: "my-project"
+      global.fileClient.gcs.autoCreateBucket: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'type: "gcs"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'bucket: "my-batch-bucket"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'prefix: "bg"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'project_id: "my-project"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'auto_create_bucket: true'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'verify_bucket_on_start: true'
+
   - it: should not render ConfigMap when gc is disabled
     set:
       gc.enabled: false
