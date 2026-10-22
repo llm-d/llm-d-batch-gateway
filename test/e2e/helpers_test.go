@@ -196,9 +196,27 @@ var terminalBatchStatuses = map[openai.BatchStatus]bool{
 }
 
 // waitForBatchStatus polls a batch by ID until its status is one of the
-// target statuses. It fatals if the batch reaches a terminal state that is
-// not one of the targets, or if the timeout (or test deadline) is exceeded.
+// target statuses, then validates the terminal batch fields and result
+// files. It fatals if the batch reaches a terminal state that is not one
+// of the targets, or if the timeout (or test deadline) is exceeded. It
+// calls t.Fatalf on failure, so it must only be called from the test
+// goroutine; goroutines must use waitForBatchStatusErr instead.
 func waitForBatchStatus(t *testing.T, batchID string, timeout time.Duration, targets ...openai.BatchStatus) (*openai.Batch, *batchResults) {
+	t.Helper()
+
+	b, res, err := waitForBatchStatusErr(t, batchID, timeout, targets...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b, res
+}
+
+// waitForBatchStatusErr is the error-returning core of waitForBatchStatus:
+// the same polling and validation, but failures are returned instead of
+// passed to t.Fatalf, so it is safe to call from non-test goroutines.
+// (t.Fatalf only terminates the calling goroutine, which would leave the
+// caller's result slot empty and crash the test binary on a nil batch.)
+func waitForBatchStatusErr(t *testing.T, batchID string, timeout time.Duration, targets ...openai.BatchStatus) (*openai.Batch, *batchResults, error) {
 	t.Helper()
 
 	client := newClient()
@@ -218,7 +236,7 @@ func waitForBatchStatus(t *testing.T, batchID string, timeout time.Duration, tar
 	for time.Now().Before(deadline) {
 		b, err := client.Batches.Get(context.Background(), batchID)
 		if err != nil {
-			t.Fatalf("retrieve batch failed: %v", err)
+			return nil, nil, fmt.Errorf("retrieve batch %s failed: %w", batchID, err)
 		}
 		lastBatch = b
 
@@ -227,24 +245,33 @@ func waitForBatchStatus(t *testing.T, batchID string, timeout time.Duration, tar
 			b.RequestCounts.Completed, b.RequestCounts.Failed)
 
 		if terminalBatchStatuses[b.Status] {
-			validateTerminalBatch(t, b)
 			if !targetSet[b.Status] {
-				t.Fatalf("batch %s reached terminal status %q, will never become %v",
+				return nil, nil, fmt.Errorf("batch %s reached terminal status %q, will never become %v",
 					batchID, b.Status, targets)
 			}
-			res := fetchBatchResults(t, b)
+			res, err := fetchBatchResultsE(t, b)
+			if err != nil {
+				return nil, nil, err
+			}
+			// Everything below only reports failures with t.Errorf/t.Logf
+			// (all downloads went through fetchBatchResultsE above), which is
+			// safe from non-test goroutines: no t.Fatalf may run on this path.
+			validateTerminalBatch(t, b)
 			validateBatchResults(t, b, res)
-			return b, &res
+			return b, &res, nil
 		}
 		if targetSet[b.Status] {
-			return b, nil
+			return b, nil, nil
 		}
 		time.Sleep(pollInterval)
 	}
 
-	t.Fatalf("batch %s did not reach status %v within %v (last status: %q)",
-		batchID, targets, timeout, lastBatch.Status)
-	return nil, nil // unreachable
+	last := "<none>"
+	if lastBatch != nil {
+		last = string(lastBatch.Status)
+	}
+	return nil, nil, fmt.Errorf("batch %s did not reach status %v within %v (last status: %q)",
+		batchID, targets, timeout, last)
 }
 
 // waitForTerminalBatch polls a batch until it reaches any terminal status and
@@ -471,10 +498,16 @@ func validateTerminalBatch(t *testing.T, b *openai.Batch) {
 	}
 }
 
-// batchResults holds downloaded output/error file bodies and derived line counts.
+// batchResults holds downloaded input/output/error file bodies and derived
+// line counts. The input file is fetched alongside the output and error
+// files so that every download failure surfaces as an error from
+// fetchBatchResultsE instead of a t.Fatalf inside a validator, which would
+// not be goroutine-safe.
 type batchResults struct {
+	InputLines  int
 	OutputLines int
 	ErrorLines  int
+	InputBody   string
 	OutputBody  string
 	ErrorBody   string
 }
@@ -494,18 +527,47 @@ type batchResultLine struct {
 	} `json:"error"`
 }
 
-// fetchBatchResults downloads the output and error files for a batch
-// and returns their contents. It also verifies Content-Disposition headers.
+// fetchBatchResults downloads a batch's input, output, and error files,
+// verifies the output/error Content-Disposition headers, and returns their
+// contents with line counts. It calls t.Fatalf on download failure, so it
+// must only be called from the test goroutine; goroutines must use
+// fetchBatchResultsE instead.
 func fetchBatchResults(t *testing.T, batch *openai.Batch) batchResults {
+	t.Helper()
+
+	res, err := fetchBatchResultsE(t, batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// fetchBatchResultsE is the error-returning core of fetchBatchResults, safe
+// to call from non-test goroutines: every failure is returned, never passed
+// to t.Fatalf.
+func fetchBatchResultsE(t *testing.T, batch *openai.Batch) (batchResults, error) {
 	t.Helper()
 
 	var result batchResults
 	client := newClient()
 
+	if batch.InputFileID != "" {
+		resp, err := client.Files.Content(context.Background(), batch.InputFileID)
+		if err != nil {
+			return result, fmt.Errorf("download input file for batch %s failed: %w", batch.ID, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		result.InputBody = strings.TrimSpace(string(body))
+		if result.InputBody != "" {
+			result.InputLines = len(strings.Split(result.InputBody, "\n"))
+		}
+	}
+
 	if batch.OutputFileID != "" {
 		resp, err := client.Files.Content(context.Background(), batch.OutputFileID)
 		if err != nil {
-			t.Fatalf("download output file failed: %v", err)
+			return result, fmt.Errorf("download output file for batch %s failed: %w", batch.ID, err)
 		}
 		wantCD := fmt.Sprintf(`attachment; filename=%q`, fmt.Sprintf("batch_output_%s.jsonl", batch.ID))
 		if cd := resp.Header.Get("Content-Disposition"); cd != wantCD {
@@ -522,7 +584,7 @@ func fetchBatchResults(t *testing.T, batch *openai.Batch) batchResults {
 	if batch.ErrorFileID != "" {
 		resp, err := client.Files.Content(context.Background(), batch.ErrorFileID)
 		if err != nil {
-			t.Fatalf("download error file failed: %v", err)
+			return result, fmt.Errorf("download error file for batch %s failed: %w", batch.ID, err)
 		}
 		wantCD := fmt.Sprintf(`attachment; filename=%q`, fmt.Sprintf("batch_error_%s.jsonl", batch.ID))
 		if cd := resp.Header.Get("Content-Disposition"); cd != wantCD {
@@ -536,18 +598,22 @@ func fetchBatchResults(t *testing.T, batch *openai.Batch) batchResults {
 		}
 	}
 
-	t.Logf("file lines: output=%d, error=%d (batch total=%d)",
-		result.OutputLines, result.ErrorLines, batch.RequestCounts.Total)
+	t.Logf("file lines: input=%d, output=%d, error=%d (batch total=%d)",
+		result.InputLines, result.OutputLines, result.ErrorLines, batch.RequestCounts.Total)
 
-	return result
+	return result, nil
 }
 
-// validateBatchResults checks all universal invariants on the batch results:
+// validateBatchResults checks all universal invariants on the batch results
+// (which must include the input file body, fetched by fetchBatchResultsE):
 //   - input lines == Total, output lines == Completed, error lines == Failed
 //   - every non-empty input custom_id appears in either the output or error file
 //   - output lines have valid response structure (status_code=200, choices, model)
 //   - error lines have valid error structure (non-empty code and message)
 //   - no duplicate custom_ids within output or error files
+//
+// It only reports failures with t.Errorf/t.Logf, so it is safe to call from
+// non-test goroutines.
 func validateBatchResults(t *testing.T, batch *openai.Batch, result batchResults) {
 	t.Helper()
 
@@ -650,24 +716,15 @@ func validateBatchResults(t *testing.T, batch *openai.Batch, result batchResults
 		}
 	}
 
-	// --- Download input file and validate custom_id coverage ---
-	client := newClient()
-	resp, err := client.Files.Content(context.Background(), batch.InputFileID)
-	if err != nil {
-		t.Fatalf("download input file failed: %v", err)
-	}
-	inputBytes, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	inputBody := strings.TrimSpace(string(inputBytes))
-
-	var inputLines int
-	if inputBody != "" {
-		inputLines = len(strings.Split(inputBody, "\n"))
-	}
+	// --- Validate input file custom_id coverage ---
+	// The input file was already downloaded by fetchBatchResultsE; a download
+	// failure there is a fetch error, not a validation failure, so this
+	// function stays free of t.Fatalf and remains goroutine-safe.
+	inputLines := result.InputLines
 	if int64(inputLines) != batch.RequestCounts.Total {
 		t.Errorf("input lines (%d) != batch total (%d)", inputLines, batch.RequestCounts.Total)
 	}
-	for i, line := range strings.Split(inputBody, "\n") {
+	for i, line := range strings.Split(result.InputBody, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
