@@ -187,7 +187,8 @@ func NewAsyncResolver(config AsyncClientConfig, logger logr.Logger) (*AsyncGatew
 	}
 	var sqlStore *sqlqueue.Store
 	if transport == AsyncTransportSQL && len(config.Models) > 0 {
-		sqlStore, err := sqlqueue.Open(context.Background(), config.SQLURL)
+		var err error
+		sqlStore, err = sqlqueue.Open(context.Background(), config.SQLURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open async SQL store: %w", err)
 		}

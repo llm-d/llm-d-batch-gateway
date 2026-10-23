@@ -19,6 +19,7 @@ package inference
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -295,4 +296,33 @@ func TestNewAsyncResolver(t *testing.T) {
 			t.Fatalf("error = %q, want SQL recovery limitation", err)
 		}
 	})
+}
+
+func TestNewAsyncResolverSQLPostgres(t *testing.T) {
+	sqlURL := os.Getenv("TEST_POSTGRES_URL")
+	if sqlURL == "" {
+		t.Skip("TEST_POSTGRES_URL not set")
+	}
+
+	r, err := NewAsyncResolver(AsyncClientConfig{
+		Transport:         AsyncTransportSQL,
+		SQLURL:            sqlURL,
+		ConsumerID:        testAsyncConsumerID,
+		ResultPollTimeout: time.Second,
+		Models: map[string]AsyncModelPoolConfig{
+			"model-a": {
+				PoolName:         "sql-smoke-pool",
+				RequestQueueName: "sql-smoke-request",
+				ResultQueueName:  "sql-smoke-result",
+			},
+		},
+	}, testLogger(t))
+	if err != nil {
+		t.Fatalf("NewAsyncResolver SQL: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+
+	if r.SharedClientFor("model-a") == nil {
+		t.Fatal("expected SQL async client for model-a")
+	}
 }
