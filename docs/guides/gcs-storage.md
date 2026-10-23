@@ -57,12 +57,11 @@ gcloud storage buckets add-iam-policy-binding gs://${BUCKET} \
 already exist. It is **not required** for the feature — it exists as opt-in
 convenience for dev/demo setups.
 
-When enabled, the service account gets `roles/storage.admin` (project-scoped;
-bucket creation is a project-level `storage.buckets.create` call) — and that
-grant persists for the lifetime of the deployment, including after the bucket
-exists: the gateway only ever *adds* IAM bindings when auto-creating (never strips
-or re-evaluates them), so the elevated permission remains until an operator
-revokes it. Treat `autoCreateBucket: true` accordingly:
+Enabling it means granting the service account `roles/storage.admin` on the
+project, because creating a bucket needs the project-level
+`storage.buckets.create` permission. The gateway only creates the bucket; it
+never changes IAM, so that grant stays in place after the bucket exists until an
+operator revokes it. Treat `autoCreateBucket: true` accordingly:
 
 - Prefer it only where `roles/storage.admin` is acceptable (dev, demo, throwaway
   clusters).
@@ -145,13 +144,17 @@ file_client:
     prefix: "batch-gateway"
     project_id: ""              # only required when auto_create_bucket is true
     auto_create_bucket: false
+    verify_bucket_on_start: true # false when omitted; the Helm chart defaults it to true
 ```
 
 ## Behavior notes
 
 - **Single bucket, key prefix for tenant isolation.** Keys are `<prefix>/<tenant-folder>/<file>`, where `<tenant-folder>` is a deterministic SHA256 hash of the tenant ID (`com.GetFolderNameByTenantID`). This matches the `s3` backend.
-- **Store uses atomic conditional writes.** Instead of the S3 backend's HeadObject-then-Put pattern, `Store` issues a single GCS PUT with an `IfDoesNotExist` precondition: GCS rejects the write with `412 Precondition Failed` if the object already exists, which the client maps to `ErrFileExists`. This eliminates the HeadObject/Put race window a two-step approach has — concurrent writers cannot both pass an existence check and overwrite each other; the loser of the race receives `ErrFileExists` without touching the winner's object. (The `s3` and `fs` backends retain their two-step patterns; GCS uniquely offers a conditional put whose failure surfaces as a distinguishable error.)
-- **Size/line limit rejections are all-or-nothing.** When an upload trips the size or line limit mid-stream the client cancels the writer's context, aborting the SDK's resumable session — no partial object is committed, and a retry under the same filename starts from a clean not-exists (the `s3` backend's uploader similarly fails without leaving an object behind).
+- **Store is create-only.** `Store` writes with an `IfDoesNotExist` precondition, so GCS rejects the write with `412 Precondition Failed` if the object already exists; the client maps that to `ErrFileExists` and the existing object is untouched. Of two racing writers, the loser gets `ErrFileExists`. The `fs` and `s3` backends keep the same contract (`fs` links a temp file into place; `s3` checks with `HeadObject`, then PUTs with `If-None-Match: *`); on GCS the precondition is part of the write itself, so there is no separate existence check.
+- **Failed uploads leave nothing behind.** When an upload trips the size or line limit, or its source fails partway, the client cancels the writer's context, aborting the SDK's resumable session — no partial object is committed, and a retry under the same filename starts from a clean not-exists (the `s3` backend's uploader similarly fails without leaving an object behind).
+- **Streamed output files are written in place.** The processor writes each job's output and error files through `OpenStream`, which returns `ErrFileExists` if the file is already stored. GCS makes an object visible only when its upload finishes, so the stream goes straight to the final name with no staging copy: `Commit` publishes it, or returns `ErrFileExists` if another writer published first, and `Abort` leaves nothing behind.
+- **Memory per upload.** The SDK holds up to one chunk of each upload in memory: 16 MiB, unless the upload's size is known and smaller. Per-request result objects are small and of known size, so each gets a buffer just larger than the object (rounded up to 256 KiB); a streamed output file always uses 16 MiB.
+- **Purging a job's results** (`DeletePrefix`) lists the prefix and sends one DELETE per object, 16 at a time. Objects that disappear during the purge are skipped.
 - **Delete of a missing object** returns `os.ErrNotExist`; the apiserver cleanup path logs-and-continues and the GC reconciler explicitly tolerates this (`errors.Is(err, os.ErrNotExist)`).
 - **Auto-create** calls `BucketHandle.Create` if `Attrs` fails with `storage.ErrBucketNotExist`. Bucket creation needs `projectId` and is project-scoped. Auto-create only runs from the startup HeadBucket path, so it is gated on `verify_bucket_on_start: true`. A config with `auto_create_bucket: true` but `verify_bucket_on_start: false` is rejected by `Validate()` (the flag would otherwise be silently dropped — the verify=false path's whole purpose is to skip all bucket-level calls, which is incompatible with creating a bucket).
 
@@ -169,15 +172,15 @@ After a `helm install` / `make dev-deploy`:
 
 ## Testing
 
-The GCS backend has a standalone integration test suite (`test/integration/gcs_client_test.go`) that exercises `Store`/`Retrieve`/`Delete`, the atomic conditional write (`ErrFileExists` on overwrite), the size/line limits, prefixed keys, and the `VerifyBucketOnStart=true` fail-fast path.
+The GCS backend has a standalone integration test suite (`test/integration/gcs_client_test.go`) that exercises `Store`/`Retrieve`/`Delete`, the atomic conditional write (`ErrFileExists` on overwrite), the size/line limits, `OpenStream` (commit, abort, and a commit that loses a race), `DeletePrefix`, prefixed keys, and the `VerifyBucketOnStart=true` fail-fast path.
 
 - **No GCP credentials needed (recommended):** `make test-integration-gcs` auto-provisions a [fake-gcs-server](https://github.com/fsouza/fake-gcs-server) container via Docker/Podman, points the SDK at it via `STORAGE_EMULATOR_HOST`, and runs every `TestGCS*` test. The emulator image is pinned by digest for reproducibility. The suite skips gracefully if no container runtime is available, so `make test-integration` stays green on machines without Docker.
 - **Against real GCS:** set `GCS_TEST_PROJECT` and `GCS_TEST_BUCKET` and run `make test-integration` (the SDK uses Application Default Credentials — typically `gcloud auth application-default login` locally, or Workload Identity in GKE).
 - **Against a manually-started emulator:** `docker run -d -p 4443:4443 fsouza/fake-gcs-server -scheme http -port 4443 -public-host localhost:4443`, then `STORAGE_EMULATOR_HOST=http://localhost:4443 GCS_TEST_BUCKET=my-bucket make test-integration`.
 
-The `gcs-integration-tests` CI job runs `make test-integration-gcs` on every push to `main`/`release-*` and nightly, so emulator regressions (e.g. a fake-gcs-server upgrade that stops honoring the `IfDoesNotExist` precondition) are caught before they reach a release.
+The `gcs-integration-tests` CI job runs `make test-integration-gcs` on every pull request and push to `main`/`release-*`, and nightly, so emulator regressions (e.g. a fake-gcs-server upgrade that stops honoring the `IfDoesNotExist` precondition) are caught before they reach a release.
 
 ## Alternatives
 
-- **GCS via S3-interop + HMAC** — keep `fileClient.type: "s3"` and point it at `https://storage.googleapis.com` with HMAC access-key credentials. Zero application code change, fine for batch upload/download, but requires HMAC-key lifecycle management and uses the S3 wire protocol rather than GCS-native auth.
-- **gcsfuse / Cloud Storage FUSE → `fs` backend** — mount the bucket as a POSIX directory and use `fileClient.type: "fs"`. No code change, but the `fs` backend relies on `O_EXCL` + atomic `rename` semantics that gcsfuse emulates imperfectly; safe with a single processor replica, riskier with concurrent writers.
+- **GCS via S3-interop + HMAC** — keep `fileClient.type: "s3"` and point it at `https://storage.googleapis.com` with HMAC access-key credentials. No application code change, but it requires HMAC-key lifecycle management and uses the S3 wire protocol rather than GCS-native auth. It also weakens create-only writes: the `s3` backend's `Store` and streamed-output publish rely on `If-None-Match: *`, which GCS documents only for reads, so through interop two racing writers can both succeed and the later one overwrites the earlier. The resumable pipeline counts on the losing write being rejected so it can detect a duplicate result.
+- **gcsfuse / Cloud Storage FUSE → `fs` backend** — mount the bucket as a POSIX directory and use `fileClient.type: "fs"`. This does not work with the current `fs` backend: it publishes every file by hard-linking a temp file into place (a link, unlike a rename, fails when the target exists, which keeps writes create-only), and Cloud Storage FUSE does not support hard links, so every `Store` and stream `Commit` fails.
