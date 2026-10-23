@@ -145,9 +145,9 @@ processor:
 
 `redis-sortedset` is the default and reads `redis-url` from the configured
 Secret. `sql` uses the PostgreSQL URL already configured for `db_client` and
-does not require Redis for the async inference request/result queues. The
-upstream llm-d-async processor must also use `transport: sql`, the same queue
-names, and a URL Secret pointing to the `postgresql-url` key:
+does not require Redis for the Batch Processor's async request/result queues.
+The separately deployed llm-d-async dispatcher must use the same transport,
+queue names, and PostgreSQL Secret:
 
 ```yaml
 ap:
@@ -161,6 +161,17 @@ ap:
       - queue_name: request-sql
         igw_base_url: http://inference-gateway:80
 ```
+
+Dispatch gates (`gate_type` and `gate_params`) belong to the llm-d-async
+dispatcher queue configuration, not to `processor.config.asyncDispatch` in
+this chart. For example, add `gate_type: prometheus-budget` and its
+`gate_params` under the matching `queues` entry. The Batch Processor's
+`requestQueueName` must equal the dispatcher's `queue_name`.
+
+Most gates are transport-independent. Redis-specific gates still require
+Redis; for SQL transport, use `sql-quota` instead of `redis-quota` when a
+database-backed quota is needed. See the [llm-d-async dispatch gate reference](https://github.com/llm-d/llm-d-async/blob/main/docs/dispatch-gates.md)
+for the supported gate types and parameters.
 
 The SQL transport is experimental and requires Batch Gateway and llm-d-async
 images built with compatible upstream SQL producer support. SQL result reads

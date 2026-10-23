@@ -92,7 +92,11 @@ For an existing deployment, first remove the per-queue `result_queue_name` overr
 
 Replica-specific queues prevent healthy Processors from stealing results from one another. They do not recover results after the owning Processor is lost; pod-loss recovery and cleanup of abandoned result queues are tracked in [#645](https://github.com/llm-d/llm-d-batch-gateway/issues/645).
 
-When the dispatcher is used, the inference gateway endpoint configuration lives entirely on the dispatcher side: the batch-processor does not need to know about gateway URLs, TLS settings, or routing modes. The batch-processor only needs the pool name, the connector type, and the connector endpoint.
+When the dispatcher is used, the inference gateway endpoint and dispatch-gate
+configuration live entirely on the dispatcher side: the batch-processor does
+not need to know about gateway URLs, TLS settings, routing modes, or gate
+parameters. The batch-processor only needs the pool name, transport, queue
+names, and result-poll settings.
 
 ### Batch-Processor Configuration
 
@@ -122,7 +126,11 @@ deprecated, so explicit names are recommended for new deployments.
 
 ### Dispatcher Configuration
 
-The dispatcher (llm-d-async) already supports the Redis sorted-set flow with dispatch budget gating. It is configured with a single [transport configuration document](https://github.com/llm-d/llm-d-async/blob/main/README.md#transport-configuration), passed via `--transport redis-sortedset` and `--transport-config` (or `--transport-config-file`). The request queue is defined by the `queues` array; the result queue is set via the top-level `result_queue_name`:
+The dispatcher (llm-d-async) supports transport-specific queues with dispatch
+gates. It is configured with a single [transport configuration document](https://github.com/llm-d/llm-d-async/blob/main/README.md#transport-configuration),
+passed via `--transport` and `--transport-config` (or
+`--transport-config-file`). The request queue is defined by the `queues` array;
+the result queue is set via the top-level `result_queue_name`:
 
 ```json
 {
@@ -143,9 +151,14 @@ The dispatcher (llm-d-async) already supports the Redis sorted-set flow with dis
 }
 ```
 
-The request queue must match the name derived by the batch-processor's async resolver. The result queue shown here is a fallback; each Batch Processor request carries its replica-specific result destination.
+The request queue must match the Batch Processor's configured
+`request_queue_name`. The result queue shown here is a fallback; each Batch
+Processor request carries its replica-specific result destination. Gate
+configuration belongs in the dispatcher's matching `queues` entry. Most gates
+work with both Redis sorted-set and SQL transports; Redis-specific gates still
+need Redis, while SQL transport provides the experimental `sql-quota` gate.
 
-The dispatcher pulls up to `max_SYS × budget` requests per poll cycle and forwards them to the inference gateway. See the [llm-d-async README](https://github.com/llm-d/llm-d-async/blob/main/README.md) and [Helm chart values](https://github.com/llm-d/llm-d-async/tree/main/charts/async-processor) for the full configuration.
+The dispatcher pulls up to `max_SYS × budget` requests per poll cycle and forwards them to the inference gateway. See the [llm-d-async README](https://github.com/llm-d/llm-d-async/blob/main/README.md) and [Helm chart values](https://github.com/llm-d/llm-d-async/tree/main/charts/llm-d-async) for the full configuration.
 
 For SQL, configure the upstream dispatcher with the SQL transport and a URL
 Secret rather than an inline database URL. The queue names must match the

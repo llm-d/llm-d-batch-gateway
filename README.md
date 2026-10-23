@@ -72,21 +72,22 @@ The system is designed to facilitate efficient processing of batch workloads in 
    - Supports pluggable backends.
    - Backends available out of the box:
      - Job and file metadata, priority queue, events, and status: `PostgreSQL`.
-     - Async inference queue: `Redis`/`Valkey` sorted sets (default) or experimental PostgreSQL SQL transport.
+      - Async request/result queue (when `dispatchMode=async`): `Redis`/`Valkey` sorted sets (default) or experimental PostgreSQL SQL transport.
      - File storage: `S3`, `filesystem`.
 
 4. **Batch Dispatcher** *(optional)* — implemented in [llm-d/llm-d-async](https://github.com/llm-d/llm-d-async)
    - An optional component that provides metrics-driven flow control for batch request dispatching.
    - Monitors downstream inference system metrics (e.g. queue depth, latency, utilization) and dynamically adjusts dispatch flow to minimize interference with interactive requests while meeting batch job SLOs.
    - Not required for batch processing — the batch processor includes built-in AIMD-based adaptive concurrency control.
-   - Async dispatch supports a Redis sorted-set transport (default) or the experimental PostgreSQL SQL transport. SQL reuses the PostgreSQL URL configured for `db_client`; it does not require Redis for the inference request/result queues.
+   - The Batch Processor supports Redis sorted-set (default) or experimental PostgreSQL SQL transport for async request/result queues. SQL reuses the PostgreSQL URL configured for `db_client`; it does not require Redis for those queues.
 
 ### Processing Flow
 
 ```text
-User → API Server → PostgreSQL (metadata) + Redis/Valkey (queue) + S3 (input file)
+User → API Server → PostgreSQL (metadata) + queue backend (async only) + S3 (input file)
                          ↓
-                  Priority Queue
+                   Priority Queue
+                   (PostgreSQL)
                          ↓
                   Batch Processor (pulls jobs)
                          ↓
