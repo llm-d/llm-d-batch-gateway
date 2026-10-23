@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-async/producer"
 	producersql "github.com/llm-d/llm-d-async/producer-sql"
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/syncutil"
@@ -184,6 +185,14 @@ func NewAsyncResolver(config AsyncClientConfig, logger logr.Logger) (*AsyncGatew
 			_ = rdb.Close()
 		}
 	}
+	var sqlStore *sqlqueue.Store
+	if transport == AsyncTransportSQL && len(config.Models) > 0 {
+		sqlStore, err := sqlqueue.Open(context.Background(), config.SQLURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open async SQL store: %w", err)
+		}
+		closers = append(closers, sqlStore)
+	}
 
 	for model, mcfg := range config.Models {
 		reqQueue := mcfg.RequestQueueName
@@ -223,11 +232,11 @@ func NewAsyncResolver(config AsyncClientConfig, logger logr.Logger) (*AsyncGatew
 			p, err = producersql.New(
 				context.Background(),
 				producersql.Config{
-					URL:              config.SQLURL,
 					RequestQueueName: reqQueue,
 					ResultQueueName:  resQueue,
 					PollInterval:     pollInterval,
 				},
+				producersql.WithStore(sqlStore),
 			)
 		}
 		if err != nil {

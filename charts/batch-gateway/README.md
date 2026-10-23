@@ -123,7 +123,6 @@ The endpoint remains batch-scoped: every request URL in the input JSONL must exa
 | `processor.config.resumable.finalizeConcurrency` | `16` | Bounds the parallel result-object fetches during resumable finalization. |
 | `processor.config.resumable.finalizeTimeout` | `"30m"` | Budget for one resumable finalization attempt. |
 
-
 ### Async inference queue transport
 
 Set `processor.config.dispatchMode` to `async` and choose the queue transport

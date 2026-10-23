@@ -71,8 +71,8 @@ The system is designed to facilitate efficient processing of batch workloads in 
    - Manages batch input and output files, batch jobs' and files' metadata, priority queue, events and status mechanisms.
    - Supports pluggable backends.
    - Backends available out of the box:
-     - Job and file metadata storage: `PostgreSQL`.
-     - Priority queue, event channels, and status updates: `Redis` or `Valkey`.
+     - Job and file metadata, priority queue, events, and status: `PostgreSQL`.
+     - Async inference queue: `Redis`/`Valkey` sorted sets (default) or experimental PostgreSQL SQL transport.
      - File storage: `S3`, `filesystem`.
 
 4. **Batch Dispatcher** *(optional)* — implemented in [llm-d/llm-d-async](https://github.com/llm-d/llm-d-async)
@@ -165,8 +165,8 @@ batch-gateway/
 ### Prerequisites
 
 - Go 1.26 or later.
-- PostgreSQL 12+ (for metadata storage and, optionally, the async SQL transport).
-- Redis 6+ or Valkey 8+ (for the batch job queue and event channels).
+- PostgreSQL 12+ (for metadata, priority queue, events, and optionally the async SQL transport).
+- Redis 6+ or Valkey 8+ (only for async dispatch with `redis-sortedset`).
 - S3-compatible object storage or local filesystem.
 - Docker or Podman (for containerized deployment).
 - Kubernetes 1.19+ and Helm 3.0+ (for Kubernetes deployment).

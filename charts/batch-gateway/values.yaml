@@ -30,7 +30,7 @@ global:
   # Shared by all components; mounted read-only at /etc/.secrets/ in each container.
   # The secret must use these exact key names (hardcoded in the application):
   #   postgresql-url        — PostgreSQL connection URL (e.g. postgresql://[user]:[pass]@[host]/[db])
-  #   redis-url             — Redis URL for llm-d-async queues (used only when async dispatch is enabled)
+  #   redis-url             — Redis URL for llm-d-async queues when using the redis-sortedset transport
   #   inference-api-key     — API key for the inference gateway (optional; omit if not required)
   #   s3-secret-access-key  — S3 secret access key (required when file_client.type is "s3")
   # Create with: kubectl create secret generic <name> --from-literal=postgresql-url=postgresql://...

@@ -75,14 +75,14 @@ currently producer transports supported by this Batch Gateway.
 
 ## Queue Naming Convention
 
-For `redis-sortedset`, queue names follow a fixed convention keyed by the inference pool name:
+For `redis-sortedset`, the legacy derived names are:
 
 | Queue | Redis Type | Name Pattern | Example |
 |-------|-----------|--------------|---------|
 | Request queue | Sorted Set | `llm-d-async:requests:{pool_name}` | `llm-d-async:requests:optimized-baseline` |
 | Result queue | List | `llm-d-async:results:{pool_name}:{processor_id}` | `llm-d-async:results:optimized-baseline:batch-gateway-processor-7d9f6c8b5f-k2m4n` |
 
-The `pool_name` corresponds to the target [InferencePool](https://gateway-api-inference-extension.sigs.k8s.io/api-types/inferencepool/). The request queue and result queue base name are derived from the pool name. The batch-processor's async resolver appends the Processor hostname to the result queue base name, so replicas share requests but cannot consume one another's results. The resolved names are `asyncQueuePrefix + "requests:" + poolName` and `asyncQueuePrefix + "results:" + poolName + ":" + processorID`.
+The `pool_name` corresponds to the target [InferencePool](https://gateway-api-inference-extension.sigs.k8s.io/api-types/inferencepool/). The request and result queue base names can be set explicitly per model for either transport. When omitted, the resolver derives the Redis-compatible names shown above; this fallback is deprecated. The batch-processor appends its replica identity to the result queue base name.
 
 The prefix `llm-d-async` (`asyncQueuePrefix`) is currently hardcoded but can be made configurable, so that multiple installations can share the same Redis instance without key collisions (e.g., `staging`, `prod`, or an application-specific identifier).
 
@@ -115,11 +115,10 @@ model_gateways:
     inference_pool_name: "pool-b"
 ```
 
-For `redis-sortedset`, the Redis URL is read from a mounted `redis-url`
-Secret key at runtime. For `sql`, the PostgreSQL URL is read from the
-`postgresql-url` Secret key used by `db_client`. Queue names are derived from
-`inference_pool_name` by the async resolver — they are not configured directly
-for the Redis transport.
+For either transport, queue names can be set explicitly with
+`request_queue_name` and `result_queue_name`. When these fields are empty,
+the async resolver derives names from `inference_pool_name`; this fallback is
+deprecated, so explicit names are recommended for new deployments.
 
 ### Dispatcher Configuration
 
