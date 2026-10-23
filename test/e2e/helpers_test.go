@@ -242,8 +242,16 @@ func waitForBatchStatus(t *testing.T, batchID string, timeout time.Duration, tar
 		time.Sleep(pollInterval)
 	}
 
+	// The loop above never runs if the deadline was already past (it is capped
+	// at t.Deadline()-5s, which a test entered late in the `go test` timeout can
+	// overshoot), so lastBatch may still be nil. Report that instead of
+	// dereferencing it, which would panic and abort the whole test binary.
+	lastStatus := "<none>"
+	if lastBatch != nil {
+		lastStatus = string(lastBatch.Status)
+	}
 	t.Fatalf("batch %s did not reach status %v within %v (last status: %q)",
-		batchID, targets, timeout, lastBatch.Status)
+		batchID, targets, timeout, lastStatus)
 	return nil, nil // unreachable
 }
 
