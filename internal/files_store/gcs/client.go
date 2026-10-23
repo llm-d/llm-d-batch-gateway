@@ -330,6 +330,16 @@ func (c *Client) Store(ctx context.Context, fileName, folderName string, fileSiz
 		case errors.Is(copyErr, api.ErrTooManyLines):
 			return nil, api.ErrTooManyLines
 		}
+		var gErr *googleapi.Error
+		if errors.As(copyErr, &gErr) && gErr.Code == http.StatusPreconditionFailed {
+			// A multi-chunk upload can hit the IfDoesNotExist precondition from
+			// Writer.Write mid-copy, not only from Close: the resumable session's
+			// upload request 412s once the server sees the existing object. Map it
+			// to the same ErrFileExists sentinel so the retryclient treats it as
+			// permanent instead of retrying, and so callers can recognize the
+			// conflict with errors.Is.
+			return nil, fmt.Errorf("%w: %s", api.ErrFileExists, key)
+		}
 		return nil, copyErr
 	}
 	closeErr := w.Close()
