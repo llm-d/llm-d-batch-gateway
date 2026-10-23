@@ -152,7 +152,8 @@ func (p *Processor) executeJob(ctx context.Context, params *jobExecutionParams) 
 	// pending set and defer their re-submission for the recovery window, so
 	// their stranded delivery is recovered through the submitter's result
 	// route instead of re-running the inference.
-	recovering, submitters := recoveryPlan(params.resumeSeed, p.processorID, p.asyncInference != nil)
+	canRecoverResults := p.asyncInference != nil && p.asyncInference.SupportsResultRecovery()
+	recovering, submitters := recoveryPlan(params.resumeSeed, p.processorID, canRecoverResults)
 	if len(recovering) > 0 {
 		sourceCfg.Recover = recovering
 		sourceCfg.RecoveryWindow = p.cfg.Resumable.RecoveryWindow
@@ -247,16 +248,17 @@ func (p *Processor) buildRequestDispatcher(ctx context.Context, modelMap *modelM
 // recoveryPlan splits a resume seed's in-flight entries into the recovering
 // set — request IDs whose re-submission is deferred while their stranded
 // delivery is recovered from the submitter's route — and the distinct
-// previous submitters whose routes the job must consume. Async dispatch
-// only: sync results never travel per-processor routes. Entries submitted
-// by this processor (same-identity restart) defer too, but need no extra
-// broadcaster: their deliveries arrive on the processor's own route.
+// previous submitters whose routes the job must consume. Only transports with
+// durable result recovery use this path. Sync results never travel
+// per-processor routes. Entries submitted by this processor (same-identity
+// restart) defer too, but need no extra broadcaster: their deliveries arrive
+// on the processor's own route.
 // Entries with an unknown submitter (written before submitter tracking)
 // re-submit directly: no route can hold their delivery, so deferral would
 // only add latency. The seed builder enforces the same contract by never
 // mapping an empty submitter; skipping here is defense in depth.
-func recoveryPlan(seed *db.ResumableResumeState, self string, async bool) (map[string]struct{}, []string) {
-	if seed == nil || !async || len(seed.InFlightSubmittedBy) == 0 {
+func recoveryPlan(seed *db.ResumableResumeState, self string, canRecoverResults bool) (map[string]struct{}, []string) {
+	if seed == nil || !canRecoverResults || len(seed.InFlightSubmittedBy) == 0 {
 		return nil, nil
 	}
 	recovering := make(map[string]struct{}, len(seed.InFlightSubmittedBy))

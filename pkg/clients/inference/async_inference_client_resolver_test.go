@@ -55,6 +55,9 @@ func TestNewAsyncResolver(t *testing.T) {
 		if got := r.SharedClientFor("model-b"); got == nil {
 			t.Fatal("expected non-nil client for model-b")
 		}
+		if !r.SupportsResultRecovery() {
+			t.Fatal("Redis resolver should support result recovery")
+		}
 		if got := r.SharedClientFor("unknown"); got != nil {
 			t.Fatalf("expected nil for unknown model, got %v", got)
 		}
@@ -286,6 +289,9 @@ func TestNewAsyncResolver(t *testing.T) {
 		r := &AsyncGatewayResolver{
 			transport:  AsyncTransportSQL,
 			routeBases: map[string]string{"model-a": "results:model-a"},
+		}
+		if r.SupportsResultRecovery() {
+			t.Fatal("SQL resolver should not support result recovery")
 		}
 
 		_, err := r.RecoveryClientFor("model-a", "processor-1")

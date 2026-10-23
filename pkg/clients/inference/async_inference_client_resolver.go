@@ -88,6 +88,13 @@ func (r *AsyncGatewayResolver) Models() []string {
 	return models
 }
 
+// SupportsResultRecovery reports whether an unacknowledged result can be
+// recovered after the owning Processor fails. Redis leases results until ack;
+// the SQL producer currently deletes results when they are read.
+func (r *AsyncGatewayResolver) SupportsResultRecovery() bool {
+	return r.transport == AsyncTransportRedisSortedSet
+}
+
 // SharedClientFor returns a shared client for the given model.
 // Reuses the same client across calls. Results for this Processor replica are
 // isolated on its consumer-specific result queue.

@@ -789,6 +789,54 @@ route_key_method: tenant
 	}
 }
 
+func TestProcessorConfig_AsyncTransportAndPollIntervalFlowFromYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	const yamlData = `
+dispatch_mode: async
+async_dispatch:
+  transport: sql
+  poll_interval: 275ms
+  result_poll_timeout: 11s
+  models:
+    model-a:
+      inference_pool_name: pool-a
+`
+	if err := os.WriteFile(path, []byte(yamlData), 0o600); err != nil {
+		t.Fatalf("write YAML: %v", err)
+	}
+
+	cfg := NewConfig()
+	if err := cfg.LoadFromYAML(path); err != nil {
+		t.Fatalf("LoadFromYAML: %v", err)
+	}
+	if cfg.AsyncDispatchConfig.Transport != inference.AsyncTransportSQL {
+		t.Fatalf("parsed transport = %q, want %q", cfg.AsyncDispatchConfig.Transport, inference.AsyncTransportSQL)
+	}
+	if cfg.AsyncDispatchConfig.PollInterval != 275*time.Millisecond {
+		t.Fatalf("parsed poll interval = %v, want 275ms", cfg.AsyncDispatchConfig.PollInterval)
+	}
+
+	resolved, err := ResolveModelGateways(cfg)
+	if err != nil {
+		t.Fatalf("ResolveModelGateways: %v", err)
+	}
+	if resolved.Async == nil {
+		t.Fatal("expected resolved async configuration")
+	}
+	if resolved.Async.Transport != inference.AsyncTransportSQL {
+		t.Fatalf("resolved transport = %q, want %q", resolved.Async.Transport, inference.AsyncTransportSQL)
+	}
+	if resolved.Async.PollInterval != 275*time.Millisecond {
+		t.Fatalf("resolved poll interval = %v, want 275ms", resolved.Async.PollInterval)
+	}
+	if resolved.Async.ResultPollTimeout != 11*time.Second {
+		t.Fatalf("resolved result poll timeout = %v, want 11s", resolved.Async.ResultPollTimeout)
+	}
+	if resolved.Async.Models["model-a"].PoolName != "pool-a" {
+		t.Fatalf("resolved model pool = %q, want pool-a", resolved.Async.Models["model-a"].PoolName)
+	}
+}
+
 func TestValidate_RouteKeyMethod(t *testing.T) {
 	base := func() *ProcessorConfig {
 		c := NewConfig()

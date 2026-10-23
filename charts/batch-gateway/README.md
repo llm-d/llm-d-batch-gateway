@@ -175,9 +175,12 @@ for the supported gate types and parameters.
 
 The SQL transport is experimental and requires Batch Gateway and llm-d-async
 images built with compatible upstream SQL producer support. SQL result reads
-are destructive in the current upstream producer, so processor-loss recovery
-re-submits unresolved requests after the recovery window instead of consuming
-another processor's result route.
+are destructive in the current upstream producer and do not provide Redis-style
+result acknowledgement. On Processor restart, unresolved entries are
+re-submitted immediately; a result consumed before its Batch Gateway
+checkpoint may therefore cause inference to run again. SQL does not preserve
+completed results across the crash window and should not be treated as
+Redis-equivalent recovery.
 
 ## Usage
 

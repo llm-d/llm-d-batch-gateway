@@ -54,7 +54,7 @@ The batch-processor supports these async producer transports:
 | Transport | Queue storage | Batch Gateway connection | Result recovery |
 | --- | --- | --- | --- |
 | `redis-sortedset` | Redis/Valkey sorted sets and lists | `redis-url` Secret key | Durable result claims and cross-processor recovery |
-| `sql` | PostgreSQL tables and leases | The shared `postgresql-url` Secret key | Re-submission after the recovery window; cross-processor result recovery is not supported |
+| `sql` | PostgreSQL tables and leases | The shared `postgresql-url` Secret key | Immediate re-submission of unresolved entries; result recovery is not supported |
 
 The SQL transport is provided by the upstream `producer-sql` module. It creates
 its `async_*` tables in the configured database and partitions requests across
@@ -62,11 +62,12 @@ processors using PostgreSQL leases. The Batch Gateway and the llm-d-async
 processor must use compatible upstream versions and the same PostgreSQL
 database URL.
 
-SQL result reads are destructive in the current upstream producer. The
-Batch Gateway therefore does not consume another Processor's SQL result route
-during recovery; after the recovery window, genuinely missing results are
-re-submitted. This can re-run inference, but avoids deleting a result that
-another open batch entry still owns.
+SQL result reads are destructive in the current upstream producer and do not
+provide Redis-style result acknowledgement. On Processor restart, unresolved
+entries are re-submitted immediately rather than deferred for a recovery
+window. A result consumed before its Batch Gateway checkpoint can therefore
+be lost and inference may run again, including for a result on the Processor's
+own route. SQL should not be treated as Redis-equivalent result recovery.
 
 `redis-pubsub` and `gcp-pubsub` are llm-d-async transports, but are not
 currently producer transports supported by this Batch Gateway.
