@@ -184,7 +184,7 @@ func TestRecoveryPlan(t *testing.T) {
 		name           string
 		seed           *db.ResumableResumeState
 		self           string
-		async          bool
+		canRecover     bool
 		wantRecovering []string
 		wantSubmitters []string
 	}{
@@ -195,7 +195,7 @@ func TestRecoveryPlan(t *testing.T) {
 				"req-2": "proc-a",
 			}},
 			self:           "proc-b",
-			async:          true,
+			canRecover:     true,
 			wantRecovering: []string{"req-1", "req-2"},
 			wantSubmitters: []string{"proc-a"},
 		},
@@ -205,7 +205,7 @@ func TestRecoveryPlan(t *testing.T) {
 				"req-1": "proc-a",
 			}},
 			self:           "proc-a",
-			async:          true,
+			canRecover:     true,
 			wantRecovering: []string{"req-1"},
 			wantSubmitters: nil,
 		},
@@ -215,7 +215,7 @@ func TestRecoveryPlan(t *testing.T) {
 				"req-1": "", // written before submitter tracking
 			}},
 			self:           "proc-b",
-			async:          true,
+			canRecover:     true,
 			wantRecovering: nil,
 			wantSubmitters: nil,
 		},
@@ -223,14 +223,24 @@ func TestRecoveryPlan(t *testing.T) {
 			name:           "sync dispatch never recovers routes",
 			seed:           &db.ResumableResumeState{InFlightSubmittedBy: map[string]string{"req-1": "proc-a"}},
 			self:           "proc-b",
-			async:          false,
+			canRecover:     false,
+			wantRecovering: nil,
+			wantSubmitters: nil,
+		},
+		{
+			name: "SQL transport re-submits without recovery window",
+			seed: &db.ResumableResumeState{InFlightSubmittedBy: map[string]string{
+				"req-1": "proc-a",
+			}},
+			self:           "proc-b",
+			canRecover:     false,
 			wantRecovering: nil,
 			wantSubmitters: nil,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			recovering, submitters := recoveryPlan(tt.seed, tt.self, tt.async)
+			recovering, submitters := recoveryPlan(tt.seed, tt.self, tt.canRecover)
 			if len(recovering) != len(tt.wantRecovering) {
 				t.Fatalf("recovering = %v, want %v", recovering, tt.wantRecovering)
 			}

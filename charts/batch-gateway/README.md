@@ -123,6 +123,65 @@ The endpoint remains batch-scoped: every request URL in the input JSONL must exa
 | `processor.config.resumable.finalizeConcurrency` | `16` | Bounds the parallel result-object fetches during resumable finalization. |
 | `processor.config.resumable.finalizeTimeout` | `"30m"` | Budget for one resumable finalization attempt. |
 
+### Async inference queue transport
+
+Set `processor.config.dispatchMode` to `async` and choose the queue transport
+with `processor.config.asyncDispatch.transport`:
+
+```yaml
+processor:
+  config:
+    dispatchMode: async
+    asyncDispatch:
+      transport: sql
+      resultPollTimeout: "30s"
+      pollInterval: "1s"
+      models:
+        "llama-3":
+          inferencePoolName: pool-a
+          requestQueueName: request-sql
+          resultQueueName: result-sql
+```
+
+`redis-sortedset` is the default and reads `redis-url` from the configured
+Secret. `sql` uses the PostgreSQL URL already configured for `db_client` and
+does not require Redis for the Batch Processor's async request/result queues.
+The separately deployed llm-d-async dispatcher must use the same transport,
+queue names, and PostgreSQL Secret:
+
+```yaml
+ap:
+  transport: sql
+  transportConfig:
+    urlSecret:
+      name: batch-gateway-secrets
+      key: postgresql-url
+    result_queue_name: result-sql
+    queues:
+      - queue_name: request-sql
+        igw_base_url: http://inference-gateway:80
+```
+
+Dispatch gates (`gate_type` and `gate_params`) belong to the llm-d-async
+dispatcher queue configuration, not to `processor.config.asyncDispatch` in
+this chart. For example, add `gate_type: prometheus-budget` and its
+`gate_params` under the matching `queues` entry. The Batch Processor's
+`requestQueueName` must equal the dispatcher's `queue_name`.
+
+Most gates are transport-independent. Redis-specific gates still require
+Redis; for SQL transport, use `sql-quota` instead of `redis-quota` when a
+database-backed quota is needed. See the [llm-d-async dispatch gate reference](https://github.com/llm-d/llm-d-async/blob/main/docs/dispatch-gates.md)
+for the supported gate types and parameters.
+
+The SQL transport is experimental and requires Batch Gateway and llm-d-async
+images built with compatible upstream SQL producer support. SQL result reads
+are destructive in the current upstream producer and do not provide Redis-style
+result acknowledgement. On Processor restart, unresolved entries are
+re-submitted immediately; a result consumed before its Batch Gateway
+checkpoint may therefore cause inference to run again. SQL does not preserve
+completed results across the crash window and should not be treated as
+Redis-equivalent recovery.
+
 ## Usage
 
 ### Method 1: Using a Custom Values File

@@ -19,6 +19,8 @@ package inference
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +54,9 @@ func TestNewAsyncResolver(t *testing.T) {
 		}
 		if got := r.SharedClientFor("model-b"); got == nil {
 			t.Fatal("expected non-nil client for model-b")
+		}
+		if !r.SupportsResultRecovery() {
+			t.Fatal("Redis resolver should support result recovery")
 		}
 		if got := r.SharedClientFor("unknown"); got != nil {
 			t.Fatalf("expected nil for unknown model, got %v", got)
@@ -267,4 +272,63 @@ func TestNewAsyncResolver(t *testing.T) {
 			t.Fatalf("consumer B received %q, want request-b", resultB.RequestID)
 		}
 	})
+	t.Run("requires SQL URL for SQL transport", func(t *testing.T) {
+		_, err := NewAsyncResolver(AsyncClientConfig{
+			Transport:         AsyncTransportSQL,
+			ConsumerID:        testAsyncConsumerID,
+			ResultPollTimeout: time.Second,
+			Models: map[string]AsyncModelPoolConfig{
+				"model-a": {PoolName: "pool-a"},
+			},
+		}, testLogger(t))
+		if err == nil {
+			t.Fatal("expected an error when SQL URL is missing")
+		}
+	})
+	t.Run("does not build unsafe SQL recovery clients", func(t *testing.T) {
+		r := &AsyncGatewayResolver{
+			transport:  AsyncTransportSQL,
+			routeBases: map[string]string{"model-a": "results:model-a"},
+		}
+		if r.SupportsResultRecovery() {
+			t.Fatal("SQL resolver should not support result recovery")
+		}
+
+		_, err := r.RecoveryClientFor("model-a", "processor-1")
+		if err == nil {
+			t.Fatal("expected SQL recovery to be unsupported")
+		}
+		if !strings.Contains(err.Error(), "does not support cross-processor result recovery") {
+			t.Fatalf("error = %q, want SQL recovery limitation", err)
+		}
+	})
+}
+
+func TestNewAsyncResolverSQLPostgres(t *testing.T) {
+	sqlURL := os.Getenv("TEST_POSTGRES_URL")
+	if sqlURL == "" {
+		t.Skip("TEST_POSTGRES_URL not set")
+	}
+
+	r, err := NewAsyncResolver(AsyncClientConfig{
+		Transport:         AsyncTransportSQL,
+		SQLURL:            sqlURL,
+		ConsumerID:        testAsyncConsumerID,
+		ResultPollTimeout: time.Second,
+		Models: map[string]AsyncModelPoolConfig{
+			"model-a": {
+				PoolName:         "sql-smoke-pool",
+				RequestQueueName: "sql-smoke-request",
+				ResultQueueName:  "sql-smoke-result",
+			},
+		},
+	}, testLogger(t))
+	if err != nil {
+		t.Fatalf("NewAsyncResolver SQL: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+
+	if r.SharedClientFor("model-a") == nil {
+		t.Fatal("expected SQL async client for model-a")
+	}
 }

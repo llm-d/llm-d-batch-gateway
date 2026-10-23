@@ -456,6 +456,20 @@ tests:
           path: data["config.yaml"]
           pattern: '"sim-model-inject":[\s\S]*inference_pool_name: "sim-pool-inject"'
 
+  - it: should render SQL async transport settings
+    set:
+      processor.config.dispatchMode: async
+      processor.config.asyncDispatch:
+        transport: sql
+        resultPollTimeout: "30s"
+        pollInterval: "2s"
+        models:
+          "sim-model":
+            inferencePoolName: "sim-pool"
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'async_dispatch:[\s\S]*transport: "sql"[\s\S]*poll_interval: "2s"'
   - it: should render resumable tunables with defaults
     asserts:
       - matchRegex:

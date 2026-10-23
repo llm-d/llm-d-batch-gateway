@@ -17,6 +17,7 @@ limitations under the License.
 package inference
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -24,12 +25,18 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-async/producer"
+	producersql "github.com/llm-d/llm-d-async/producer-sql"
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/syncutil"
 )
 
-const asyncQueuePrefix = "llm-d-async:"
+const (
+	asyncQueuePrefix             = "llm-d-async:"
+	AsyncTransportRedisSortedSet = "redis-sortedset"
+	AsyncTransportSQL            = "sql"
+)
 
 // AsyncModelPoolConfig holds the resolved pool and queue settings for one async model.
 type AsyncModelPoolConfig struct {
@@ -40,10 +47,13 @@ type AsyncModelPoolConfig struct {
 
 // AsyncClientConfig holds the resolved configuration for async dispatch.
 type AsyncClientConfig struct {
+	Transport         string
 	RedisURL          string
+	SQLURL            string
 	ConsumerID        string // identity of this Batch Processor replica
 	Models            map[string]AsyncModelPoolConfig
 	ResultPollTimeout time.Duration // per-poll timeout in the result dispatcher loop
+	PollInterval      time.Duration // backend queue polling interval
 }
 
 // AsyncGatewayResolver routes models to shared AsyncInferenceClient instances.
@@ -54,9 +64,9 @@ type AsyncGatewayResolver struct {
 	closers         []io.Closer
 	clientFactories map[string]func() AsyncInferenceClient // test-only override
 	// routeBases maps each model to its result-route prefix (before the
-	// consumer suffix); rdb and resultPollTimeout rebuild producers that
-	// consume another processor's route for cross-processor recovery.
+	// consumer suffix); Redis rebuilds producers for cross-processor recovery.
 	routeBases        map[string]string
+	transport         string
 	rdb               redis.UniversalClient
 	resultPollTimeout time.Duration
 	logger            logr.Logger
@@ -76,6 +86,13 @@ func (r *AsyncGatewayResolver) Models() []string {
 		models = append(models, m)
 	}
 	return models
+}
+
+// SupportsResultRecovery reports whether an unacknowledged result can be
+// recovered after the owning Processor fails. Redis leases results until ack;
+// the SQL producer currently deletes results when they are read.
+func (r *AsyncGatewayResolver) SupportsResultRecovery() bool {
+	return r.transport == AsyncTransportRedisSortedSet
 }
 
 // SharedClientFor returns a shared client for the given model.
@@ -123,36 +140,73 @@ func NewAsyncResolver(config AsyncClientConfig, logger logr.Logger) (*AsyncGatew
 	if config.ConsumerID == "" {
 		return nil, fmt.Errorf("consumerID must not be empty")
 	}
-
-	opts, err := redis.ParseURL(config.RedisURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse async inference Redis URL: %w", err)
+	transport := config.Transport
+	if transport == "" {
+		transport = AsyncTransportRedisSortedSet
 	}
-	rdb := redis.NewClient(opts)
+	if transport != AsyncTransportRedisSortedSet && transport != AsyncTransportSQL {
+		return nil, fmt.Errorf("unsupported async transport %q", transport)
+	}
+
+	var rdb redis.UniversalClient
+	if transport == AsyncTransportRedisSortedSet {
+		opts, err := redis.ParseURL(config.RedisURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse async inference Redis URL: %w", err)
+		}
+		rdb = redis.NewClient(opts)
+	} else if config.SQLURL == "" {
+		return nil, fmt.Errorf("async SQL transport requires a PostgreSQL URL")
+	}
 
 	poolToModel := make(map[string]string, len(config.Models))
 	for model, mcfg := range config.Models {
 		if existing, ok := poolToModel[mcfg.PoolName]; ok {
-			_ = rdb.Close()
+			if rdb != nil {
+				_ = rdb.Close()
+			}
 			return nil, fmt.Errorf("models %q and %q both map to pool %q: each pool must have a single consumer", existing, model, mcfg.PoolName)
 		}
 		poolToModel[mcfg.PoolName] = model
 	}
 
 	if config.ResultPollTimeout <= 0 {
-		_ = rdb.Close()
+		if rdb != nil {
+			_ = rdb.Close()
+		}
 		return nil, fmt.Errorf("resultPollTimeout must be > 0")
+	}
+	pollInterval := config.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = time.Second
 	}
 
 	pools := make(map[string]*asyncPool, len(config.Models))
 	routeBases := make(map[string]string, len(config.Models))
 	var closers []io.Closer
+	closeResources := func() {
+		for _, c := range closers {
+			_ = c.Close()
+		}
+		if rdb != nil {
+			_ = rdb.Close()
+		}
+	}
+	var sqlStore *sqlqueue.Store
+	if transport == AsyncTransportSQL && len(config.Models) > 0 {
+		var err error
+		sqlStore, err = sqlqueue.Open(context.Background(), config.SQLURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open async SQL store: %w", err)
+		}
+		closers = append(closers, sqlStore)
+	}
 
 	for model, mcfg := range config.Models {
 		reqQueue := mcfg.RequestQueueName
 		resQueue := mcfg.ResultQueueName
 		// Deprecated: derived queue names from pool name. Set explicit
-		// request_queue_name / result_queue_name in async model config.
+		// request_queue_name and result_queue_name in async model config.
 		if reqQueue == "" {
 			reqQueue = asyncQueuePrefix + "requests:" + mcfg.PoolName
 		}
@@ -166,23 +220,36 @@ func NewAsyncResolver(config AsyncClientConfig, logger logr.Logger) (*AsyncGatew
 		logger.Info(
 			"Configured async inference queues",
 			"model", model,
+			"transport", transport,
 			"requestQueue", reqQueue,
 			"resultQueue", resQueue,
 		)
 
-		p, err := producer.NewRedisSortedSetProducer(
-			producer.RedisSortedSetConfig{
-				RequestQueueName: reqQueue,
-				ResultQueueName:  resQueue,
-			},
-			producer.WithRedisClient(rdb),
-		)
+		var p producer.Producer
+		var err error
+		switch transport {
+		case AsyncTransportRedisSortedSet:
+			p, err = producer.NewRedisSortedSetProducer(
+				producer.RedisSortedSetConfig{
+					RequestQueueName: reqQueue,
+					ResultQueueName:  resQueue,
+				},
+				producer.WithRedisClient(rdb),
+			)
+		case AsyncTransportSQL:
+			p, err = producersql.New(
+				context.Background(),
+				producersql.Config{
+					RequestQueueName: reqQueue,
+					ResultQueueName:  resQueue,
+					PollInterval:     pollInterval,
+				},
+				producersql.WithStore(sqlStore),
+			)
+		}
 		if err != nil {
-			for _, c := range closers {
-				_ = c.Close()
-			}
-			_ = rdb.Close()
-			return nil, fmt.Errorf("failed to create producer for model %q (pool %s): %w", model, mcfg.PoolName, err)
+			closeResources()
+			return nil, fmt.Errorf("failed to create %s producer for model %q (pool %s): %w", transport, model, mcfg.PoolName, err)
 		}
 
 		pools[model] = &asyncPool{
@@ -192,13 +259,16 @@ func NewAsyncResolver(config AsyncClientConfig, logger logr.Logger) (*AsyncGatew
 		closers = append(closers, p)
 	}
 
-	closers = append(closers, rdb)
+	if rdb != nil {
+		closers = append(closers, rdb)
+	}
 
 	return &AsyncGatewayResolver{
 		pools:             pools,
 		sharedClients:     syncutil.NewMutexMap[string, *asyncSharedClient](),
 		closers:           closers,
 		routeBases:        routeBases,
+		transport:         transport,
 		rdb:               rdb,
 		resultPollTimeout: config.ResultPollTimeout,
 		logger:            logger,
@@ -227,25 +297,38 @@ func NewAsyncResolver(config AsyncClientConfig, logger logr.Logger) (*AsyncGatew
 // forwarding of deliveries to their current batch owner.
 const recoveryClaimLeaseTTL = 60 * time.Second
 
-// RecoveryClientFor returns a client that consumes the per-processor result
-// route of consumer — the route on which that processor's unacknowledged
-// deliveries are stranded after a disruption. A processor recovering a batch
-// reads the previous submitter's route through it so a completed result is
-// checkpointed instead of re-inferred. The client is receive-only: requests
-// are never submitted through it.
+// RecoveryClientFor returns a Redis client that consumes the per-processor
+// result route of consumer — the route on which that processor's
+// unacknowledged deliveries are stranded after a disruption. A processor
+// recovering a batch reads the previous submitter's route through it so a
+// completed result is checkpointed instead of re-inferred. SQL does not
+// support this operation because its current result read is destructive.
 func (r *AsyncGatewayResolver) RecoveryClientFor(modelID, consumerID string) (AsyncInferenceClient, error) {
 	if r.clientFactories != nil {
-		return nil, fmt.Errorf("recovery clients require a Redis-backed resolver")
+		return nil, fmt.Errorf("recovery clients require a real async transport")
 	}
 	base, ok := r.routeBases[modelID]
-	if !ok || r.rdb == nil {
+	if !ok {
 		return nil, fmt.Errorf("recovery route for model %q is not configured", modelID)
 	}
-	p, err := producer.NewRedisSortedSetProducer(
-		producer.RedisSortedSetConfig{ResultQueueName: base + ":" + consumerID},
-		producer.WithRedisClient(r.rdb),
-		producer.WithResultClaimLeaseTTL(recoveryClaimLeaseTTL),
-	)
+
+	var p producer.Producer
+	var err error
+	switch r.transport {
+	case AsyncTransportRedisSortedSet:
+		if r.rdb == nil {
+			return nil, fmt.Errorf("redis recovery route for model %q is not configured", modelID)
+		}
+		p, err = producer.NewRedisSortedSetProducer(
+			producer.RedisSortedSetConfig{ResultQueueName: base + ":" + consumerID},
+			producer.WithRedisClient(r.rdb),
+			producer.WithResultClaimLeaseTTL(recoveryClaimLeaseTTL),
+		)
+	case AsyncTransportSQL:
+		return nil, fmt.Errorf("SQL transport does not support cross-processor result recovery; resume by re-submission")
+	default:
+		return nil, fmt.Errorf("unsupported async transport %q", r.transport)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("recovery producer for model %q consumer %q: %w", modelID, consumerID, err)
 	}
