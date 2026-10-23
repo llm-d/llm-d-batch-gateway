@@ -280,13 +280,11 @@ func (c *Client) ensureBucket(ctx context.Context, autoCreate bool, projectID st
 // Store stores a file in GCS.
 // The folderName parameter is used as an object-name prefix for tenant isolation.
 //
-// Writes are made atomic via an IfDoesNotExist precondition: the GCS SDK enforces
-// that the object must not already exist, so a concurrent writer that wins the
-// race causes losers to fail without overwriting the existing object. A failed
-// precondition surfaces as a 412 Precondition Failed and is mapped to
-// api.ErrFileExists. This removes the HeadObject-then-Put TOCTOU window the S3
-// backend still has; S3 retains its two-step pattern since its SDK offers no
-// equivalent conditional put that returns a distinguishable error.
+// Writes are create-only via an IfDoesNotExist precondition: GCS rejects the
+// write with 412 Precondition Failed if the object already exists, so the loser
+// of a concurrent-write race fails without overwriting the winner's object, and
+// the client maps the 412 to api.ErrFileExists. The precondition is part of the
+// write itself, so unlike the S3 backend there is no HeadObject check first.
 //
 // A Store that trips a mid-stream limit (ErrFileTooLarge, ErrTooManyLines) or
 // fails on any other copy error — including a source read failing after
