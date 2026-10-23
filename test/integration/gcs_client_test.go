@@ -208,7 +208,7 @@ func startFakeGCSServer(tool string) (host string, port int, cleanup func(), err
 	// the standard pattern for pre-allocating ports).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("allocate port: %w", err)
+		return "", 0, func() {}, fmt.Errorf("allocate port: %w", err)
 	}
 	host = "localhost"
 	port = ln.Addr().(*net.TCPAddr).Port
@@ -227,7 +227,7 @@ func startFakeGCSServer(tool string) (host string, port int, cleanup func(), err
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err = cmd.Run(); err != nil {
-		return "", 0, nil, fmt.Errorf("docker run: %w (%s)", err, stderr.String())
+		return "", 0, func() {}, fmt.Errorf("docker run: %w (%s)", err, stderr.String())
 	}
 
 	endpoint := fmt.Sprintf("http://%s", publicHost)
@@ -243,7 +243,11 @@ func startFakeGCSServer(tool string) (host string, port int, cleanup func(), err
 		}
 	}
 	_ = exec.Command(tool, "rm", "-f", containerName).Run()
-	return "", 0, nil, fmt.Errorf("fake-gcs-server not ready at %s after 6s", endpoint)
+	// Every error return supplies a no-op cleanup so callers can never hold a
+	// nil func: the container (if any) is already removed above, and a nil
+	// cleanup would panic the test binary at the call site before t.Fatalf
+	// could report the actual failure.
+	return "", 0, func() {}, fmt.Errorf("fake-gcs-server not ready at %s after 6s", endpoint)
 }
 
 // createFakeGCSBucket creates a bucket on fake-gcs-server via the JSON REST API.

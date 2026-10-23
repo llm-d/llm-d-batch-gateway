@@ -162,6 +162,18 @@ func (r *errAfterReader) Read(p []byte) (int, error) {
 	return n, io.ErrUnexpectedEOF
 }
 
+// mockWrite412Writer returns a 412 *googleapi.Error from its first Write call
+// — simulating a resumable session whose upload request hits the
+// IfDoesNotExist precondition mid-copy (a multi-chunk upload to an existing
+// key), before Close is ever called.
+type mockWrite412Writer struct{}
+
+func (w *mockWrite412Writer) Write(p []byte) (int, error) {
+	return 0, &googleapi.Error{Code: http.StatusPreconditionFailed, Message: " precondition=IfNonExistent"}
+}
+
+func (w *mockWrite412Writer) Close() error { return nil }
+
 // mockReader wraps stored bytes as an io.ReadCloser and reports size/mtime.
 type mockReader struct {
 	*bytes.Reader
@@ -434,6 +446,24 @@ func TestStore(t *testing.T) {
 		}
 		if md.Size != int64(len("complete content")) {
 			t.Errorf("expected size %d, got %d", len("complete content"), md.Size)
+		}
+	})
+
+	t.Run("write-phase 412 maps to ErrFileExists", func(t *testing.T) {
+		// A resumable upload can hit the IfDoesNotExist precondition from
+		// Writer.Write mid-copy (multi-chunk upload to an existing key), before
+		// Close is called. The copy-error branch must map it to the same
+		// ErrFileExists sentinel as the Close path so the retryclient does not
+		// retry a permanent conflict and callers can errors.Is it.
+		bucket := newMockBucket()
+		client, _ := newTestClient(bucket, "")
+		client.newWriter = func(context.Context, string, int64) writer {
+			return &mockWrite412Writer{}
+		}
+
+		_, err := client.Store(ctx, "conflict.txt", testFolderName, 1024, 0, bytes.NewReader([]byte("some content")))
+		if !errors.Is(err, api.ErrFileExists) {
+			t.Fatalf("expected ErrFileExists from write-phase 412, got %v", err)
 		}
 	})
 }
