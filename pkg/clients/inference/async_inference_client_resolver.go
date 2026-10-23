@@ -310,7 +310,7 @@ func (r *AsyncGatewayResolver) RecoveryClientFor(modelID, consumerID string) (As
 	switch r.transport {
 	case AsyncTransportRedisSortedSet:
 		if r.rdb == nil {
-			return nil, fmt.Errorf("Redis recovery route for model %q is not configured", modelID)
+			return nil, fmt.Errorf("redis recovery route for model %q is not configured", modelID)
 		}
 		p, err = producer.NewRedisSortedSetProducer(
 			producer.RedisSortedSetConfig{ResultQueueName: base + ":" + consumerID},
