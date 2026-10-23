@@ -137,6 +137,8 @@ github.com/llm-d/llm-d-async/api v1.0.0 h1:VsRENR+I6j4n/PMspshJocMRHJwAwGO9PJoBz
 github.com/llm-d/llm-d-async/api v1.0.0/go.mod h1:o2M2DklEKkpn/zrvI0GMZnSFGYku2bQ5K4/uNUgVrg8=
 github.com/llm-d/llm-d-async/producer v1.0.0 h1:RtpbDDzYc+UcR3gKA3nG6mDsIjxoZ1JyB4/pxp2BNKw=
 github.com/llm-d/llm-d-async/producer v1.0.0/go.mod h1:BAjSoAvQoiz6V9KL8UURh9hmnMMoUWA0euLySUZqa9E=
+github.com/llm-d/llm-d-async/producer-sql v0.0.0-20261021222928-3c134ef6d2ce h1:zZ7E1E5F/EcmFUbHw/mThlqItIKNN4iqFxVtM4P/hZI=
+github.com/llm-d/llm-d-async/producer-sql v0.0.0-20261021222928-3c134ef6d2ce/go.mod h1:7X07kr5tFVKvlnpv0t4z1hlPJ9V6jiMWm3rHVyP0q7M=
 github.com/modern-go/concurrent v0.0.0-20180228061459-e0a39a4cb421/go.mod h1:6dJC0mAP4ikYIbvyc7fijjWJddQyLn8Ig3JB5CqoB9Q=
 github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd h1:TRLaZ9cD/w8PVh93nsPXa1VrQ6jlwL5oN8l14QlcNfg=
 github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd/go.mod h1:6dJC0mAP4ikYIbvyc7fijjWJddQyLn8Ig3JB5CqoB9Q=

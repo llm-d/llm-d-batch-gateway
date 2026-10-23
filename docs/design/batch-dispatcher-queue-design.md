@@ -1,7 +1,7 @@
 # Batch Dispatcher Queue Design
 
--   **Revision**: 3
--   **Last Updated**: 2026-07-29
+-   **Revision**: 4
+-   **Last Updated**: 2026-10-23
 -   **Related Jira**: [INFERENG-5607](https://redhat.atlassian.net/browse/INFERENG-5607)
 
 Related:
@@ -47,9 +47,35 @@ Inside the batch-processor, async dispatch is not a separate execution path: it 
 
 ---
 
+## Async Transport Choices
+
+The batch-processor supports these async producer transports:
+
+| Transport | Queue storage | Batch Gateway connection | Result recovery |
+| --- | --- | --- | --- |
+| `redis-sortedset` | Redis/Valkey sorted sets and lists | `redis-url` Secret key | Durable result claims and cross-processor recovery |
+| `sql` | PostgreSQL tables and leases | The shared `postgresql-url` Secret key | Re-submission after the recovery window; cross-processor result recovery is not supported |
+
+The SQL transport is provided by the upstream `producer-sql` module. It creates
+its `async_*` tables in the configured database and partitions requests across
+processors using PostgreSQL leases. The Batch Gateway and the llm-d-async
+processor must use compatible upstream versions and the same PostgreSQL
+database URL.
+
+SQL result reads are destructive in the current upstream producer. The
+Batch Gateway therefore does not consume another Processor's SQL result route
+during recovery; after the recovery window, genuinely missing results are
+re-submitted. This can re-run inference, but avoids deleting a result that
+another open batch entry still owns.
+
+`redis-pubsub` and `gcp-pubsub` are llm-d-async transports, but are not
+currently producer transports supported by this Batch Gateway.
+
+---
+
 ## Queue Naming Convention
 
-Queue names follow a fixed convention keyed by the inference pool name:
+For `redis-sortedset`, queue names follow a fixed convention keyed by the inference pool name:
 
 | Queue | Redis Type | Name Pattern | Example |
 |-------|-----------|--------------|---------|
@@ -77,7 +103,9 @@ Each model resolves to an `inference_pool_name` that derives the queue pair. The
 ```yaml
 dispatch_mode: "async"
 async_dispatch:
+  transport: "redis-sortedset"       # or "sql"
   result_poll_timeout: "5s"
+  poll_interval: "1s"                # SQL polling interval
 model_gateways:
   "llama-3":
     url: "http://gateway-a:8000"              # used in sync mode
@@ -87,7 +115,11 @@ model_gateways:
     inference_pool_name: "pool-b"
 ```
 
-The Redis URL is read from a mounted secret at runtime (not stored in the config file). Queue names are derived from `inference_pool_name` by the async resolver — they are not configured directly.
+For `redis-sortedset`, the Redis URL is read from a mounted `redis-url`
+Secret key at runtime. For `sql`, the PostgreSQL URL is read from the
+`postgresql-url` Secret key used by `db_client`. Queue names are derived from
+`inference_pool_name` by the async resolver — they are not configured directly
+for the Redis transport.
 
 ### Dispatcher Configuration
 
@@ -115,6 +147,36 @@ The dispatcher (llm-d-async) already supports the Redis sorted-set flow with dis
 The request queue must match the name derived by the batch-processor's async resolver. The result queue shown here is a fallback; each Batch Processor request carries its replica-specific result destination.
 
 The dispatcher pulls up to `max_SYS × budget` requests per poll cycle and forwards them to the inference gateway. See the [llm-d-async README](https://github.com/llm-d/llm-d-async/blob/main/README.md) and [Helm chart values](https://github.com/llm-d/llm-d-async/tree/main/charts/async-processor) for the full configuration.
+
+For SQL, configure the upstream dispatcher with the SQL transport and a URL
+Secret rather than an inline database URL. The queue names must match the
+Batch Processor model configuration:
+
+```yaml
+ap:
+  transport: sql
+  transportConfig:
+    urlSecret:
+      name: batch-gateway-secrets
+      key: postgresql-url
+    result_queue_name: result-sql
+    queues:
+      - queue_name: request-sql
+        igw_base_url: http://inference-gateway:80
+```
+
+```yaml
+async_dispatch:
+  transport: sql
+  models:
+    "llama-3":
+      inference_pool_name: "pool-a"
+      request_queue_name: "request-sql"
+      result_queue_name: "result-sql"
+```
+
+The `result_queue_name` in the Batch Processor is the base name; the
+Processor appends its replica identity to isolate result consumers.
 
 ### Future Extension: Queue Registry
 

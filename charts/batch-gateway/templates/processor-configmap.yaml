@@ -54,7 +54,9 @@ data:
     dispatch_mode: {{ $dispatchMode | quote }}
     {{- if .Values.processor.config.asyncDispatch }}
     async_dispatch:
+      transport: {{ default "redis-sortedset" .Values.processor.config.asyncDispatch.transport | quote }}
       result_poll_timeout: {{ .Values.processor.config.asyncDispatch.resultPollTimeout | quote }}
+      poll_interval: {{ default "1s" .Values.processor.config.asyncDispatch.pollInterval | quote }}
       {{- if .Values.processor.config.asyncDispatch.models }}
       models:
         {{- range $model, $cfg := .Values.processor.config.asyncDispatch.models }}

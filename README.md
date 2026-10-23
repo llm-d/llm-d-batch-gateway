@@ -79,6 +79,7 @@ The system is designed to facilitate efficient processing of batch workloads in 
    - An optional component that provides metrics-driven flow control for batch request dispatching.
    - Monitors downstream inference system metrics (e.g. queue depth, latency, utilization) and dynamically adjusts dispatch flow to minimize interference with interactive requests while meeting batch job SLOs.
    - Not required for batch processing — the batch processor includes built-in AIMD-based adaptive concurrency control.
+   - Async dispatch supports a Redis sorted-set transport (default) or the experimental PostgreSQL SQL transport. SQL reuses the PostgreSQL URL configured for `db_client`; it does not require Redis for the inference request/result queues.
 
 ### Processing Flow
 
@@ -164,8 +165,8 @@ batch-gateway/
 ### Prerequisites
 
 - Go 1.26 or later.
-- PostgreSQL 12+ (for metadata storage).
-- Redis 6+ or Valkey 8+ (for job queue).
+- PostgreSQL 12+ (for metadata storage and, optionally, the async SQL transport).
+- Redis 6+ or Valkey 8+ (for the batch job queue and event channels).
 - S3-compatible object storage or local filesystem.
 - Docker or Podman (for containerized deployment).
 - Kubernetes 1.19+ and Helm 3.0+ (for Kubernetes deployment).

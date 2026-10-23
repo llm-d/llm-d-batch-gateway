@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/ptr"
+	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 )
 
 // validPerModelConfig returns a minimal valid per-model gateway config for tests.
@@ -836,6 +837,20 @@ func TestProcessorConfig_Validate_AsyncDispatch(t *testing.T) {
 			name:    "valid async config",
 			mutate:  func(_ *ProcessorConfig) {},
 			wantErr: false,
+		},
+		{
+			name: "SQL transport is valid",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.Transport = inference.AsyncTransportSQL
+			},
+			wantErr: false,
+		},
+		{
+			name: "unknown async transport rejected",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.Transport = "unknown"
+			},
+			wantErr: true,
 		},
 		{
 			name: "sync mode ignores async fields",

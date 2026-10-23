@@ -359,7 +359,11 @@ processor:
     # gateway over HTTP; "async" queues requests for llm-d-async.
     dispatchMode: "sync"
     asyncDispatch:
+      # Supported transports: "redis-sortedset" and "sql". The SQL transport
+      # uses the shared PostgreSQL database configured by db_client.
+      transport: "redis-sortedset"
       resultPollTimeout: "30s"
+      pollInterval: "1s"
       models: {}
 
     # Resumable pipeline tunables — every batch runs resumably, so there is
@@ -423,7 +427,7 @@ processor:
     routeKeyMethod: ""
 
     # Async mode: configure asyncDispatch.models instead of the sync gateway
-    # fields above. Each model maps to a Redis-backed inference pool.
+    # fields above. Each model maps to a Redis sorted-set or SQL inference pool.
     # Queue base names can be set explicitly; when omitted they are derived from
     # inferencePoolName (deprecated — set explicit names for new deployments).
     # The Processor appends its replica identity to each result queue base name.

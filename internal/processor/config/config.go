@@ -122,16 +122,16 @@ type AsyncModelConfig struct {
 	// When empty, the header is not sent.
 	InferenceObjective string `yaml:"inference_objective"`
 
-	// RequestQueueName overrides the Redis sorted-set queue name used to
-	// submit inference requests. When empty, the name is derived from
-	// InferencePoolName as "llm-d-async:requests:<pool>".
+	// RequestQueueName overrides the async request queue name used to submit
+	// inference requests. When empty, the name is derived from InferencePoolName
+	// as "llm-d-async:requests:<pool>".
 	// Deprecated fallback: the derived naming convention will be removed in
 	// a future release. Set explicit queue names for new deployments.
 	RequestQueueName string `yaml:"request_queue_name"`
 
-	// ResultQueueName overrides the Redis list base name used to read inference
-	// results. The Processor appends its replica identity. When empty, the base
-	// name is derived from InferencePoolName as "llm-d-async:results:<pool>".
+	// ResultQueueName overrides the async result queue base name. The Processor
+	// appends its replica identity. When empty, the base name is derived from
+	// InferencePoolName as "llm-d-async:results:<pool>".
 	// Deprecated fallback: the derived naming convention will be removed in
 	// a future release. Set an explicit queue base name for new deployments.
 	ResultQueueName string `yaml:"result_queue_name"`
@@ -140,14 +140,23 @@ type AsyncModelConfig struct {
 // AsyncDispatchConfig holds configuration for the llm-d-async dispatch backend.
 // Only used when DispatchMode == "async".
 type AsyncDispatchConfig struct {
-	// RedisURL is the full Redis connection URL (e.g. "redis://host:6379",
-	// "rediss://user:pass@host:6379" for TLS). Read from the mounted secret
-	// at runtime (SecretKeyRedisURL)
+	// Transport selects the llm-d-async queue backend. The supported values are
+	// "redis-sortedset" and "sql".
+	Transport string `yaml:"transport"`
+
+	// RedisURL is the full Redis connection URL. Read from the mounted secret
+	// at runtime when the transport is "redis-sortedset".
 	RedisURL string `yaml:"-"`
 
-	// ResultPollTimeout is the timeout per GetResult poll cycle.
-	// Controls how long each blocking poll waits before retrying.
+	// SQLURL is the PostgreSQL connection URL. It is populated from the shared
+	// database client configuration when the transport is "sql".
+	SQLURL string `yaml:"-"`
+
+	// ResultPollTimeout is the timeout per result poll cycle.
 	ResultPollTimeout time.Duration `yaml:"result_poll_timeout"`
+
+	// PollInterval controls how frequently the SQL transport checks for results.
+	PollInterval time.Duration `yaml:"poll_interval"`
 
 	// Models maps model names to their async dispatch targets.
 	// Required when DispatchMode == "async".
@@ -434,7 +443,9 @@ func NewConfig() *ProcessorConfig {
 
 		DispatchMode: DispatchModeSync,
 		AsyncDispatchConfig: AsyncDispatchConfig{
+			Transport:         inference.AsyncTransportRedisSortedSet,
 			ResultPollTimeout: 5 * time.Second,
+			PollInterval:      time.Second,
 		},
 		Resumable: ResumableConfig{
 			LeaseDuration:       5 * time.Minute,
@@ -596,6 +607,15 @@ func (c *ProcessorConfig) validateSyncDispatchConfig() error {
 }
 
 func (c *ProcessorConfig) validateAsyncDispatchConfig() error {
+	transport := c.AsyncDispatchConfig.Transport
+	if transport == "" {
+		transport = inference.AsyncTransportRedisSortedSet
+	}
+	switch transport {
+	case inference.AsyncTransportRedisSortedSet, inference.AsyncTransportSQL:
+	default:
+		return fmt.Errorf("async_dispatch.transport must be %q or %q, got %q", inference.AsyncTransportRedisSortedSet, inference.AsyncTransportSQL, transport)
+	}
 	if c.AsyncDispatchConfig.ResultPollTimeout <= 0 {
 		return fmt.Errorf("async_dispatch.result_poll_timeout must be > 0")
 	}
@@ -762,8 +782,10 @@ func ResolveModelGateways(cfg *ProcessorConfig) (*ResolvedGateways, error) {
 			}
 		}
 		result.Async = &inference.AsyncClientConfig{
+			Transport:         cfg.AsyncDispatchConfig.Transport,
 			Models:            models,
 			ResultPollTimeout: cfg.AsyncDispatchConfig.ResultPollTimeout,
+			PollInterval:      cfg.AsyncDispatchConfig.PollInterval,
 		}
 		return result, nil
 	}

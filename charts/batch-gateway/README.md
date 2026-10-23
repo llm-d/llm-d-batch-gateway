@@ -123,6 +123,52 @@ The endpoint remains batch-scoped: every request URL in the input JSONL must exa
 | `processor.config.resumable.finalizeConcurrency` | `16` | Bounds the parallel result-object fetches during resumable finalization. |
 | `processor.config.resumable.finalizeTimeout` | `"30m"` | Budget for one resumable finalization attempt. |
 
+
+### Async inference queue transport
+
+Set `processor.config.dispatchMode` to `async` and choose the queue transport
+with `processor.config.asyncDispatch.transport`:
+
+```yaml
+processor:
+  config:
+    dispatchMode: async
+    asyncDispatch:
+      transport: sql
+      resultPollTimeout: "30s"
+      pollInterval: "1s"
+      models:
+        "llama-3":
+          inferencePoolName: pool-a
+          requestQueueName: request-sql
+          resultQueueName: result-sql
+```
+
+`redis-sortedset` is the default and reads `redis-url` from the configured
+Secret. `sql` uses the PostgreSQL URL already configured for `db_client` and
+does not require Redis for the async inference request/result queues. The
+upstream llm-d-async processor must also use `transport: sql`, the same queue
+names, and a URL Secret pointing to the `postgresql-url` key:
+
+```yaml
+ap:
+  transport: sql
+  transportConfig:
+    urlSecret:
+      name: batch-gateway-secrets
+      key: postgresql-url
+    result_queue_name: result-sql
+    queues:
+      - queue_name: request-sql
+        igw_base_url: http://inference-gateway:80
+```
+
+The SQL transport is experimental and requires Batch Gateway and llm-d-async
+images built with compatible upstream SQL producer support. SQL result reads
+are destructive in the current upstream producer, so processor-loss recovery
+re-submits unresolved requests after the recovery window instead of consuming
+another processor's result route.
+
 ## Usage
 
 ### Method 1: Using a Custom Values File

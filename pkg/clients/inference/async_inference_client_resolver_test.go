@@ -19,6 +19,7 @@ package inference
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -265,6 +266,33 @@ func TestNewAsyncResolver(t *testing.T) {
 		}
 		if resultB.RequestID != "request-b" {
 			t.Fatalf("consumer B received %q, want request-b", resultB.RequestID)
+		}
+	})
+	t.Run("requires SQL URL for SQL transport", func(t *testing.T) {
+		_, err := NewAsyncResolver(AsyncClientConfig{
+			Transport:         AsyncTransportSQL,
+			ConsumerID:        testAsyncConsumerID,
+			ResultPollTimeout: time.Second,
+			Models: map[string]AsyncModelPoolConfig{
+				"model-a": {PoolName: "pool-a"},
+			},
+		}, testLogger(t))
+		if err == nil {
+			t.Fatal("expected an error when SQL URL is missing")
+		}
+	})
+	t.Run("does not build unsafe SQL recovery clients", func(t *testing.T) {
+		r := &AsyncGatewayResolver{
+			transport:  AsyncTransportSQL,
+			routeBases: map[string]string{"model-a": "results:model-a"},
+		}
+
+		_, err := r.RecoveryClientFor("model-a", "processor-1")
+		if err == nil {
+			t.Fatal("expected SQL recovery to be unsupported")
+		}
+		if !strings.Contains(err.Error(), "does not support cross-processor result recovery") {
+			t.Fatalf("error = %q, want SQL recovery limitation", err)
 		}
 	})
 }
