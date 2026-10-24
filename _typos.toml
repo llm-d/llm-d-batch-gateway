@@ -21,3 +21,7 @@ golangci = "golangci"
 # Additive Increase Multiplicative Decrease (congestion control algorithm)
 AIMD = "AIMD"
 aimd = "aimd"
+
+# Substring of an object ID literal in the pagination tests
+# (file_0a6abd39-…), flagged by the nightly typo scan (#738)
+abd = "abd"
