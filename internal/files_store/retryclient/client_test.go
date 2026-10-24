@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -189,6 +190,108 @@ func TestStore_SeekFailureAbortsImmediately(t *testing.T) {
 	}
 	if reader.seekCalls != 1 {
 		t.Fatalf("expected 1 seek attempt, got %d", reader.seekCalls)
+	}
+}
+
+// permanentErrClient is a mock that returns a fixed error on every call, used to
+// verify that permanent sentinels are not retried (call count stays 1) while the
+// returned error still unwraps to the bare sentinel so callers' errors.Is match.
+type permanentErrClient struct {
+	storeErr    error
+	retrieveErr error
+	deleteErr   error
+	storeCalls  int
+	retrCalls   int
+	delCalls    int
+}
+
+func (m *permanentErrClient) Store(_ context.Context, _, _ string, _, _ int64, _ io.Reader) (*api.BatchFileMetadata, error) {
+	m.storeCalls++
+	return nil, m.storeErr
+}
+
+func (m *permanentErrClient) Retrieve(_ context.Context, _, _ string) (io.ReadCloser, *api.BatchFileMetadata, error) {
+	m.retrCalls++
+	return nil, nil, m.retrieveErr
+}
+
+func (m *permanentErrClient) Delete(_ context.Context, _, _ string) error {
+	m.delCalls++
+	return m.deleteErr
+}
+
+func (m *permanentErrClient) DeletePrefix(_ context.Context, _, _ string) (int, error) {
+	return 0, errors.New("not implemented")
+}
+
+func (m *permanentErrClient) OpenStream(_ context.Context, _, _ string) (api.StreamWriter, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (m *permanentErrClient) Close() error { return nil }
+
+// TestStore_PermanentErrorsAreNotRetried asserts the four permanent storage
+// sentinels short-circuit retryclient.Store after exactly one attempt, and that
+// the returned error still satisfies errors.Is against the bare sentinel
+// (retry.Permanent unwraps, so callers' type checks are preserved). ErrFileTooLarge
+// and ErrTooManyLines are produced by the inner client's own limit enforcement;
+// ErrFileExists by the conditional-write path; os.ErrNotExist is included for
+// symmetry with Retrieve/Delete even though Store doesn't normally return it.
+func TestStore_PermanentErrorsAreNotRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"ErrFileExists", api.ErrFileExists},
+		{"ErrFileTooLarge", api.ErrFileTooLarge},
+		{"ErrTooManyLines", api.ErrTooManyLines},
+		{"ErrNotExist", os.ErrNotExist},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &permanentErrClient{storeErr: tc.err}
+			c := New(mock, retryCfg(), "test")
+
+			_, err := c.Store(context.Background(), "f.txt", "folder", 0, 0, bytes.NewReader([]byte("data")))
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("expected errors.Is(%v) to match, got %v", tc.err, err)
+			}
+			if mock.storeCalls != 1 {
+				t.Fatalf("permanent %v must not retry: expected 1 store call, got %d", tc.err, mock.storeCalls)
+			}
+		})
+	}
+}
+
+// TestRetrieve_PermanentErrorsAreNotRetried asserts a missing object (the only
+// permanent Retrieve sentinel across all backends: fs/S3/GCS return os.ErrNotExist
+// for a missing object/bucket) short-circuits retryclient.Retrieve after one attempt.
+func TestRetrieve_PermanentErrorsAreNotRetried(t *testing.T) {
+	mock := &permanentErrClient{retrieveErr: os.ErrNotExist}
+	c := New(mock, retryCfg(), "test")
+
+	_, _, err := c.Retrieve(context.Background(), "f.txt", "folder")
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected errors.Is(os.ErrNotExist) to match, got %v", err)
+	}
+	if mock.retrCalls != 1 {
+		t.Fatalf("permanent os.ErrNotExist must not retry retrieve: expected 1 call, got %d", mock.retrCalls)
+	}
+}
+
+// TestDelete_PermanentErrorsAreNotRetried asserts a missing object/bucket
+// (os.ErrNotExist) short-circuits retryclient.Delete after one attempt. S3 returns
+// os.ErrNotExist only for a missing bucket (object DELETE is idempotent → nil),
+// but the sentinel is the same and the classification is identical.
+func TestDelete_PermanentErrorsAreNotRetried(t *testing.T) {
+	mock := &permanentErrClient{deleteErr: os.ErrNotExist}
+	c := New(mock, retryCfg(), "test")
+
+	err := c.Delete(context.Background(), "f.txt", "folder")
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected errors.Is(os.ErrNotExist) to match, got %v", err)
+	}
+	if mock.delCalls != 1 {
+		t.Fatalf("permanent os.ErrNotExist must not retry delete: expected 1 call, got %d", mock.delCalls)
 	}
 }
 
