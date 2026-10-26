@@ -471,6 +471,21 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: 'async_dispatch:[\s\S]*transport: "sql"[\s\S]*poll_interval: "2s"[\s\S]*max_connections: 12'
+  - it: should preserve an explicit zero max connections value
+    set:
+      processor.config.dispatchMode: async
+      processor.config.asyncDispatch:
+        transport: sql
+        resultPollTimeout: "30s"
+        pollInterval: "2s"
+        maxConnections: 0
+        models:
+          "sim-model":
+            inferencePoolName: "sim-pool"
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'async_dispatch:[\s\S]*max_connections: 0'
   - it: should render resumable tunables with defaults
     asserts:
       - matchRegex:

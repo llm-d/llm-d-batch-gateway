@@ -57,7 +57,7 @@ data:
       transport: {{ default "redis-sortedset" .Values.processor.config.asyncDispatch.transport | quote }}
       result_poll_timeout: {{ .Values.processor.config.asyncDispatch.resultPollTimeout | quote }}
       poll_interval: {{ default "1s" .Values.processor.config.asyncDispatch.pollInterval | quote }}
-      max_connections: {{ default 8 .Values.processor.config.asyncDispatch.maxConnections }}
+      max_connections: {{ .Values.processor.config.asyncDispatch.maxConnections }}
       {{- if .Values.processor.config.asyncDispatch.models }}
       models:
         {{- range $model, $cfg := .Values.processor.config.asyncDispatch.models }}
