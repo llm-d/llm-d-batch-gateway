@@ -179,6 +179,35 @@ func TestProcessorConfig_Validate_ExtraEndpoints(t *testing.T) {
 	}
 }
 
+func TestProcessorConfig_Validate_FileClientType(t *testing.T) {
+	tests := []struct {
+		ftype   string
+		wantErr bool
+	}{
+		{ftype: "fs"},
+		{ftype: "s3"},
+		{ftype: "gcs"},
+		{ftype: "mock"},
+		{ftype: "", wantErr: true},
+		{ftype: "xyz", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run("type="+tt.ftype, func(t *testing.T) {
+			c := NewConfig()
+			c.ModelGateways = validPerModelConfig()
+			c.FileClientCfg.Type = tt.ftype
+
+			err := c.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("Validate() error = nil, want error for file_client.type %q", tt.ftype)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() unexpected error for file_client.type %q: %v", tt.ftype, err)
+			}
+		})
+	}
+}
+
 func TestProcessorConfig_EffectiveNumWorkers(t *testing.T) {
 	tests := []struct {
 		name      string

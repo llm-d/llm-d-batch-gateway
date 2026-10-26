@@ -28,7 +28,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/*
 Volume for shared file storage.
 - "fs": mounts a PersistentVolumeClaim; global.fileClient.fs.pvcName must be set.
-- "s3", "mock": no volume needed.
+- "s3", "gcs", "mock": no volume needed.
 */}}
 {{- define "batch-gateway.filesStorage.volume" -}}
 {{- if eq .Values.global.fileClient.type "fs" }}
