@@ -15,6 +15,9 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: 'dispatch_mode: "sync"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'max_connections: 8'
 
   - it: should render shared extra endpoints
     set:
