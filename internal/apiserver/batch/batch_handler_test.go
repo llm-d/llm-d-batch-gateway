@@ -868,6 +868,41 @@ func TestBatchHandler(t *testing.T) {
 			t.Error("Expected last_id to be set")
 		}
 
+		t.Run("EncodedPlus", func(t *testing.T) {
+			for _, tc := range []struct {
+				name        string
+				query       string
+				wantHasMore bool
+			}{
+				{"Limit", "limit=%2B1", true},
+				{"After", "limit=1&after=%2B1", false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					req := httptest.NewRequest(http.MethodGet, "/v1/batches?"+tc.query, nil)
+					rr := httptest.NewRecorder()
+					handler.ListBatches(rr, req)
+
+					if rr.Code != http.StatusOK {
+						t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+					}
+
+					var resp openai.ListBatchResponse
+					if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+						t.Fatalf("Failed to decode response body: %v", err)
+					}
+					if len(resp.Data) != 1 {
+						t.Fatalf("expected 1 batch, got %d", len(resp.Data))
+					}
+					if _, ok := created[resp.Data[0].ID]; !ok {
+						t.Errorf("unexpected batch ID %q", resp.Data[0].ID)
+					}
+					if resp.HasMore != tc.wantHasMore {
+						t.Errorf("expected has_more %v, got %v", tc.wantHasMore, resp.HasMore)
+					}
+				})
+			}
+		})
+
 		t.Run("Negative", func(t *testing.T) {
 			negativeCases := []struct {
 				name  string
@@ -876,8 +911,20 @@ func TestBatchHandler(t *testing.T) {
 				{"LimitZero", "limit=0"},
 				{"LimitTooLarge", "limit=999"},
 				{"InvalidLimit", "limit=abc"},
+				{"LimitRawPlus", "limit=+5"},
+				{"LimitLeadingSpace", "limit=%205"},
+				{"LimitTrailingSpace", "limit=5%20"},
+				{"LimitDecimal", "limit=1.5"},
+				{"LimitExponent", "limit=1e2"},
+				{"LimitTrailingText", "limit=1abc"},
 				{"AfterNegative", "after=-1"},
 				{"InvalidAfter", "after=abc"},
+				{"AfterRawPlus", "after=+0"},
+				{"AfterLeadingSpace", "after=%200"},
+				{"AfterTrailingSpace", "after=0%20"},
+				{"AfterDecimal", "after=1.5"},
+				{"AfterExponent", "after=1e2"},
+				{"AfterTrailingText", "after=1abc"},
 			}
 			for _, tc := range negativeCases {
 				t.Run(tc.name, func(t *testing.T) {

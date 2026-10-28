@@ -241,3 +241,76 @@ func TestBatchNotFound(t *testing.T) {
 		resp.Body.Close()
 	})
 }
+
+func TestBatchPaginationValidation(t *testing.T) {
+	ts := newTestServer(t)
+	fileContent := `{"custom_id":"req-1","method":"POST","url":"/v1/chat/completions","body":{"model":"m","messages":[{"role":"user","content":"hi"}]}}` + "\n"
+	fileObj := decodeJSON[openai.FileObject](t, ts.uploadFile(t, "input.jsonl", "batch", fileContent))
+	for range 2 {
+		resp := ts.doJSON(t, http.MethodPost, "/v1/batches", openai.CreateBatchRequest{
+			InputFileID:      fileObj.ID,
+			Endpoint:         openai.EndpointChatCompletions,
+			CompletionWindow: "24h",
+		})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("create batch: expected 200, got %d: %s", resp.StatusCode, readBody(t, resp))
+		}
+		decodeJSON[openai.Batch](t, resp)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		query string
+	}{
+		{"LimitRawPlus", "limit=+5"},
+		{"LimitLeadingSpace", "limit=%205"},
+		{"LimitTrailingSpace", "limit=5%20"},
+		{"LimitDecimal", "limit=1.5"},
+		{"LimitExponent", "limit=1e2"},
+		{"LimitTrailingText", "limit=1abc"},
+		{"AfterRawPlus", "after=+0"},
+		{"AfterLeadingSpace", "after=%200"},
+		{"AfterTrailingSpace", "after=0%20"},
+		{"AfterDecimal", "after=1.5"},
+		{"AfterExponent", "after=1e2"},
+		{"AfterTrailingText", "after=1abc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := ts.doRequest(t, http.MethodGet, "/v1/batches?"+tc.query)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", resp.StatusCode, readBody(t, resp))
+			}
+			decodeJSON[openai.ErrorResponse](t, resp)
+		})
+	}
+
+	for _, tc := range []struct {
+		name        string
+		query       string
+		wantHasMore bool
+	}{
+		{"LimitEncodedPlus", "limit=%2B1", true},
+		{"AfterEncodedPlus", "limit=1&after=%2B1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := ts.doRequest(t, http.MethodGet, "/v1/batches?"+tc.query)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", resp.StatusCode, readBody(t, resp))
+			}
+			page := decodeJSON[openai.ListBatchResponse](t, resp)
+			if len(page.Data) != 1 || page.HasMore != tc.wantHasMore {
+				t.Fatalf("expected one batch and has_more=%v, got %d batches and has_more=%v", tc.wantHasMore, len(page.Data), page.HasMore)
+			}
+			if tc.wantHasMore {
+				resp = ts.doRequest(t, http.MethodGet, "/v1/batches?limit=1&after="+page.Data[0].ID)
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("cursor page: expected 200, got %d: %s", resp.StatusCode, readBody(t, resp))
+				}
+				next := decodeJSON[openai.ListBatchResponse](t, resp)
+				if len(next.Data) != 1 || next.HasMore || next.Data[0].ID == page.Data[0].ID {
+					t.Fatalf("cursor page: expected the remaining batch, got %+v", next)
+				}
+			}
+		})
+	}
+}
