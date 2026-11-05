@@ -18,9 +18,12 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,6 +31,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
 	"github.com/llm-d/llm-d-batch-gateway/internal/apiserver/common"
+	tlspkg "github.com/llm-d/llm-d-batch-gateway/internal/tls"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/clientset"
 )
 
@@ -41,6 +45,59 @@ func freePort(t *testing.T) string {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 	return fmt.Sprintf("%d", port)
+}
+
+func TestServeTLSWithIncompatibleCipherDisablesHTTP2(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	tlsOpts, err := tlspkg.Resolve(
+		testr.New(t),
+		"VersionTLS12",
+		"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+		"h2",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	httpserver := &http.Server{
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{{}},
+		},
+	}
+	defer httpserver.Close()
+	for _, opt := range tlsOpts {
+		opt(httpserver.TLSConfig)
+	}
+	if httpserver.TLSConfig != nil && !slices.Contains(httpserver.TLSConfig.NextProtos, "h2") {
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		httpserver.Protocols = protocols
+	}
+
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- httpserver.ServeTLS(ln, "", "")
+	}()
+
+	select {
+	case err := <-serveDone:
+		t.Fatalf("ServeTLS returned before shutdown: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := httpserver.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if err := <-serveDone; !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("ServeTLS() error = %v, want %v", err, http.ErrServerClosed)
+	}
 }
 
 // TestGracefulShutdown_InFlightRequestCompletes verifies that cancelling the
