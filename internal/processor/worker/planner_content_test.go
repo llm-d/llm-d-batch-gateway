@@ -51,6 +51,7 @@ func TestContentPartsPreprocessingAndForwarding(t *testing.T) {
 						line,
 						openai.EndpointAllowlist{},
 						openai.EndpointChatCompletions.String(),
+						false,
 					)
 					checkContentError(t, err)
 					expectedHash := NoPrefixHash
@@ -115,6 +116,7 @@ func TestContentPartsRejectInvalidSystemContent(t *testing.T) {
 				line,
 				openai.EndpointAllowlist{},
 				openai.EndpointChatCompletions.String(),
+				false,
 			); err == nil {
 				t.Fatal("accepted invalid message content")
 			}
@@ -135,6 +137,7 @@ func BenchmarkContentPreprocessing(b *testing.B) {
 					line,
 					openai.EndpointAllowlist{},
 					openai.EndpointChatCompletions.String(),
+					false,
 				); err != nil {
 					b.Fatal(err)
 				}
@@ -150,6 +153,7 @@ func TestContentPartsSkipNonSystemDecoding(t *testing.T) {
 		line,
 		openai.EndpointAllowlist{},
 		openai.EndpointChatCompletions.String(),
+		false,
 	)
 	checkContentError(t, err)
 	h := fnv.New32a()

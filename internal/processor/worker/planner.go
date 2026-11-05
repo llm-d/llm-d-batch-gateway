@@ -78,16 +78,16 @@ func messageText(content json.RawMessage) (string, error) {
 	}
 }
 
-// NoPrefixHash is used when a request has no system prompt.
-// Set to MaxUint32 so that no-prompt requests sort last, allowing
-// requests with actual system prompts to be dispatched first.
+// NoPrefixHash is used when no grouping text is selected.
+// Set to MaxUint32 so that requests without grouping text sort last.
 const NoPrefixHash uint32 = math.MaxUint32
 
 // planEntry is a single entry in the plan file.
 // 16 bytes:
 // Offset [int64 Offset] start byte offset of the request line in input.jsonl
 // Length [uint32 Length] length of the request line in input.jsonl
-// PrefixHash [uint32 PrefixHash] FNV-32a hash of the request's system prompt, used to group similar requests together during execution. If the system prompt is absent, the hash defaults to NoPrefixHash.
+// PrefixHash [uint32 PrefixHash] FNV-32a hash of the selected grouping text.
+// It defaults to NoPrefixHash when no grouping text is selected.
 type planEntry struct {
 	Offset     int64
 	Length     uint32

@@ -192,6 +192,10 @@ type ResumableConfig struct {
 }
 
 type ProcessorConfig struct {
+	// GroupFirstUserMessage groups identical plain-string first user messages
+	// when no nonempty system-message text takes precedence. Default: false.
+	GroupFirstUserMessage bool `yaml:"group_first_user_message"`
+
 	// ExtraEndpoints adds deployment-specific inference paths to the default OpenAI endpoint allowlist.
 	ExtraEndpoints []string `yaml:"extra_endpoints"`
 
