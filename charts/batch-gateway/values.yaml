@@ -303,6 +303,8 @@ processor:
 
   # Processor specific configuration
   config:
+    # Group identical plain-string first user messages; system grouping takes precedence.
+    groupFirstUserMessage: false
     addr: ":9090"
     taskWaitTime: "1s"
     pollInterval: "5s"
