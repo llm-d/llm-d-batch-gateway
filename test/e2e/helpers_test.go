@@ -715,25 +715,29 @@ const e2eCurlPod = "batch-gateway-e2e-curl"
 func ensureE2ECurlPod(t *testing.T) {
 	t.Helper()
 
-	if phaseOut, err := exec.Command("kubectl", "get", "pod",
+	// One query returns "<phase> <run-id>"; both are empty if the pod is absent.
+	out, err := exec.Command("kubectl", "get", "pod",
 		e2eCurlPod,
 		"-n", testNamespace,
-		"-o", "jsonpath={.status.phase}",
-	).CombinedOutput(); err != nil || strings.TrimSpace(string(phaseOut)) == "" {
-		createE2ECurlPod(t)
-	} else {
-		phase := strings.TrimSpace(string(phaseOut))
-		if phase != "Running" && phase != "Pending" {
-			out, deleteErr := exec.Command("kubectl", "delete", "pod",
-				e2eCurlPod,
-				"-n", testNamespace,
-				"--ignore-not-found",
-			).CombinedOutput()
-			if deleteErr != nil {
-				t.Fatalf("failed to delete stale e2e curl pod: %v\n%s", deleteErr, out)
-			}
-			createE2ECurlPod(t)
+		"--ignore-not-found",
+		"-o", `jsonpath={.status.phase} {.metadata.labels.e2e_run_id}`,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to read e2e curl pod: %v\n%s", err, out)
+	}
+	phase, podRunID, _ := strings.Cut(strings.TrimSpace(string(out)), " ")
+	if (phase != "Running" && phase != "Pending") || podRunID != testRunID {
+		// Recreating a pod from another run reaps loops it orphaned.
+		out, deleteErr := exec.Command("kubectl", "delete", "pod",
+			e2eCurlPod,
+			"-n", testNamespace,
+			"--ignore-not-found",
+			"--timeout=90s",
+		).CombinedOutput()
+		if deleteErr != nil {
+			t.Fatalf("failed to delete e2e curl pod from a previous run: %v\n%s", deleteErr, out)
 		}
+		createE2ECurlPod(t)
 	}
 
 	waitOut, err := exec.Command("kubectl", "wait",
@@ -750,18 +754,31 @@ func ensureE2ECurlPod(t *testing.T) {
 func createE2ECurlPod(t *testing.T) {
 	t.Helper()
 
+	// Numeric uid: runAsNonRoot can't verify a symbolic image USER on containerd.
 	manifest := fmt.Sprintf(`apiVersion: v1
 kind: Pod
 metadata:
   name: %s
   namespace: %s
+  labels:
+    e2e_run_id: "%s"
 spec:
   restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   containers:
   - name: curl
-    image: curlimages/curl:8.8.0
+    image: %s
     command: ["sleep", "infinity"]
-`, e2eCurlPod, testNamespace)
+    securityContext:
+      runAsUser: 100
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+`, e2eCurlPod, testNamespace, testRunID, testCurlImage)
 
 	cmd := exec.Command("kubectl", "create", "-f", "-")
 	cmd.Stdin = strings.NewReader(manifest)
