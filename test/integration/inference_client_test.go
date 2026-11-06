@@ -41,15 +41,9 @@ import (
 // Run tests with:
 //   make test-integration
 //   Or manually: go test -v -tags=integration ./test/integration/...
-
-func findContainerTool() string {
-	for _, tool := range []string{"docker", "podman"} {
-		if _, err := exec.LookPath(tool); err == nil {
-			return tool
-		}
-	}
-	return ""
-}
+//
+// findContainerTool is defined in util_test.go (shared with the GCS emulator
+// provisioning helpers in gcs_client_test.go).
 
 func startMockInferenceServer(containerTool string, port int, args ...string) error {
 	baseArgs := []string{

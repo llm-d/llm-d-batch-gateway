@@ -109,3 +109,51 @@ jobs:
       - name: Cleanup
         if: always()
         run: make dev-rm-cluster
+
+  gcs-integration-tests:
+    name: GCS Integration Tests (fake-gcs-server)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      # No Kind/Helm/cluster deploy needed: the test harness auto-provisions a
+      # fake-gcs-server container and points the GCS SDK at it via
+      # STORAGE_EMULATOR_HOST. Docker is preinstalled on ubuntu-latest.
+      - name: Run GCS integration tests
+        run: make test-integration-gcs
+
+      - name: Open issue on failure
+        if: failure() && github.event_name != 'pull_request'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'bug,ci'
+            });
+            if (existing.some(i => i.title.startsWith('GCS integration tests failed'))) {
+              console.log('Skipping: open GCS integration test failure issue already exists');
+              return;
+            }
+            const content = await github.rest.repos.getContent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              path: '.github/CODEOWNERS'
+            });
+            const text = Buffer.from(content.data.content, 'base64').toString();
+            const owners = [...new Set((text.match(/@[\w-]+/g) || []).map(h => h.slice(1)))];
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `GCS integration tests failed on ${new Date().toISOString().split('T')[0]}`,
+              body: `[Run logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              labels: ['bug', 'ci'],
+              assignees: owners
+            });
