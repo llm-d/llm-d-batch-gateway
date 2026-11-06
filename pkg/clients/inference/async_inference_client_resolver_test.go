@@ -26,6 +26,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	asyncapi "github.com/llm-d/llm-d-async/api"
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 )
 
 const testAsyncConsumerID = "processor-0"
@@ -341,6 +342,7 @@ func TestNewAsyncResolverSQLPostgres(t *testing.T) {
 	if sqlURL == "" {
 		t.Skip("TEST_POSTGRES_URL not set")
 	}
+	migrateAsyncSQLSchema(t, sqlURL)
 
 	r, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
 		Transport:         AsyncTransportSQL,
@@ -363,4 +365,16 @@ func TestNewAsyncResolverSQLPostgres(t *testing.T) {
 	if r.SharedClientFor("model-a") == nil {
 		t.Fatal("expected SQL async client for model-a")
 	}
+}
+
+// migrateAsyncSQLSchema applies the sql transport schema the way an llm-d-async
+// processor does at startup. producer-sql only checks the schema, so a producer
+// cannot open a database no processor has migrated.
+func migrateAsyncSQLSchema(t *testing.T, sqlURL string) {
+	t.Helper()
+	store, err := sqlqueue.Open(context.Background(), sqlURL, sqlqueue.WithMigrate())
+	if err != nil {
+		t.Fatalf("migrate async SQL schema: %v", err)
+	}
+	_ = store.Close()
 }
