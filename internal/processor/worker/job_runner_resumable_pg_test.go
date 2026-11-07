@@ -29,6 +29,7 @@ import (
 	mockdb "github.com/llm-d/llm-d-batch-gateway/internal/database/mock"
 	"github.com/llm-d/llm-d-batch-gateway/internal/database/postgresql"
 	mockfiles "github.com/llm-d/llm-d-batch-gateway/internal/files_store/mock"
+	"github.com/llm-d/llm-d-batch-gateway/internal/processor/batchctx"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/metrics"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/batch_utils"
@@ -405,5 +406,165 @@ func TestRunJob_Resumable_FreshActivationKeepsInProgressAt(t *testing.T) {
 	}
 	if status.CompletedAt != nil && *status.CompletedAt < *status.InProgressAt {
 		t.Fatalf("completed_at (%d) < in_progress_at (%d): the activation must not stamp into the future", status.CompletedAt, status.InProgressAt)
+	}
+}
+
+// TestFinalizeResumableJob_PersistedCancelFence runs the in_progress →
+// finalizing transition against real PostgreSQL. The processor's in-memory
+// status is stale (a progress write rewrote the request counts), so the CAS
+// must run against the re-read row: without a persisted cancel the batch
+// completes; with one (the API server's markCancelling, which does not bump
+// the epoch) the cancel is not overwritten and the batch ends cancelled.
+func TestFinalizeResumableJob_PersistedCancelFence(t *testing.T) {
+	url := os.Getenv("TEST_POSTGRES_URL")
+	if url == "" {
+		t.Skip("TEST_POSTGRES_URL not set")
+	}
+
+	tests := []struct {
+		name       string
+		cancel     bool
+		wantErr    error
+		wantStatus openai.BatchStatus
+	}{
+		{
+			name:       "no cancel completes despite stale in-memory status",
+			wantStatus: openai.BatchStatusCompleted,
+		},
+		{
+			name:       "persisted cancel wins over finalizing",
+			cancel:     true,
+			wantErr:    batchctx.ErrCancelled,
+			wantStatus: openai.BatchStatusCancelled,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := testLoggerCtx(t)
+			const processorID = "processor-cancel-fence-pg"
+			const jobID = "job-resumable-pg-cancel-fence"
+			const tenantID = "tenant-1"
+			inputFileID := "file-input-" + jobID
+
+			filesRoot, fileDBClient := seedDurableInput(t, tenantID, inputFileID, []string{"test-model", "test-model"})
+
+			cfg := &postgresql.PostgreSQLConfig{Url: url}
+			batchDB, err := postgresql.NewPostgresBatchDBClient(ctx, cfg)
+			if err != nil {
+				t.Fatalf("NewPostgresBatchDBClient: %v", err)
+			}
+			t.Cleanup(func() { _ = batchDB.Close() })
+			queue, err := postgresql.NewPostgresBatchQueueClient(ctx, cfg, processorID)
+			if err != nil {
+				t.Fatalf("NewPostgresBatchQueueClient: %v", err)
+			}
+			t.Cleanup(func() { _ = queue.Close() })
+			resumable, err := postgresql.NewPostgresResumableStore(ctx, cfg)
+			if err != nil {
+				t.Fatalf("NewPostgresResumableStore: %v", err)
+			}
+			t.Cleanup(func() { _ = resumable.Close() })
+			pool, err := pgxpool.New(ctx, url)
+			if err != nil {
+				t.Fatalf("pgxpool: %v", err)
+			}
+			defer pool.Close()
+			if _, err := pool.Exec(ctx, "TRUNCATE batch_items CASCADE"); err != nil {
+				t.Fatalf("truncate: %v", err)
+			}
+
+			if err := batchDB.DBStore(ctx, &db.BatchItem{
+				BaseIndexes: db.BaseIndexes{ID: jobID, TenantID: tenantID},
+				BaseContents: db.BaseContents{
+					Status: mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusValidating}),
+					Spec:   mustJSON(t, openai.BatchSpec{InputFileID: inputFileID, Endpoint: openai.EndpointChatCompletions}),
+				},
+				ProcessorID: processorID,
+				Priority:    time.Now().Add(1 * time.Hour).UnixMicro(),
+				Epoch:       1,
+			}); err != nil {
+				t.Fatalf("seed batch item: %v", err)
+			}
+			if err := resumable.ActivateResumableBatch(ctx, &db.ResumableActivation{
+				BatchID:     jobID,
+				ProcessorID: processorID,
+				Epoch:       1,
+				LeaseTTL:    time.Minute,
+				Entries: []db.ResumableActivationEntry{
+					pendingLineEntry(jobID, "req-1", 0),
+					pendingLineEntry(jobID, "req-2", 1),
+				},
+			}); err != nil {
+				t.Fatalf("ActivateResumableBatch: %v", err)
+			}
+
+			filesClient := mockfiles.NewMockBatchFilesClient(filesRoot)
+			p := mustNewProcessorWithID(t, config.NewConfig(), &clientset.Clientset{
+				BatchDB:         batchDB,
+				BatchProgressDB: batchDB,
+				FileDB:          fileDBClient,
+				File:            filesClient,
+				Event:           mockdb.NewMockBatchEventChannelClient(),
+				Queue:           queue,
+				Resumable:       resumable,
+			}, processorID)
+
+			// The run's in-memory row, read before execution progressed.
+			jobItem, err := p.poller.fetchJobItemByID(ctx, jobID)
+			if err != nil {
+				t.Fatalf("fetchJobItemByID: %v", err)
+			}
+			jobInfo, err := batch_utils.FromDBItemToJobInfoObject(jobItem)
+			if err != nil {
+				t.Fatalf("FromDBItemToJobInfoObject: %v", err)
+			}
+
+			for _, customID := range []string{"req-1", "req-2"} {
+				key, digest, size := storeCheckpointedResult(t, filesClient, tenantID, jobID, customID)
+				if _, err := resumable.CheckpointEntryResult(ctx, jobID, stableBatchRequestID(jobID, customID), processorID, jobItem.Epoch, &db.ResumableResult{
+					Status:       db.ResumableEntryCompleted,
+					ResultKey:    key,
+					ResultBytes:  size,
+					ResultSHA256: digest,
+				}); err != nil {
+					t.Fatalf("CheckpointEntryResult %s: %v", customID, err)
+				}
+			}
+			// The progress tracker rewrites the persisted counts in place,
+			// leaving the in-memory status document stale.
+			if err := batchDB.DBUpdateProgress(ctx, jobID, jobItem.Epoch, mustJSON(t, openai.BatchRequestCounts{Total: 2, Completed: 2})); err != nil {
+				t.Fatalf("DBUpdateProgress: %v", err)
+			}
+
+			var cancellingAt int64
+			if tt.cancel {
+				// The API server's markCancelling write, whose NOTIFY has not
+				// reached the processor.
+				cancellingAt = persistCancelling(t, batchDB, jobID)
+			}
+
+			err = p.finalizeResumableJob(ctx, NewStatusUpdater(batchDB), jobItem, jobInfo)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("finalizeResumableJob error = %v, want %v", err, tt.wantErr)
+			}
+
+			env := &durableJobEnv{dbClient: batchDB, jobItem: jobItem}
+			status := durableJobStatus(t, env)
+			if status.Status != tt.wantStatus {
+				t.Fatalf("status = %s, want %s", status.Status, tt.wantStatus)
+			}
+			wantCounts := openai.BatchRequestCounts{Total: 2, Completed: 2, Failed: 0}
+			if status.RequestCounts != wantCounts {
+				t.Fatalf("counts = %+v, want %+v", status.RequestCounts, wantCounts)
+			}
+			if tt.cancel {
+				if status.CancellingAt == nil || *status.CancellingAt != cancellingAt {
+					t.Fatalf("cancelling_at = %v, want %d", status.CancellingAt, cancellingAt)
+				}
+				if status.FinalizingAt != nil {
+					t.Fatalf("finalizing_at = %d, want nil: the cancelling row was overwritten", *status.FinalizingAt)
+				}
+			}
+		})
 	}
 }
