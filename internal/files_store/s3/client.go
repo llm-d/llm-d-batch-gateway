@@ -460,8 +460,7 @@ func (c *Client) Retrieve(ctx context.Context, fileName, folderName string) (io.
 	})
 	if err != nil {
 		var noSuchKey *types.NoSuchKey
-		var noSuchBucket *types.NoSuchBucket
-		if errors.As(err, &noSuchKey) || errors.As(err, &noSuchBucket) {
+		if errors.As(err, &noSuchKey) {
 			return nil, nil, os.ErrNotExist
 		}
 		return nil, nil, err
@@ -499,10 +498,6 @@ func (c *Client) Delete(ctx context.Context, fileName, folderName string) error 
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		var noSuchBucket *types.NoSuchBucket
-		if errors.As(err, &noSuchBucket) {
-			return os.ErrNotExist
-		}
 		return err
 	}
 
