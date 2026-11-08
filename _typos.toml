@@ -21,3 +21,7 @@ golangci = "golangci"
 # Additive Increase Multiplicative Decrease (congestion control algorithm)
 AIMD = "AIMD"
 aimd = "aimd"
+
+# "mis-claim" / "mis-claimed" are intentional (wrongly claimed), not a misspelling of "miss".
+mis-claim = "mis-claim"
+mis-claimed = "mis-claimed"
