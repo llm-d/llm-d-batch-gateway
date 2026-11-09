@@ -285,8 +285,8 @@ type ProcessorConfig struct {
 	// TenantMetadataKey, when set, stores the job's tenant ID under this key
 	// in the metadata of each async inference request, so llm-d-async
 	// dispatch gates that key on request metadata can tell tenants apart
-	// (redis-quota; sql-quota needs llm-d-async newer than v1.0.0). Set it to
-	// "userid" to match llm-d-async's default quota attribute; with that key,
+	// (redis-quota; sql-quota is on llm-d-async main, not yet released). Set
+	// it to "userid" to match llm-d-async's default quota attribute; with that key,
 	// llm-d-async's default merge policy also stamps the tenant ID into its
 	// fairness header. Trace context keys (traceparent, tracestate) are
 	// rejected. Empty (default) omits it. Sync dispatch ignores it.

@@ -453,7 +453,7 @@ processor:
     sendFairnessHeader: false
     # Metadata key under which the processor stores the job's tenant ID on
     # async inference requests, so llm-d-async quota gates can tell tenants
-    # apart (redis-quota; sql-quota needs llm-d-async newer than v1.0.0).
+    # apart (redis-quota; sql-quota is on llm-d-async main, not yet released).
     # Use "userid" to match their default attribute. Must not be traceparent
     # or tracestate. Empty (default) omits it.
     tenantMetadataKey: ""
