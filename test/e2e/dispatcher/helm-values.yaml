@@ -39,5 +39,16 @@ ap:
         gate_type: "redis"
         gate_params:
           address: "redis-master.default.svc.cluster.local:6379"
+      # Per-tenant rate limit keyed on the userid metadata the processor sets
+      # (tenantMetadataKey in processor-async-values.yaml).
+      - queue_name: "llm-d-async:requests:sim-pool-quota"
+        request_path_url: "/v1/completions"
+        igw_base_url: "http://vllm-sim.default.svc.cluster.local:8000"
+        gate_type: "redis-quota"
+        gate_params:
+          address: "redis-master.default.svc.cluster.local:6379"
+          mode: "rate-limit"
+          limit: "1"
+          window: "10s"
   modelServerMonitor:
     enabled: false
