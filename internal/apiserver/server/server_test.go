@@ -18,12 +18,19 @@ package server
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
-	"errors"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
-	"slices"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,7 +38,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
 	"github.com/llm-d/llm-d-batch-gateway/internal/apiserver/common"
-	tlspkg "github.com/llm-d/llm-d-batch-gateway/internal/tls"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/clientset"
 )
 
@@ -47,56 +53,134 @@ func freePort(t *testing.T) string {
 	return fmt.Sprintf("%d", port)
 }
 
-func TestServeTLSWithIncompatibleCipherDisablesHTTP2(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
+// generateSelfSignedCert creates a temporary self-signed certificate and key
+// suitable for a test TLS server on 127.0.0.1.
+func generateSelfSignedCert(t *testing.T) (certFile, keyFile string) {
+	t.Helper()
 
-	tlsOpts, err := tlspkg.Resolve(
-		testr.New(t),
-		"VersionTLS12",
-		"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-		"h2",
-	)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	httpserver := &http.Server{
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{{}},
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	certDir := t.TempDir()
+	certFile = filepath.Join(certDir, "tls.crt")
+	keyFile = filepath.Join(certDir, "tls.key")
+
+	certOut, err := os.Create(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}); err != nil {
+		t.Fatal(err)
+	}
+	certOut.Close()
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyOut, err := os.Create(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}); err != nil {
+		t.Fatal(err)
+	}
+	keyOut.Close()
+
+	return certFile, keyFile
+}
+
+// TestStartTLSWithIncompatibleCipherServesHTTP1Only exercises the full
+// Server.Start() wiring: config through tlspkg.Resolve to the TLS handshake.
+// An AES-256-GCM-only TLS 1.2 cipher list cannot serve HTTP/2 (Go's net/http
+// requires an ECDHE AES-128-GCM suite), so the connection must negotiate
+// HTTP/1.1.
+func TestStartTLSWithIncompatibleCipherServesHTTP1Only(t *testing.T) {
+	logger := testr.New(t)
+	apiPort := freePort(t)
+	obsPort := freePort(t)
+	certFile, keyFile := generateSelfSignedCert(t)
+
+	srv := &Server{
+		logger: logger,
+		config: &common.ServerConfig{
+			Host:              "127.0.0.1",
+			Port:              apiPort,
+			ObservabilityPort: obsPort,
+			SSLCertFile:       certFile,
+			SSLKeyFile:        keyFile,
+			TLSMinVersion:     "VersionTLS12",
+			TLSCipherSuites:   "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+			TLSNextProtos:     "h2",
 		},
-	}
-	defer httpserver.Close()
-	for _, opt := range tlsOpts {
-		opt(httpserver.TLSConfig)
-	}
-	if httpserver.TLSConfig != nil && !slices.Contains(httpserver.TLSConfig.NextProtos, "h2") {
-		protocols := new(http.Protocols)
-		protocols.SetHTTP1(true)
-		httpserver.Protocols = protocols
+		serverReady: &atomic.Bool{},
+		apiHandler:  http.NewServeMux(),
+		obsHandler:  http.NewServeMux(),
+		clients:     &clientset.Clientset{},
 	}
 
-	serveDone := make(chan error, 1)
+	parentCtx, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+
+	startErr := make(chan error, 1)
 	go func() {
-		serveDone <- httpserver.ServeTLS(ln, "", "")
+		startErr <- srv.Start(parentCtx)
 	}()
 
-	select {
-	case err := <-serveDone:
-		t.Fatalf("ServeTLS returned before shutdown: %v", err)
-	case <-time.After(100 * time.Millisecond):
+	for i := 0; i < 50; i++ {
+		if srv.serverReady.Load() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !srv.serverReady.Load() {
+		t.Fatal("server did not become ready")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := httpserver.Shutdown(ctx); err != nil {
-		t.Fatalf("Shutdown() error = %v", err)
+	// Dial with a TLS client that offers both h2 and http/1.1 via ALPN.
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+			ForceAttemptHTTP2: true,
+		},
 	}
-	if err := <-serveDone; !errors.Is(err, http.ErrServerClosed) {
-		t.Fatalf("ServeTLS() error = %v, want %v", err, http.ErrServerClosed)
+	resp, err := client.Get(fmt.Sprintf("https://127.0.0.1:%s/test", apiPort))
+	if err != nil {
+		t.Fatalf("TLS request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.Proto != "HTTP/1.1" {
+		t.Fatalf("negotiated protocol = %s, want HTTP/1.1 (HTTP/2 requires an AES-128-GCM suite)", resp.Proto)
+	}
+
+	cancelParent()
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Fatalf("Start() returned error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for Start() to return")
 	}
 }
 
