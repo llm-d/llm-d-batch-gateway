@@ -96,7 +96,12 @@ jobs:
               path: '.github/CODEOWNERS'
             });
             const text = Buffer.from(content.data.content, 'base64').toString();
-            const owners = [...new Set((text.match(/@[\w-]+/g) || []).map(h => h.slice(1)))];
+            // Match full handles including team slugs (@org/team) so a team
+            // entry is not truncated to its org prefix, then keep only user
+            // logins: the issues API accepts users as assignees, not teams.
+            const owners = [...new Set((text.match(/@[\w/-]+/g) || [])
+              .map(h => h.slice(1))
+              .filter(h => !h.includes('/')))];
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -148,7 +153,12 @@ jobs:
               path: '.github/CODEOWNERS'
             });
             const text = Buffer.from(content.data.content, 'base64').toString();
-            const owners = [...new Set((text.match(/@[\w-]+/g) || []).map(h => h.slice(1)))];
+            // Match full handles including team slugs (@org/team) so a team
+            // entry is not truncated to its org prefix, then keep only user
+            // logins: the issues API accepts users as assignees, not teams.
+            const owners = [...new Set((text.match(/@[\w/-]+/g) || [])
+              .map(h => h.slice(1))
+              .filter(h => !h.includes('/')))];
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
