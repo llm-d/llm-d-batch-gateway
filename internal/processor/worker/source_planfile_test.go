@@ -474,6 +474,8 @@ func TestTenantMetadata(t *testing.T) {
 		want     map[string]string
 	}{
 		{name: "key and tenant set", key: "userid", tenantID: "tenant-a", want: map[string]string{"userid": "tenant-a"}},
+		// A gate with a custom attribute: the configured key is used, not "userid".
+		{name: "custom key", key: "tenant_id", tenantID: "tenant-b", want: map[string]string{"tenant_id": "tenant-b"}},
 		{name: "key empty disables", key: "", tenantID: "tenant-a", want: nil},
 		{name: "job without tenant", key: "userid", tenantID: "", want: nil},
 	}

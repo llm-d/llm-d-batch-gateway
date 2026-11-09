@@ -885,6 +885,32 @@ func TestValidate_RouteKeyMethod(t *testing.T) {
 	}
 }
 
+func TestValidate_TenantMetadataKey(t *testing.T) {
+	tests := []struct {
+		key     string
+		wantErr bool
+	}{
+		{key: "", wantErr: false},
+		{key: "userid", wantErr: false},
+		{key: "tenant_id", wantErr: false},
+		// Trace context injection would overwrite the tenant under these keys.
+		{key: "traceparent", wantErr: true},
+		{key: "tracestate", wantErr: true},
+		{key: "TraceParent", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			c := NewConfig()
+			c.DispatchMode = DispatchModeSync
+			c.ModelGateways = validPerModelConfig()
+			c.TenantMetadataKey = tt.key
+			if err := c.Validate(); (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() with tenant_metadata_key %q: err = %v, wantErr %v", tt.key, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestProcessorConfig_Validate_AsyncDispatch(t *testing.T) {
 	validAsyncConfig := func() *ProcessorConfig {
 		c := NewConfig()

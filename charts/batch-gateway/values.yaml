@@ -452,9 +452,10 @@ processor:
     # false (default) omits the header entirely.
     sendFairnessHeader: false
     # Metadata key under which the processor stores the job's tenant ID on
-    # async inference requests, so llm-d-async quota gates (redis-quota,
-    # sql-quota) can tell tenants apart. Use "userid" to match their default
-    # attribute. Empty (default) omits it.
+    # async inference requests, so llm-d-async quota gates can tell tenants
+    # apart (redis-quota; sql-quota needs llm-d-async newer than v1.0.0).
+    # Use "userid" to match their default attribute. Must not be traceparent
+    # or tracestate. Empty (default) omits it.
     tenantMetadataKey: ""
     # Enable pprof profiling endpoints on the observability server (/debug/pprof/)
     enablePprof: false
