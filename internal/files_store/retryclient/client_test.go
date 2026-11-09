@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -257,6 +258,36 @@ func TestStore_PermanentErrorsAreNotRetried(t *testing.T) {
 			}
 			if mock.storeCalls != 1 {
 				t.Fatalf("permanent %v must not retry: expected 1 store call, got %d", tc.err, mock.storeCalls)
+			}
+		})
+	}
+}
+
+// TestStore_WrappedPermanentErrorsAreNotRetried pins the classification for
+// errors shaped the way every backend produces them: the fs, s3, and gcs
+// clients wrap the sentinel with key context (fmt.Errorf("%w: %s", ...))
+// rather than returning the bare sentinel. Each wrapped form must
+// short-circuit retry the same way the bare sentinel does.
+func TestStore_WrappedPermanentErrorsAreNotRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"wrapped ErrFileExists (s3/fs/gcs duplicate Store)", fmt.Errorf("%w: %s", api.ErrFileExists, "folder/f.txt")},
+		{"wrapped ErrFileTooLarge (s3/gcs size limit)", fmt.Errorf("%w: %s", api.ErrFileTooLarge, "folder/f.txt")},
+		{"wrapped ErrTooManyLines (s3/gcs line limit)", fmt.Errorf("%w: %s", api.ErrTooManyLines, "folder/f.txt")},
+		{"wrapped ErrNotExist (gcs missing object on Retrieve)", fmt.Errorf("%w: %s", os.ErrNotExist, "folder/f.txt")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &permanentErrClient{storeErr: tc.err}
+			c := New(mock, retryCfg(), "test")
+
+			_, err := c.Store(context.Background(), "f.txt", "folder", 0, 0, bytes.NewReader([]byte("data")))
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("expected errors.Is to see through the wrap to %v, got %v", tc.err, err)
+			}
+			if mock.storeCalls != 1 {
+				t.Fatalf("wrapped permanent %v must not retry: expected 1 store call, got %d", tc.err, mock.storeCalls)
 			}
 		})
 	}
