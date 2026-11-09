@@ -43,8 +43,9 @@ gcloud storage buckets add-iam-policy-binding gs://${BUCKET} \
   --project=${GCP_PROJECT}
 
 # Startup bucket check (storage.buckets.get) — needed because
-# verifyBucketOnStart defaults to true in the chart. Skip this binding and set
-# verifyBucketOnStart: false if the SA should hold no bucket-level permissions.
+# verifyBucketOnStart defaults to true (chart and raw config alike; omission
+# means verify). Skip this binding and set verifyBucketOnStart: false if the
+# SA should hold no bucket-level permissions.
 gcloud storage buckets add-iam-policy-binding gs://${BUCKET} \
   --member="serviceAccount:${GSA_EMAIL}" \
   --role="roles/storage.bucketViewer" \
@@ -126,8 +127,9 @@ global:
       prefix: "batch-gateway"   # optional key prefix
       projectId: ""             # only required when autoCreateBucket is true
       autoCreateBucket: false   # bucket must pre-exist; see Auto-creating the bucket (opt-in)
-      verifyBucketOnStart: true # HeadBucket at startup; requires roles/storage.bucketViewer,
-                               # or set false when the SA holds object-level roles only
+      verifyBucketOnStart: true # HeadBucket at startup; also the default when omitted
+                               # (chart and raw config agree). Requires roles/storage.bucketViewer,
+                               # or set false explicitly when the SA holds object-level roles only
     retry:
       maxRetries: 3
       initialBackoff: "1s"

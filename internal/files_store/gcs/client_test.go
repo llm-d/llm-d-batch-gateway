@@ -922,19 +922,38 @@ func TestValidate(t *testing.T) {
 	})
 
 	t.Run("auto_create with verify_off is invalid (auto-create only runs on the startup HeadBucket path)", func(t *testing.T) {
-		cfg := Config{Bucket: "b", ProjectID: "p", AutoCreateBucket: true, VerifyBucketOnStart: false}
+		cfg := Config{Bucket: "b", ProjectID: "p", AutoCreateBucket: true, VerifyBucketOnStart: boolPtr(false)}
 		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "verify_bucket_on_start") {
 			t.Errorf("expected verify_bucket_on_start error, got %v", err)
 		}
 	})
 
 	t.Run("auto_create with verify_on is valid", func(t *testing.T) {
-		cfg := Config{Bucket: "b", ProjectID: "p", AutoCreateBucket: true, VerifyBucketOnStart: true}
+		cfg := Config{Bucket: "b", ProjectID: "p", AutoCreateBucket: true, VerifyBucketOnStart: boolPtr(true)}
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("expected valid, got %v", err)
 		}
 	})
+
+	t.Run("omitted verify_bucket_on_start defaults to on (matches the chart)", func(t *testing.T) {
+		// Omission must behave the same as the chart's explicit true.
+		cfg := Config{Bucket: "b"}
+		if !cfg.VerifyOnStart() {
+			t.Error("expected omitted verify_bucket_on_start to default to true")
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("expected valid, got %v", err)
+		}
+
+		withCreate := Config{Bucket: "b", ProjectID: "p", AutoCreateBucket: true}
+		if err := withCreate.Validate(); err != nil {
+			t.Errorf("expected auto_create valid when verify is omitted (defaults on), got %v", err)
+		}
+	})
 }
+
+// boolPtr is the standard test helper for *bool config fields.
+func boolPtr(b bool) *bool { return &b }
 
 func TestEnsureBucket(t *testing.T) {
 	ctx := context.Background()
@@ -1026,7 +1045,7 @@ func TestNew_VerifyBucketOnStart(t *testing.T) {
 	// *storage.Client (which would require a httptest-backed GCS server).
 	runGate := func(cfg Config, bucket *mockBucket) error {
 		client, _ := newTestClient(bucket, cfg.Prefix)
-		if cfg.VerifyBucketOnStart {
+		if cfg.VerifyOnStart() {
 			if err := client.ensureBucket(ctx, cfg.AutoCreateBucket, cfg.ProjectID); err != nil {
 				return fmt.Errorf("ensure bucket %s: %w", cfg.Bucket, err)
 			}
@@ -1040,7 +1059,7 @@ func TestNew_VerifyBucketOnStart(t *testing.T) {
 		bucket.exists = false
 		cfg := Config{
 			Bucket:              testBucketName,
-			VerifyBucketOnStart: true,
+			VerifyBucketOnStart: boolPtr(true),
 			AutoCreateBucket:    false,
 		}
 		err := runGate(cfg, bucket)
@@ -1054,7 +1073,7 @@ func TestNew_VerifyBucketOnStart(t *testing.T) {
 		bucket.attrsErr = permDeniedErr
 		cfg := Config{
 			Bucket:              testBucketName,
-			VerifyBucketOnStart: true,
+			VerifyBucketOnStart: boolPtr(true),
 			AutoCreateBucket:    false,
 		}
 		err := runGate(cfg, bucket)
@@ -1074,7 +1093,7 @@ func TestNew_VerifyBucketOnStart(t *testing.T) {
 		bucket.attrsErr = permDeniedErr
 		cfg := Config{
 			Bucket:              testBucketName,
-			VerifyBucketOnStart: false,
+			VerifyBucketOnStart: boolPtr(false),
 			AutoCreateBucket:    false,
 		}
 		if err := runGate(cfg, bucket); err != nil {
@@ -1091,7 +1110,7 @@ func TestNew_VerifyBucketOnStart(t *testing.T) {
 		bucket.exists = false
 		cfg := Config{
 			Bucket:              testBucketName,
-			VerifyBucketOnStart: false,
+			VerifyBucketOnStart: boolPtr(false),
 			AutoCreateBucket:    false,
 		}
 		if err := runGate(cfg, bucket); err != nil {

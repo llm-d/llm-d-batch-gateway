@@ -110,18 +110,25 @@ type Config struct {
 	ProjectID        string `yaml:"project_id"`
 	AutoCreateBucket bool   `yaml:"auto_create_bucket"`
 	// VerifyBucketOnStart controls whether New runs a HeadBucket (bucket.Attrs) at
-	// startup. Set to false to skip the startup check — required when the workload
-	// service account lacks roles/storage.bucketViewer (e.g. GKE Workload Identity
-	// granted only objectUser), since the HeadBucket otherwise fails with 403 and
-	// prevents the pod from starting. When skipped, an unreachable or non-existent
+	// startup. Tri-state: nil and true both enable the check, so omitting the
+	// field in a raw config matches the Helm chart default
+	// (verifyBucketOnStart: true). Set it to false to skip the startup check —
+	// required when the workload service account lacks
+	// roles/storage.bucketViewer (e.g. GKE Workload Identity granted only
+	// objectUser), since the HeadBucket otherwise fails with 403 and prevents
+	// the pod from starting. When skipped, an unreachable or non-existent
 	// bucket surfaces as an error on the first object operation instead.
-	// The Helm chart ships this as true by default (see verifyBucketOnStart in the
-	// chart values), so chart users retain the startup check unless they opt out.
 	// Note: auto_create_bucket only runs at startup under this flag; the
 	// combination auto_create_bucket=true with verify_bucket_on_start=false
 	// is rejected by Validate (auto-create would never run and the flag would
 	// be silently dropped).
-	VerifyBucketOnStart bool `yaml:"verify_bucket_on_start"`
+	VerifyBucketOnStart *bool `yaml:"verify_bucket_on_start"`
+}
+
+// VerifyOnStart reports whether the startup HeadBucket should run: unset
+// defaults to true, aligning raw-config behavior with the Helm chart default.
+func (c *Config) VerifyOnStart() bool {
+	return c.VerifyBucketOnStart == nil || *c.VerifyBucketOnStart
 }
 
 // Validate checks that all required fields are set.
@@ -138,7 +145,7 @@ func (c *Config) Validate() error {
 	// can't HeadBucket — typically objectUser-only, which also can't create
 	// buckets). Reject the combination so a misconfigured chart fails at
 	// startup instead of silently never creating the bucket.
-	if c.AutoCreateBucket && !c.VerifyBucketOnStart {
+	if c.AutoCreateBucket && !c.VerifyOnStart() {
 		return fmt.Errorf("gcs.auto_create_bucket requires verify_bucket_on_start=true (auto-create only runs on the startup HeadBucket path)")
 	}
 	return nil
@@ -216,7 +223,7 @@ func newFromClient(ctx context.Context, cfg Config, gcsClient *storage.Client) (
 		},
 	}
 
-	if cfg.VerifyBucketOnStart {
+	if cfg.VerifyOnStart() {
 		if err := c.ensureBucket(ctx, cfg.AutoCreateBucket, cfg.ProjectID); err != nil {
 			return nil, fmt.Errorf("ensure bucket %s: %w", cfg.Bucket, err)
 		}

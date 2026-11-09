@@ -132,7 +132,7 @@ file_client:
 	if !cfg.FileClientCfg.GCSConfig.AutoCreateBucket {
 		t.Error("expected auto_create_bucket to be true")
 	}
-	if cfg.FileClientCfg.GCSConfig.VerifyBucketOnStart {
+	if cfg.FileClientCfg.GCSConfig.VerifyOnStart() {
 		t.Error("expected verify_bucket_on_start to be false")
 	}
 }

@@ -105,11 +105,13 @@ global:
                                # the combination autoCreateBucket=true + verifyBucketOnStart=false
                                # is rejected by the gcs client's Validate().
       # verifyBucketOnStart runs a HeadBucket against the configured bucket at
-      # pod startup, failing fast if the bucket is missing or unreachable. Set
-      # to false when the workload service account lacks roles/storage.bucketViewer
-      # (e.g. GKE Workload Identity granted only objectUser), since the HeadBucket
-      # otherwise fails with 403 and prevents the pod from starting. When skipped,
-      # an unreachable/non-existent bucket surfaces as an error on the first object
+      # pod startup, failing fast if the bucket is missing or unreachable. The
+      # default is true everywhere (omitting it in a raw config behaves the
+      # same as the chart's explicit true). Set to false when the workload
+      # service account lacks roles/storage.bucketViewer (e.g. GKE Workload
+      # Identity granted only objectUser), since the HeadBucket otherwise fails
+      # with 403 and prevents the pod from starting. When skipped, an
+      # unreachable/non-existent bucket surfaces as an error on the first object
       # operation instead.
       verifyBucketOnStart: true
     # Retry configuration for file storage operations (Store, Retrieve, Delete).

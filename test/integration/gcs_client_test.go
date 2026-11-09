@@ -82,14 +82,17 @@ const (
 // emulator (GCS_TEST_EMULATOR=1 or STORAGE_EMULATOR_HOST set) AutoCreateBucket is
 // left false so the bucket must be pre-created by gcsTestEnv; against real GCS,
 // ProjectID drives auto-create since the bucket is shared and pre-existing.
+// verifyTrue backs the *bool VerifyBucketOnStart fixtures below.
+var verifyTrue = true
+
 func gcsConfig() gcsclient.Config {
 	autoCreate := os.Getenv("GCS_TEST_PROJECT") != "" && !gcsEmulatorActive()
 	return gcsclient.Config{
 		Bucket:              os.Getenv("GCS_TEST_BUCKET"),
 		Prefix:              "",
 		ProjectID:           os.Getenv("GCS_TEST_PROJECT"),
-		AutoCreateBucket:    autoCreate, // real GCS can create; emulator needs the bucket pre-created
-		VerifyBucketOnStart: true,       // matches the chart default; integration tests run the verify-on path
+		AutoCreateBucket:    autoCreate,  // real GCS can create; emulator needs the bucket pre-created
+		VerifyBucketOnStart: &verifyTrue, // matches the chart default; integration tests run the verify-on path
 	}
 }
 
@@ -661,7 +664,7 @@ func TestGCSNewVerifyBucketOnStart(t *testing.T) {
 	// targets — not an invalid-name error.
 	cfg := gcsclient.Config{
 		Bucket:              "missing-bucket-" + uuid.NewString(),
-		VerifyBucketOnStart: true,
+		VerifyBucketOnStart: &verifyTrue,
 		AutoCreateBucket:    false,
 	}
 
