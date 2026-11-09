@@ -100,6 +100,9 @@ func TestNewConfig_Defaults(t *testing.T) {
 	if c.SendFairnessHeader {
 		t.Fatalf("SendFairnessHeader = true, want false by default")
 	}
+	if c.TenantMetadataKey != "" {
+		t.Fatalf("TenantMetadataKey = %q, want empty (off) by default", c.TenantMetadataKey)
+	}
 	if c.RouteKeyMethod != RouteKeyMethodBare {
 		t.Fatalf("RouteKeyMethod = %q, want empty (bare) by default", c.RouteKeyMethod)
 	}
@@ -709,6 +712,7 @@ model_gateways:
     tls_insecure_skip_verify: true
 default_output_expiration_seconds: 86400
 send_fairness_header: true
+tenant_metadata_key: userid
 route_key_method: tenant
 `)
 
@@ -783,6 +787,9 @@ route_key_method: tenant
 	}
 	if !c.SendFairnessHeader {
 		t.Fatalf("SendFairnessHeader = false, want true")
+	}
+	if c.TenantMetadataKey != "userid" {
+		t.Fatalf("TenantMetadataKey = %q, want %q", c.TenantMetadataKey, "userid")
 	}
 	if c.RouteKeyMethod != RouteKeyMethodTenant {
 		t.Fatalf("RouteKeyMethod = %q, want %q", c.RouteKeyMethod, RouteKeyMethodTenant)

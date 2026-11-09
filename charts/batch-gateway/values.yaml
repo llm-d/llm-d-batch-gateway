@@ -451,6 +451,11 @@ processor:
     # Whether to send x-gateway-inference-fairness-id on inference requests.
     # false (default) omits the header entirely.
     sendFairnessHeader: false
+    # Metadata key under which the processor stores the job's tenant ID on
+    # async inference requests, so llm-d-async quota gates (redis-quota,
+    # sql-quota) can tell tenants apart. Use "userid" to match their default
+    # attribute. Empty (default) omits it.
+    tenantMetadataKey: ""
     # Enable pprof profiling endpoints on the observability server (/debug/pprof/)
     enablePprof: false
 

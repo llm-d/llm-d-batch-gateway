@@ -520,6 +520,20 @@ tests:
           path: data["config.yaml"]
           pattern: 'send_fairness_header: true'
 
+  - it: should not render tenant_metadata_key when empty (default)
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'tenant_metadata_key:'
+
+  - it: should render tenant_metadata_key when set
+    set:
+      processor.config.tenantMetadataKey: userid
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'tenant_metadata_key: "userid"'
+
   - it: should not render route_key_method when empty (default)
     asserts:
       - notMatchRegex:

@@ -281,6 +281,15 @@ type ProcessorConfig struct {
 	// false (default) omits the fairness header.
 	SendFairnessHeader bool `yaml:"send_fairness_header"`
 
+	// TenantMetadataKey, when set, stores the job's tenant ID under this key
+	// in the metadata of each async inference request, so llm-d-async
+	// dispatch gates that key on request metadata (redis-quota, sql-quota)
+	// can tell tenants apart. Set it to "userid" to match llm-d-async's
+	// default quota attribute; with that key, llm-d-async's default merge
+	// policy also stamps the tenant ID into its fairness header. Empty
+	// (default) omits it. Sync dispatch ignores it.
+	TenantMetadataKey string `yaml:"tenant_metadata_key"`
+
 	// EnablePprof enables pprof profiling endpoints on the observability server.
 	EnablePprof bool `yaml:"enable_pprof"`
 

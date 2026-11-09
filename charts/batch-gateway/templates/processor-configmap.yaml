@@ -145,6 +145,9 @@ data:
     {{- if .Values.processor.config.sendFairnessHeader }}
     send_fairness_header: true
     {{- end }}
+    {{- if .Values.processor.config.tenantMetadataKey }}
+    tenant_metadata_key: {{ .Values.processor.config.tenantMetadataKey | quote }}
+    {{- end }}
     {{- if .Values.processor.config.routeKeyMethod }}
     route_key_method: {{ .Values.processor.config.routeKeyMethod | quote }}
     {{- end }}

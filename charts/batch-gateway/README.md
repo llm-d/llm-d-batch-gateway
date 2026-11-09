@@ -178,6 +178,13 @@ Redis; for SQL transport, use `sql-quota` instead of `redis-quota` when a
 database-backed quota is needed. See the [llm-d-async dispatch gate reference](https://github.com/llm-d/llm-d-async/blob/main/docs/dispatch-gates.md)
 for the supported gate types and parameters.
 
+Quota gates identify the tenant from request metadata (`attribute`, default
+`userid`), and a request without it is not limited. Set
+`processor.config.tenantMetadataKey` to the same key (for example `userid`) so
+the processor adds the job's tenant ID to each async request. With `userid`,
+llm-d-async's default merge policy also sends the tenant ID to the inference
+gateway in its fairness header.
+
 The SQL transport is experimental and requires Batch Gateway and llm-d-async
 images built with compatible upstream SQL producer support. SQL result reads
 are destructive in the current upstream producer and do not provide Redis-style
