@@ -55,6 +55,13 @@ type mockBucket struct {
 	// ErrBucketNotExist path. Used to simulate a HeadBucket permission error
 	// (e.g. googleapi 403) for the verify-bucket-on-start opt-out tests.
 	attrsErr error
+	// attrsAfterCreateErr, when non-nil, is returned by Attrs only once Create
+	// has been called (created=true). It models "the bucket exists but this
+	// identity cannot read it" for the post-409 ownership re-check, while the
+	// pre-create head still takes the normal missing-bucket path.
+	attrsAfterCreateErr error
+	// created tracks whether Create has been attempted on this mock.
+	created bool
 	// createErr, when non-nil, is returned by Create instead of the
 	// exists-flip path. Used to simulate a 409 Conflict (bucket already owned)
 	// for the ensureBucket already-owned tolerance test.
@@ -69,6 +76,9 @@ func (m *mockBucket) Attrs(_ context.Context) (*storage.BucketAttrs, error) {
 	if m.attrsErr != nil {
 		return nil, m.attrsErr
 	}
+	if m.created && m.attrsAfterCreateErr != nil {
+		return nil, m.attrsAfterCreateErr
+	}
 	if !m.exists {
 		return nil, storage.ErrBucketNotExist
 	}
@@ -78,7 +88,15 @@ func (m *mockBucket) Attrs(_ context.Context) (*storage.BucketAttrs, error) {
 func (m *mockBucket) Create(_ context.Context, _ string, _ *storage.BucketAttrs) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.created = true
 	if m.createErr != nil {
+		// A 409 Conflict means the bucket already exists somewhere — for the
+		// concurrent-race flavor, the winner's create (or an earlier run)
+		// already flipped it into existence. Model that: the conflict arrives
+		// while the bucket exists, so the post-409 re-head can distinguish
+		// "exists and readable" (race lost benignly) from a configured
+		// attrsAfterCreateErr (exists but foreign/unreadable).
+		m.exists = true
 		return m.createErr
 	}
 	if m.exists {
@@ -957,13 +975,34 @@ func TestEnsureBucket(t *testing.T) {
 		// GCS surfaces the loser as a 409 Conflict (already owned). The create is
 		// benign — the desired end state (bucket exists) is reached — so
 		// ensureBucket must tolerate the 409 and return nil, matching the S3
-		// backend's BucketAlreadyOwnedByYou handling.
+		// backend's BucketAlreadyOwnedByYou handling. The post-409 re-head must
+		// succeed (the bucket exists and this identity can read it).
 		bucket := newMockBucket()
 		bucket.exists = false // forces the HeadBucket-missing path so Create is attempted
 		bucket.createErr = &googleapi.Error{Code: http.StatusConflict, Message: "You already own this bucket."}
+		// Create flips the mock's exists flag (see mockBucket.Create), so the
+		// post-conflict Attrs re-check succeeds.
 		client, _ := newTestClient(bucket, "")
 		if err := client.ensureBucket(ctx, true, "test-project"); err != nil {
 			t.Fatalf("expected 409 already-owned to be tolerated (nil), got %v", err)
+		}
+	})
+
+	t.Run("create returns 409 but bucket not readable fails loudly", func(t *testing.T) {
+		// A 409 can also mean the bucket name is owned by another project, in
+		// which case the re-head fails for this identity. That must fail
+		// construction rather than being silently adopted.
+		bucket := newMockBucket()
+		bucket.exists = false
+		bucket.createErr = &googleapi.Error{Code: http.StatusConflict, Message: "Sorry, that name is already taken."}
+		bucket.attrsAfterCreateErr = &googleapi.Error{Code: http.StatusForbidden, Message: "does not have storage.buckets.get access"}
+		client, _ := newTestClient(bucket, "")
+		err := client.ensureBucket(ctx, true, "test-project")
+		if err == nil {
+			t.Fatal("expected an error when the post-409 re-head fails, got nil")
+		}
+		if !strings.Contains(err.Error(), "not readable by this identity") {
+			t.Errorf("expected the error to explain the 409/not-ours situation, got: %v", err)
 		}
 	})
 }

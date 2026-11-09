@@ -262,12 +262,21 @@ func (c *Client) ensureBucket(ctx context.Context, autoCreate bool, projectID st
 	}
 
 	if err := c.bucket.Create(ctx, projectID, nil); err != nil {
-		// Bucket names are globally unique; a concurrent create race where the
-		// bucket already exists (and is owned by this caller) surfaces as a 409
-		// Conflict. That race is benign — the desired end state (bucket exists)
-		// is reached — so tolerate it. Other create errors still fail construction.
 		var gErr *googleapi.Error
 		if errors.As(err, &gErr) && gErr.Code == http.StatusConflict {
+			// A 409 is ambiguous: we either lost a concurrent-create race or a
+			// bucket with this name exists but is owned by another project.
+			// Re-run the head: readable attrs mean the benign race — log the
+			// owner for visibility. An unreadable bucket fails construction
+			// rather than being silently adopted.
+			attrs, aerr := c.bucket.Attrs(ctx)
+			if aerr != nil {
+				return fmt.Errorf("create bucket %s: 409 Conflict but bucket not readable by this identity (bucket names are globally unique; it may be owned by another project): %w", c.bucketName, aerr)
+			}
+			logr.FromContextOrDiscard(ctx).V(logging.INFO).Info("Bucket create returned 409; bucket already exists and is readable",
+				"bucket", c.bucketName,
+				"ownerEntity", attrs.OwnerEntity,
+				"projectNumber", fmt.Sprintf("%v", attrs.ProjectNumber))
 			return nil
 		}
 		return fmt.Errorf("create bucket %s: %w", c.bucketName, err)
