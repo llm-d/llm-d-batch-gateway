@@ -83,6 +83,9 @@ make test-e2e
 | `TEST_SIM_SERVICE`        | `vllm-sim`                       | K8s service name of the primary model's simulator          |
 | `TEST_SIM_SERVICE_B`      | `vllm-sim-b`                     | K8s service name of the secondary model's simulator        |
 | `TEST_SIM_CONTROL_PORT`   | `8001`                           | vllm-vcr control API port on the simulator services        |
+| `TEST_DISPATCHER_RELEASE` | `dispatcher`                     | Helm release of the Async dispatcher (builds the default pod selector) |
+| `TEST_DISPATCHER_POD_SELECTOR` | `app.kubernetes.io/instance=$TEST_DISPATCHER_RELEASE,app.kubernetes.io/name=llm-d-async` | Label selector for the Async pods `BatchAPIHardKillRecovery` force-deletes |
+| `TEST_DISPATCHER_IMAGE`   | the pinned v1.0.0 release image  | Digest-pinned Async image `BatchAPIHardKillRecovery` requires on the Async pods |
 | `TEST_CHART_PATH`         | `../../charts/batch-gateway`     | Path to the Helm chart (used by HelmUpgrade tests)         |
 
 Example with overrides:

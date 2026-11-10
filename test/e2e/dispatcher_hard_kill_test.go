@@ -28,10 +28,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const (
-	durableAsyncImage  = "ghcr.io/llm-d/llm-d-async:v1.0.0@sha256:62a3e78320b0423c3c2ed327e6b870f786c3daf48f81a34f9e0332c80905663c"
-	durableAsyncDigest = "sha256:62a3e78320b0423c3c2ed327e6b870f786c3daf48f81a34f9e0332c80905663c"
-)
+// durableAsyncImage is the digest-pinned Async artifact the hard-kill test
+// proves. The default is the release image scripts/dev-deploy-dispatcher.sh
+// deploys; set TEST_DISPATCHER_IMAGE when the dispatcher runs another build,
+// such as a DISPATCHER_IMAGE override or a downstream distribution.
+var durableAsyncImage = getEnvOrDefault("TEST_DISPATCHER_IMAGE",
+	"ghcr.io/llm-d/llm-d-async:v1.0.0@sha256:62a3e78320b0423c3c2ed327e6b870f786c3daf48f81a34f9e0332c80905663c")
 
 type asyncPod struct {
 	Name    string
@@ -239,10 +241,12 @@ func readyAsyncPod(t *testing.T) (asyncPod, error) {
 
 func listAsyncPods(t *testing.T) ([]asyncPod, error) {
 	t.Helper()
-	release := getEnvOrDefault("TEST_DISPATCHER_RELEASE", "dispatcher")
+	selector := getEnvOrDefault("TEST_DISPATCHER_POD_SELECTOR", fmt.Sprintf(
+		"app.kubernetes.io/instance=%s,app.kubernetes.io/name=llm-d-async",
+		getEnvOrDefault("TEST_DISPATCHER_RELEASE", "dispatcher")))
 	out, err := exec.Command("kubectl", "get", "pods",
 		"--namespace", testNamespace,
-		"--selector", fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/name=llm-d-async", release),
+		"--selector", selector,
 		"-o", "json").CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("list Async pods: %w\n%s", err, out)
@@ -334,11 +338,15 @@ func waitForReplacementAsyncPod(t *testing.T, excludedUID string, timeout time.D
 
 func assertDurableAsyncImage(t *testing.T, pod asyncPod) {
 	t.Helper()
+	_, digest, pinned := strings.Cut(durableAsyncImage, "@")
+	if !pinned {
+		t.Fatalf("TEST_DISPATCHER_IMAGE %q must be pinned by digest (image@sha256:...)", durableAsyncImage)
+	}
 	if pod.Image != durableAsyncImage {
 		t.Fatalf("Async pod %s image = %q, want exact artifact %q", pod.Name, pod.Image, durableAsyncImage)
 	}
-	if !strings.HasSuffix(pod.ImageID, "@"+durableAsyncDigest) {
-		t.Fatalf("Async pod %s runtime imageID = %q, want digest %q", pod.Name, pod.ImageID, durableAsyncDigest)
+	if !strings.HasSuffix(pod.ImageID, "@"+digest) {
+		t.Fatalf("Async pod %s runtime imageID = %q, want digest %q", pod.Name, pod.ImageID, digest)
 	}
 	t.Logf("verified Async pod %s image=%s imageID=%s", pod.Name, pod.Image, pod.ImageID)
 }
