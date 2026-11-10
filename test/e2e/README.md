@@ -86,6 +86,7 @@ make test-e2e
 | `TEST_DISPATCHER_RELEASE` | `dispatcher`                     | Helm release of the Async dispatcher (builds the default pod selector) |
 | `TEST_DISPATCHER_POD_SELECTOR` | `app.kubernetes.io/instance=$TEST_DISPATCHER_RELEASE,app.kubernetes.io/name=llm-d-async` | Label selector for the Async pods `BatchAPIHardKillRecovery` force-deletes |
 | `TEST_DISPATCHER_IMAGE`   | the pinned v1.0.0 release image  | Digest-pinned Async image `BatchAPIHardKillRecovery` requires on the Async pods |
+| `TEST_DISPATCHER_RECLAIM_TIMEOUT` | `30s`                  | How long `BatchAPIHardKillRecovery` waits for the replacement Async pod to reclaim the killed pod's claims; must exceed Async's `claim_lease_ttl_seconds` plus `claim_reclaim_interval_ms` |
 | `TEST_CHART_PATH`         | `../../charts/batch-gateway`     | Path to the Helm chart (used by HelmUpgrade tests)         |
 
 Example with overrides:

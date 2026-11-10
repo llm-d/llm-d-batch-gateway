@@ -181,7 +181,11 @@ func testBatchAPIHardKillRecovery(t *testing.T, rdb *redis.Client) {
 		t.Fatal(err)
 	}
 	assertDurableAsyncImage(t, replacementPod)
-	reclaimed := waitForClaims(t, rdb, requestCount, initialClaims.Owners, 30*time.Second)
+	reclaimTimeout, err := time.ParseDuration(getEnvOrDefault("TEST_DISPATCHER_RECLAIM_TIMEOUT", "30s"))
+	if err != nil {
+		t.Fatalf("parse TEST_DISPATCHER_RECLAIM_TIMEOUT: %v", err)
+	}
+	reclaimed := waitForClaims(t, rdb, requestCount, initialClaims.Owners, reclaimTimeout)
 	if !sameStringMap(initialClaims.ResultQueues, reclaimed.ResultQueues) {
 		t.Fatalf("result queue routing changed across redelivery: before=%v after=%v",
 			initialClaims.ResultQueues, reclaimed.ResultQueues)
