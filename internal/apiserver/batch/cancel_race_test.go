@@ -106,7 +106,60 @@ func TestCancelBatchDoesNotRegressTerminalStatus(t *testing.T) {
 	}
 }
 
-func TestCancelBatchDoesNotMutateQueuedResumableBatch(t *testing.T) {
+func TestCancelBatchDoesNotRegressTerminalStatusResumable(t *testing.T) {
+	handler := setupTestHandler()
+	handler.clients.Queue = &completingQueue{
+		BatchPriorityQueueClient: handler.clients.Queue,
+		db:                       handler.clients.BatchDB,
+		t:                        t,
+	}
+
+	batchID := "batch-cancel-vs-complete-resumable"
+	batch := openai.Batch{
+		ID: batchID,
+		BatchSpec: openai.BatchSpec{
+			Object:           "batch",
+			InputFileID:      "file-abc123",
+			Endpoint:         openai.EndpointChatCompletions,
+			CompletionWindow: "24h",
+			CreatedAt:        time.Now().UTC().Unix(),
+		},
+		BatchStatusInfo: openai.BatchStatusInfo{
+			Status:        openai.BatchStatusInProgress,
+			RequestCounts: openai.BatchRequestCounts{Total: 10, Completed: 5},
+		},
+	}
+	item, err := converter.BatchToDBItem(&batch, common.DefaultTenantID, nil)
+	if err != nil {
+		t.Fatalf("BatchToDBItem: %v", err)
+	}
+	item.ProcessorID = "processor-0"
+	item.Epoch = 3
+	item.Resumable = true
+	if err := handler.clients.BatchDB.DBStore(context.Background(), item); err != nil {
+		t.Fatalf("DBStore: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/batches/"+batchID+"/cancel", nil)
+	req.SetPathValue("batch_id", batchID)
+	rr := httptest.NewRecorder()
+	handler.CancelBatch(rr, req)
+
+	items, _, _, err := handler.clients.BatchDB.DBGet(context.Background(),
+		&dbapi.BatchQuery{BaseQuery: dbapi.BaseQuery{IDs: []string{batchID}}}, true, 0, 1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("DBGet: %v (%d items)", err, len(items))
+	}
+	var stored openai.BatchStatusInfo
+	if err := json.Unmarshal(items[0].Status, &stored); err != nil {
+		t.Fatalf("unmarshal stored status: %v", err)
+	}
+	if stored.Status != openai.BatchStatusCompleted {
+		t.Errorf("stored status regressed from completed to %q (http %d, body %s)", stored.Status, rr.Code, rr.Body.String())
+	}
+}
+
+func TestCancelBatchTransitionsQueuedResumableBatch(t *testing.T) {
 	handler := setupTestHandler()
 	batchID := "batch-cancel-resumable"
 	batch := openai.Batch{
@@ -133,8 +186,8 @@ func TestCancelBatchDoesNotMutateQueuedResumableBatch(t *testing.T) {
 	req.SetPathValue("batch_id", batchID)
 	rr := httptest.NewRecorder()
 	handler.CancelBatch(rr, req)
-	if rr.Code != http.StatusConflict {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rr.Code, rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
 	}
 
 	items, _, _, err := handler.clients.BatchDB.DBGet(context.Background(),
@@ -146,7 +199,82 @@ func TestCancelBatchDoesNotMutateQueuedResumableBatch(t *testing.T) {
 	if err := json.Unmarshal(items[0].Status, &stored); err != nil {
 		t.Fatalf("unmarshal stored status: %v", err)
 	}
-	if stored.Status != openai.BatchStatusValidating {
-		t.Errorf("stored status changed to %q", stored.Status)
+	if stored.Status != openai.BatchStatusCancelling {
+		t.Errorf("stored status = %q, want %q", stored.Status, openai.BatchStatusCancelling)
+	}
+	if !items[0].Resumable {
+		t.Error("cancel dropped the resumable flag from the row")
+	}
+}
+
+func TestCancelBatchTransitionsInProgressResumableBatch(t *testing.T) {
+	handler := setupTestHandler()
+	batchID := "batch-cancel-resumable-inprogress"
+
+	events, err := handler.clients.Event.ECConsumerGetChannel(context.Background(), batchID)
+	if err != nil {
+		t.Fatalf("ECConsumerGetChannel: %v", err)
+	}
+	defer events.CloseFn()
+
+	batch := openai.Batch{
+		ID: batchID,
+		BatchSpec: openai.BatchSpec{
+			Object:           "batch",
+			InputFileID:      "file-abc123",
+			Endpoint:         openai.EndpointChatCompletions,
+			CompletionWindow: "24h",
+			CreatedAt:        time.Now().UTC().Unix(),
+		},
+		BatchStatusInfo: openai.BatchStatusInfo{
+			Status:        openai.BatchStatusInProgress,
+			RequestCounts: openai.BatchRequestCounts{Total: 10, Completed: 5},
+		},
+	}
+	item, err := converter.BatchToDBItem(&batch, common.DefaultTenantID, nil)
+	if err != nil {
+		t.Fatalf("BatchToDBItem: %v", err)
+	}
+	item.ProcessorID = "processor-0"
+	item.Epoch = 3
+	item.Resumable = true
+	if err := handler.clients.BatchDB.DBStore(context.Background(), item); err != nil {
+		t.Fatalf("DBStore: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/batches/"+batchID+"/cancel", nil)
+	req.SetPathValue("batch_id", batchID)
+	rr := httptest.NewRecorder()
+	handler.CancelBatch(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+
+	items, _, _, err := handler.clients.BatchDB.DBGet(context.Background(),
+		&dbapi.BatchQuery{BaseQuery: dbapi.BaseQuery{IDs: []string{batchID}}}, true, 0, 1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("DBGet: %v (%d items)", err, len(items))
+	}
+	var stored openai.BatchStatusInfo
+	if err := json.Unmarshal(items[0].Status, &stored); err != nil {
+		t.Fatalf("unmarshal stored status: %v", err)
+	}
+	if stored.Status != openai.BatchStatusCancelling {
+		t.Errorf("stored status = %q, want %q", stored.Status, openai.BatchStatusCancelling)
+	}
+	if stored.CancellingAt == nil {
+		t.Error("cancelling transition did not stamp cancelling_at")
+	}
+	if !items[0].Resumable {
+		t.Error("cancel dropped the resumable flag from the row")
+	}
+
+	select {
+	case ev := <-events.Events:
+		if ev.ID != batchID || ev.Type != dbapi.BatchEventCancel {
+			t.Errorf("event = {%s %d}, want {%s %d}", ev.ID, ev.Type, batchID, dbapi.BatchEventCancel)
+		}
+	default:
+		t.Error("cancel event was not delivered")
 	}
 }

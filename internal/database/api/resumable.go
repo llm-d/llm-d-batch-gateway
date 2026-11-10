@@ -50,16 +50,24 @@ func (s ResumableEntryStatus) IsTerminal() bool {
 // batch. Payloads live only in the file store; ResultKey/ResultBytes/
 // ResultSHA256 locate and verify the checkpointed result object.
 type ResumableEntry struct {
-	BatchID      string
-	RequestID    string
-	Ordinal      int64
-	CustomID     string
-	Status       ResumableEntryStatus
-	Attempts     int64
+	BatchID   string
+	RequestID string
+	Ordinal   int64
+	CustomID  string
+	Status    ResumableEntryStatus
+	Attempts  int64
+	// SubmittedBy records the processor that last marked the entry
+	// in_flight (the submitter): its per-processor async result route is
+	// where an unacknowledged delivery of the entry's result is stranded
+	// after a disruption, so the next owner recovers from there.
+	SubmittedBy  string
 	ResultKey    string
 	ResultBytes  int64
 	ResultSHA256 string
-	ErrorCode    string
+	// ErrorCode is the code of the entry's error-object line; empty for a
+	// failed entry whose line preserves a non-2xx HTTP response (an output
+	// line, like the sync pipeline's routing).
+	ErrorCode string
 }
 
 // ResumableActivationEntry is one entry of the activation set derived from the
@@ -105,6 +113,14 @@ type ResumableResumeState struct {
 	Completed          int64
 	Failed             int64
 	TerminalRequestIDs []string
+	// InFlightSubmittedBy maps each in-flight entry's request ID to the
+	// processor that submitted it. The resuming owner pre-stores these
+	// entries and defers their re-submission for a recovery window: their
+	// results — completed, failed, or deadline-exceeded — arrive on the
+	// submitter's per-processor result route and are recovered through it
+	// instead of re-running inference. Entries with an unknown submitter
+	// (written before submitter tracking) are absent and re-submit directly.
+	InFlightSubmittedBy map[string]string
 }
 
 // ResumableBatchStore activates batches into the resumable pipeline.
@@ -118,6 +134,20 @@ type ResumableBatchStore interface {
 	ActivateResumableBatch(ctx context.Context, activation *ResumableActivation) error
 }
 
+// ResumableFinalization is one fenced terminal transition of an activated
+// batch: the terminal status document to persist, fenced on the owning
+// processor and the source status the transition starts from.
+type ResumableFinalization struct {
+	BatchID     string
+	ProcessorID string
+	Epoch       int64
+	// ExpectedStatus is the source status name the transition is fenced on
+	// (e.g. "finalizing" or "cancelling").
+	ExpectedStatus string
+	// Status is the terminal status document to persist.
+	Status []byte
+}
+
 // ResumableBatchLeaseStore manages ownership of an activated batch.
 type ResumableBatchLeaseStore interface {
 	// RenewResumableBatchLease extends the owner's lease, fenced on the
@@ -125,14 +155,29 @@ type ResumableBatchLeaseStore interface {
 	// moved or lease lapsed) returns ErrConflict.
 	RenewResumableBatchLease(ctx context.Context, batchID, processorID string, epoch int64, ttl time.Duration) error
 
+	// FinalizeResumableBatch transitions an owned, activated batch to a
+	// terminal status and releases the lease (resumable/lease cleared;
+	// processor_id stays for audit). The write is fenced on the owning
+	// processor, epoch, an unexpired lease, and the expected source status. A
+	// zero-row update is retried as a verification: a row already persisting
+	// exactly the given status document is an idempotent success (an ambiguous
+	// response from an earlier attempt); anything else returns ErrConflict.
+	FinalizeResumableBatch(ctx context.Context, fin *ResumableFinalization) error
+
 	// RequeueResumableOrphan clears ownership of an orphaned resumable batch
-	// (processor_id = NULL, epoch + 1, recovery_attempts + 1) so it becomes
-	// dequeuable again, keeping status and entries. It is a fenced CAS on the
-	// snapshot the reconciler fetched: 0 rows means the snapshot is stale
-	// (e.g. a renewal raced) and is a no-op success. When requireExpiredLease
-	// is set the requeue additionally requires the lease to have lapsed — the
-	// wedged-owner trigger; a confirmed pod death requeues regardless.
-	RequeueResumableOrphan(ctx context.Context, batchID, processorID string, epoch int64, requireExpiredLease bool) error
+	// (processor_id = NULL, epoch + 1) so it becomes dequeuable again, keeping
+	// status and entries. It is a fenced CAS on the snapshot the reconciler
+	// fetched: 0 rows means the snapshot is stale (e.g. a renewal raced) and
+	// is a no-op success. When requireExpiredLease is set the requeue
+	// additionally requires the lease to have lapsed — the wedged-owner
+	// trigger; a confirmed pod death requeues regardless.
+	//
+	// bumpAttempts controls the recovery-budget accounting: the GC requeue
+	// of a dead or wedged owner and a processor handing back a claimed batch
+	// each count one recovery attempt, but the startup-recovery requeue must
+	// pass false — PQClaimOwned already counted the restart, and counting
+	// both would spend two attempts of the budget per rollout.
+	RequeueResumableOrphan(ctx context.Context, batchID, processorID string, epoch int64, requireExpiredLease, bumpAttempts bool) error
 }
 
 // ResumableEntryStore tracks per-request state of a resumable batch.
@@ -163,6 +208,15 @@ type ResumableEntryStore interface {
 
 	// FindEntryByRequestID returns the entry, or nil when it does not exist.
 	FindEntryByRequestID(ctx context.Context, batchID, requestID string) (*ResumableEntry, error)
+
+	// HasOpenEntryByRequest reports whether any batch holds a non-terminal
+	// (pending or in_flight) entry for the request ID. The result
+	// broadcaster's residue check uses it to decide whether an unrouted
+	// delivery may be acknowledged: a delivery whose entry is open can still
+	// be accounted for by whichever processor recovers its batch, so it must
+	// stay unacknowledged for lease redelivery; only a delivery whose entry
+	// is terminal or absent is safe to discard.
+	HasOpenEntryByRequest(ctx context.Context, requestID string) (bool, error)
 }
 
 // ResumableStore combines the resumable batch, lease, and entry capabilities

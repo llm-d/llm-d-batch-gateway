@@ -206,6 +206,15 @@ func (c *FileAPIHandler) CreateFile(w http.ResponseWriter, r *http.Request) {
 			writeSizeError()
 			return
 		}
+		if errors.Is(err, http.ErrMissingFile) {
+			common.WriteAPIError(w, r, openai.NewAPIError(
+				http.StatusBadRequest,
+				"",
+				"Missing required parameter: 'file'",
+				nil,
+			))
+			return
+		}
 		logger.Error(err, "failed to read form file from request")
 		common.WriteInternalServerError(w, r)
 		return

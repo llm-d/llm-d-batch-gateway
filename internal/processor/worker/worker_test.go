@@ -60,10 +60,19 @@ func TestValidate_InferenceClientRequired(t *testing.T) {
 		cs := validProcessorClients(t)
 		cs.Inference = nil
 		cs.AsyncInference = &inference.AsyncGatewayResolver{}
+		cs.Resumable = mockdb.NewMockResumableStore()
 		p := mustNewProcessor(t, config.NewConfig(), cs)
 
 		if err := p.validate(); err != nil {
 			t.Fatalf("unexpected validation error: %v", err)
+		}
+	})
+
+	t.Run("rejects inference without resumable store", func(t *testing.T) {
+		cs := validProcessorClients(t)
+		cs.Resumable = nil
+		if _, err := NewProcessor(config.NewConfig(), cs, "test-pod", testLogger(t)); err == nil {
+			t.Fatal("expected constructor error without a resumable store")
 		}
 	})
 }
@@ -109,7 +118,9 @@ func TestInitConcurrencyControls_CapsWorkersByInputDiskBudget(t *testing.T) {
 
 func TestProcessorPrepare_ReturnsValidationError(t *testing.T) {
 	cfg := config.NewConfig()
-	p := mustNewProcessor(t, cfg, &clientset.Clientset{})
+	clients := validProcessorClients(t)
+	clients.Event = nil
+	p := mustNewProcessor(t, cfg, clients)
 
 	if err := p.prepare(context.Background()); err == nil {
 		t.Fatalf("expected validation error")

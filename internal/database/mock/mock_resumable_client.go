@@ -20,7 +20,9 @@ package mock
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -40,7 +42,10 @@ type mockResumableBatch struct {
 	resumable        bool
 	terminal         bool
 	leaseExpiresAt   time.Time
+	leaseRenewals    int
 	entries          []*api.ResumableEntry // ordered by ordinal
+	statusName       string                // current status name, for expected-status fences
+	statusDoc        []byte                // persisted terminal status document
 }
 
 // MockResumableStore is a stateful in-memory api.ResumableStore. Writes are
@@ -86,6 +91,40 @@ func (m *MockResumableStore) MarkTerminal(batchID string) {
 	}
 }
 
+// BatchOwnership exposes a seeded batch's ownership state for test
+// assertions: the processor ID (empty once requeued), epoch, and recovery
+// attempt count.
+func (m *MockResumableStore) BatchOwnership(batchID string) (processorID string, epoch, recoveryAttempts int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.batches[batchID]
+	if !ok {
+		return "", 0, 0
+	}
+	return b.processorID, b.epoch, b.recoveryAttempts
+}
+
+// LeaseRenewals returns how many times the batch's lease was successfully
+// renewed, for assertions that a renewal goroutine is running.
+func (m *MockResumableStore) LeaseRenewals(batchID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b, ok := m.batches[batchID]; ok {
+		return b.leaseRenewals
+	}
+	return 0
+}
+
+// SetBatchStatus overrides a seeded batch's status name, staging transitions
+// the row store performs outside this mock (e.g. in_progress → finalizing).
+func (m *MockResumableStore) SetBatchStatus(batchID, statusName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b, ok := m.batches[batchID]; ok {
+		b.statusName = statusName
+	}
+}
+
 func (m *MockResumableStore) Close() error {
 	return nil
 }
@@ -126,15 +165,13 @@ func (m *MockResumableStore) ActivateResumableBatch(ctx context.Context, activat
 			ResultSHA256: e.ResultSHA256,
 			ErrorCode:    e.ErrorCode,
 		}
-		if entry.Status == api.ResumableEntryFailed {
-			entry.Attempts = 1
-		}
 		b.entries = append(b.entries, entry)
 	}
 	sort.Slice(b.entries, func(i, j int) bool { return b.entries[i].Ordinal < b.entries[j].Ordinal })
 
 	b.resumable = true
 	b.leaseExpiresAt = m.now().Add(activation.LeaseTTL)
+	b.statusName = "in_progress"
 	return nil
 }
 
@@ -152,10 +189,56 @@ func (m *MockResumableStore) RenewResumableBatchLease(ctx context.Context, batch
 			batchID, processorID, epoch, api.ErrConflict)
 	}
 	b.leaseExpiresAt = m.now().Add(ttl)
+	b.leaseRenewals++
 	return nil
 }
 
-func (m *MockResumableStore) RequeueResumableOrphan(ctx context.Context, batchID, processorID string, epoch int64, requireExpiredLease bool) error {
+func (m *MockResumableStore) FinalizeResumableBatch(ctx context.Context, fin *api.ResumableFinalization) error {
+	if fin == nil {
+		return fmt.Errorf("FinalizeResumableBatch: nil finalization")
+	}
+	if fin.BatchID == "" || fin.ProcessorID == "" {
+		return fmt.Errorf("FinalizeResumableBatch: batch ID and processor ID are required")
+	}
+	if fin.ExpectedStatus == "" || len(fin.Status) == 0 {
+		return fmt.Errorf("FinalizeResumableBatch: expected and target status are required")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	b, ok := m.batches[fin.BatchID]
+	if ok && m.ownedFence(b, fin.ProcessorID, fin.Epoch) && b.statusName == fin.ExpectedStatus {
+		b.statusDoc = fin.Status
+		b.terminal = true
+		b.resumable = false
+		b.leaseExpiresAt = time.Time{}
+		return nil
+	}
+	// Zero rows: the fence failed, or an earlier attempt committed the
+	// identical status document (ambiguous response). The comparison is
+	// semantic, mirroring the jsonb canonicalization of the row store.
+	if ok && b.terminal && jsonEqual(b.statusDoc, fin.Status) {
+		return nil
+	}
+	return fmt.Errorf("FinalizeResumableBatch: %s is not owned by %s at epoch %d in status %q: %w",
+		fin.BatchID, fin.ProcessorID, fin.Epoch, fin.ExpectedStatus, api.ErrConflict)
+}
+
+// jsonEqual reports whether two JSON documents hold the same value,
+// ignoring key order and whitespace.
+func jsonEqual(a, b []byte) bool {
+	var av, bv any
+	if err := json.Unmarshal(a, &av); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(b, &bv); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(av, bv)
+}
+
+func (m *MockResumableStore) RequeueResumableOrphan(ctx context.Context, batchID, processorID string, epoch int64, requireExpiredLease, bumpAttempts bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -170,7 +253,16 @@ func (m *MockResumableStore) RequeueResumableOrphan(ctx context.Context, batchID
 	b.processorID = ""
 	b.leaseExpiresAt = time.Time{}
 	b.epoch++
-	b.recoveryAttempts++
+	if bumpAttempts {
+		b.recoveryAttempts++
+	}
+	// Record the orphaned owner as the submitter of its in-flight entries,
+	// mirroring the Postgres requeue backfill.
+	for _, e := range b.entries {
+		if e.Status == api.ResumableEntryInFlight && e.SubmittedBy == "" {
+			e.SubmittedBy = processorID
+		}
+	}
 	return nil
 }
 
@@ -202,6 +294,7 @@ func (m *MockResumableStore) MarkEntryInFlight(ctx context.Context, batchID, req
 	if e != nil && !e.Status.IsTerminal() && m.ownedFence(b, processorID, epoch) {
 		e.Status = api.ResumableEntryInFlight
 		e.Attempts++
+		e.SubmittedBy = processorID
 		return true, nil
 	}
 	return false, entryNotUpdatable("MarkEntryInFlight", b, e, batchID, requestID, processorID, epoch)
@@ -289,7 +382,9 @@ func (m *MockResumableStore) ListBatchEntries(ctx context.Context, batchID strin
 			break
 		}
 		if e.Ordinal > afterOrdinal {
-			entries = append(entries, e)
+			// Snapshots, like rows materialized from a Postgres query.
+			entry := *e
+			entries = append(entries, &entry)
 		}
 	}
 	return entries, nil
@@ -300,5 +395,25 @@ func (m *MockResumableStore) FindEntryByRequestID(ctx context.Context, batchID, 
 	defer m.mu.Unlock()
 
 	_, e := m.findEntry(batchID, requestID)
-	return e, nil
+	if e == nil {
+		return nil, nil
+	}
+	// Return a snapshot: the caller reads it after the lock is released while
+	// a fenced checkpoint may still mutate the stored entry.
+	entry := *e
+	return &entry, nil
+}
+
+func (m *MockResumableStore) HasOpenEntryByRequest(_ context.Context, requestID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, b := range m.batches {
+		for _, e := range b.entries {
+			if e.RequestID == requestID && !e.Status.IsTerminal() {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }

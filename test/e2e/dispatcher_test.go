@@ -396,58 +396,16 @@ func testDispatcherMultiRequestBatch(t *testing.T, rdb *redis.Client) {
 // testDispatcherMultiReplicaBatch verifies that two healthy Batch Processor
 // replicas do not consume and discard one another's async results.
 func testDispatcherMultiReplicaBatch(t *testing.T) {
-	selector := fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/component=processor", testHelmRelease)
-	var workloads []string
-	var discoveryErrors []string
-	for _, kind := range []string{"deployment", "statefulset"} {
-		out, err := exec.Command("kubectl", "get", kind,
-			"-n", testNamespace,
-			"-l", selector,
-			"-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`,
-		).CombinedOutput()
-		if err != nil {
-			discoveryErrors = append(discoveryErrors, fmt.Sprintf("%s: %v: %s", kind, err, strings.TrimSpace(string(out))))
-			continue
-		}
-		for _, name := range strings.Fields(string(out)) {
-			workloads = append(workloads, kind+"/"+name)
-		}
-	}
-	if len(workloads) != 1 {
-		t.Fatalf("find one Processor workload with selector %q: found %v; discovery errors: %v", selector, workloads, discoveryErrors)
-	}
-	workload := workloads[0]
-	replicasOut, err := exec.Command("kubectl", "get", workload,
-		"-n", testNamespace, "-o", "jsonpath={.spec.replicas}").CombinedOutput()
-	if err != nil {
-		t.Fatalf("get Processor replica count for %s: %v\n%s", workload, err, replicasOut)
-	}
-	originalReplicas, err := strconv.Atoi(strings.TrimSpace(string(replicasOut)))
-	if err != nil {
-		t.Fatalf("parse Processor replica count %q: %v", replicasOut, err)
-	}
-
-	scaleProcessor := func(replicas int) error {
-		out, scaleErr := exec.Command("kubectl", "scale", workload,
-			"-n", testNamespace, fmt.Sprintf("--replicas=%d", replicas)).CombinedOutput()
-		if scaleErr != nil {
-			return fmt.Errorf("scale Processor to %d replicas: %w\n%s", replicas, scaleErr, out)
-		}
-		out, scaleErr = exec.Command("kubectl", "rollout", "status", workload,
-			"-n", testNamespace, "--timeout=180s").CombinedOutput()
-		if scaleErr != nil {
-			return fmt.Errorf("wait for %d Processor replicas: %w\n%s", replicas, scaleErr, out)
-		}
-		return nil
-	}
+	workload := processorWorkload(t)
+	originalReplicas := processorReplicaCount(t, workload)
 
 	if originalReplicas != 2 {
 		t.Cleanup(func() {
-			if err := scaleProcessor(originalReplicas); err != nil {
+			if err := scaleProcessorWorkload(workload, originalReplicas); err != nil {
 				t.Errorf("cleanup: %v", err)
 			}
 		})
-		if err := scaleProcessor(2); err != nil {
+		if err := scaleProcessorWorkload(workload, 2); err != nil {
 			t.Fatal(err)
 		}
 	}

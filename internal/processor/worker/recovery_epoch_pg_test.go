@@ -55,6 +55,11 @@ func TestRecoverOwnedJobsFencesPreviousEpoch(t *testing.T) {
 		t.Fatalf("NewPostgresBatchQueueClient: %v", err)
 	}
 	t.Cleanup(func() { _ = queue.Close() })
+	resumable, err := postgresql.NewPostgresResumableStore(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewPostgresResumableStore: %v", err)
+	}
+	t.Cleanup(func() { _ = resumable.Close() })
 	pool, err := pgxpool.New(ctx, url)
 	if err != nil {
 		t.Fatalf("pgxpool: %v", err)
@@ -74,6 +79,7 @@ func TestRecoverOwnedJobsFencesPreviousEpoch(t *testing.T) {
 		Queue:           queue,
 		Event:           mockdb.NewMockBatchEventChannelClient(),
 		Inference:       inference.NewSingleClientResolver(&fakeInferenceClient{}),
+		Resumable:       resumable,
 	}, processorID, testLogger(t))
 	if err != nil {
 		t.Fatalf("NewProcessor: %v", err)
@@ -104,8 +110,10 @@ func TestRecoverOwnedJobsFencesPreviousEpoch(t *testing.T) {
 		t.Fatalf("recoverOwnedJobs: %v", err)
 	}
 
-	if got := getDBJobStatus(t, batchDB, jobID); got != openai.BatchStatusCancelled {
-		t.Fatalf("recovery did not finish the cancel: status %s", got)
+	// A cancelling row has no entries (it predates the unified pipeline or
+	// was never activated); recovery fails it closed.
+	if got := getDBJobStatus(t, batchDB, jobID); got != openai.BatchStatusFailed {
+		t.Fatalf("recovery did not fail the cancelling row closed: status %s", got)
 	}
 
 	// A zombie of the previous incarnation still holds the pre-recovery epoch.
@@ -145,7 +153,7 @@ func TestRecoverOwnedJobsFencesPreviousEpoch(t *testing.T) {
 	}
 }
 
-func TestRecoverOwnedJobsFinalizesCancellationAfterEnqueueConflict(t *testing.T) {
+func TestRecoverOwnedJobsCancellationRaceLeavesTerminalRow(t *testing.T) {
 	url := os.Getenv("TEST_POSTGRES_URL")
 	if url == "" {
 		t.Skip("TEST_POSTGRES_URL not set")
@@ -165,6 +173,11 @@ func TestRecoverOwnedJobsFinalizesCancellationAfterEnqueueConflict(t *testing.T)
 		t.Fatalf("NewPostgresBatchQueueClient: %v", err)
 	}
 	t.Cleanup(func() { _ = queue.Close() })
+	resumable, err := postgresql.NewPostgresResumableStore(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewPostgresResumableStore: %v", err)
+	}
+	t.Cleanup(func() { _ = resumable.Close() })
 	pool, err := pgxpool.New(ctx, url)
 	if err != nil {
 		t.Fatalf("pgxpool: %v", err)
@@ -184,6 +197,7 @@ func TestRecoverOwnedJobsFinalizesCancellationAfterEnqueueConflict(t *testing.T)
 		Queue:           queue,
 		Event:           mockdb.NewMockBatchEventChannelClient(),
 		Inference:       inference.NewSingleClientResolver(&fakeInferenceClient{}),
+		Resumable:       resumable,
 	}, processorID, testLogger(t))
 	if err != nil {
 		t.Fatalf("NewProcessor: %v", err)
@@ -219,8 +233,10 @@ func TestRecoverOwnedJobsFinalizesCancellationAfterEnqueueConflict(t *testing.T)
 	if err := p.recoverOwnedJobs(ctx); err != nil {
 		t.Fatalf("recoverOwnedJobs: %v", err)
 	}
-	if got := getDBJobStatus(t, batchDB, jobID); got != openai.BatchStatusCancelled {
-		t.Fatalf("recovery did not finish the cancellation: status %s", got)
+	// The cancel raced the re-enqueue: recovery cannot re-enqueue a
+	// cancelling row, so it fails it closed — terminal, never stuck.
+	if got := getDBJobStatus(t, batchDB, jobID); got != openai.BatchStatusFailed {
+		t.Fatalf("recovery did not resolve the cancelled race: status %s", got)
 	}
 
 	var processor string

@@ -44,6 +44,9 @@ var (
 	testDBUser            = getEnvOrDefault("TEST_DB_USER", "postgres")
 	testEPPNamespace      = getEnvOrDefault("TEST_EPP_NAMESPACE", "")
 
+	// Needs curl, sh, sleep, seq and touch; override where Docker Hub is unreachable.
+	testCurlImage = getEnvOrDefault("TEST_CURL_IMAGE", "curlimages/curl:8.8.0")
+
 	// testDBClientType and testExchangeClientType are detected from Helm
 	// releases at startup; see detectDBClientType / detectExchangeClientType.
 	testDBClientType       string
@@ -136,6 +139,7 @@ func TestE2E(t *testing.T) {
 	t.Run("MultiTenant", testMultiTenant)
 	t.Run("GarbageCollection", testGarbageCollection)
 	t.Run("Observability", testObservability)
+	t.Run("Resumable", testResumable)
 	skipIf(t, testDispatcherDeployed, "requires sync processor", "ProcessorGracefulShutdown", testProcessorGracefulShutdown)
 	skipIf(t, testDispatcherDeployed, "requires sync processor", "OrphanRecovery", testOrphanRecovery)
 	skipIf(t, testDispatcherDeployed, "requires sync processor", "FlowControl", testFlowControl)

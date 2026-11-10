@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -110,7 +111,11 @@ func (c *PostgresResumableStore) ActivateResumableBatch(ctx context.Context, act
 			INSERT INTO batch_entries (batch_id, request_id, ordinal, custom_id, status, attempts,
 				result_key, result_bytes, result_sha256, error_code, completed_at)
 			SELECT $1, r.request_id, r.ordinal, r.custom_id, r.status,
-				CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END,
+				-- attempts counts dispatch attempts; an activation-rejected
+				-- line is never dispatched, so it seeds 0 — the manifest
+				-- integrity check relies on this to tell a rejection (failed
+				-- with zero attempts) from an attempted failure.
+				0,
 				r.result_key, r.result_bytes, r.result_sha256, r.error_code,
 				CASE WHEN r.status = 'failed' THEN NOW() END
 			FROM candidate, jsonb_to_recordset($4::jsonb) AS r(request_id TEXT, ordinal BIGINT,
@@ -120,7 +125,11 @@ func (c *PostgresResumableStore) ActivateResumableBatch(ctx context.Context, act
 			UPDATE batch_items
 			SET status = jsonb_set(
 					jsonb_set(status, '{status}', '"in_progress"'),
-					'{in_progress_at}', to_jsonb(EXTRACT(EPOCH FROM NOW())::bigint)),
+					-- FLOOR matches Go's time.Unix() truncation; a plain
+					-- numeric cast rounds to nearest, which can stamp
+					-- in_progress_at one second past a completed_at written
+					-- later in the same wall-clock second.
+					'{in_progress_at}', to_jsonb(FLOOR(EXTRACT(EPOCH FROM NOW()))::bigint)),
 				resumable = TRUE,
 				owner_lease_expires_at = NOW() + make_interval(secs => $5)
 			FROM candidate WHERE batch_items.id = candidate.id
@@ -170,17 +179,20 @@ func (c *PostgresResumableStore) RenewResumableBatchLease(ctx context.Context, b
 // RequeueResumableOrphan clears ownership of an orphaned resumable batch so it
 // becomes dequeuable again, keeping status and entries. The fenced CAS on
 // (processor_id, epoch) makes a race with a renewal or finalization a no-op.
-func (c *PostgresResumableStore) RequeueResumableOrphan(ctx context.Context, batchID, processorID string, epoch int64, requireExpiredLease bool) error {
+// bumpAttempts=false leaves the recovery budget untouched — the startup
+// recovery path uses it because PQClaimOwned already counted the restart.
+func (c *PostgresResumableStore) RequeueResumableOrphan(ctx context.Context, batchID, processorID string, epoch int64, requireExpiredLease, bumpAttempts bool) error {
 	query := `UPDATE batch_items
 		SET processor_id = NULL, owner_lease_expires_at = NULL,
-		    epoch = epoch + 1, recovery_attempts = recovery_attempts + 1
+		    epoch = epoch + 1,
+		    recovery_attempts = CASE WHEN $4 THEN recovery_attempts + 1 ELSE recovery_attempts END
 		WHERE id = $1 AND processor_id = $2 AND epoch = $3
 		  AND resumable = TRUE AND ` + nonTerminalCondition
 	if requireExpiredLease {
 		query += ` AND owner_lease_expires_at <= NOW()`
 	}
 
-	result, err := c.pool.Exec(ctx, query, batchID, processorID, epoch)
+	result, err := c.pool.Exec(ctx, query, batchID, processorID, epoch, bumpAttempts)
 	if err != nil {
 		return fmt.Errorf("RequeueResumableOrphan: %w", err)
 	}
@@ -192,9 +204,98 @@ func (c *PostgresResumableStore) RequeueResumableOrphan(ctx context.Context, bat
 		return nil
 	}
 
+	// The orphaned owner submitted the batch's in-flight requests, so their
+	// unacknowledged result deliveries are stranded on its per-processor
+	// route. Record it as their submitter so the next owner recovers them
+	// from there. Rows written before submitter tracking keep NULL — the
+	// next owner re-submits those directly (the pre-recovery behavior).
+	if _, err := c.pool.Exec(ctx,
+		`UPDATE batch_entries SET submitted_by = $2
+		 WHERE batch_id = $1 AND status = 'in_flight' AND submitted_by IS NULL`,
+		batchID, processorID,
+	); err != nil {
+		return fmt.Errorf("RequeueResumableOrphan: record submitter: %w", err)
+	}
+
 	logr.FromContextOrDiscard(ctx).V(logging.INFO).Info("RequeueResumableOrphan: requeued",
 		"batchId", batchID, "epoch", epoch)
 	return nil
+}
+
+// FinalizeResumableBatch performs the fenced terminal transition of an owned,
+// activated batch: it persists the terminal status document and clears
+// resumable/lease (processor_id stays for audit). RowsAffected == 0 means the
+// fence failed or an earlier attempt already committed — a row persisting
+// exactly the given status document is an idempotent success, anything else a
+// conflict. A failed verification query is neither: ownership is undetermined
+// and the transient error is returned so the caller retries instead of
+// abandoning a finalization it may still own.
+func (c *PostgresResumableStore) FinalizeResumableBatch(ctx context.Context, fin *api.ResumableFinalization) error {
+	if fin == nil {
+		return fmt.Errorf("FinalizeResumableBatch: nil finalization")
+	}
+	if fin.BatchID == "" || fin.ProcessorID == "" {
+		return fmt.Errorf("FinalizeResumableBatch: batch ID and processor ID are required")
+	}
+	if fin.ExpectedStatus == "" || len(fin.Status) == 0 {
+		return fmt.Errorf("FinalizeResumableBatch: expected and target status are required")
+	}
+
+	result, err := c.pool.Exec(ctx,
+		`UPDATE batch_items
+		SET status = $5, resumable = FALSE, owner_lease_expires_at = NULL
+		WHERE id = $1 AND processor_id = $2 AND epoch = $3
+		  AND resumable = TRUE AND owner_lease_expires_at > NOW()
+		  AND status::jsonb->>'status' = $4`,
+		fin.BatchID, fin.ProcessorID, fin.Epoch, fin.ExpectedStatus, fin.Status,
+	)
+	if err != nil {
+		return fmt.Errorf("FinalizeResumableBatch: %w", err)
+	}
+	if result.RowsAffected() > 0 {
+		logr.FromContextOrDiscard(ctx).V(logging.INFO).Info("FinalizeResumableBatch: finalized",
+			"batchId", fin.BatchID, "epoch", fin.Epoch)
+		return nil
+	}
+
+	// Zero rows: the fence failed, or an earlier attempt committed the
+	// transition but its response was lost. Only the latter is a success;
+	// jsonb canonicalizes the stored document, so the comparison is
+	// semantic rather than bytewise.
+	var committed []byte
+	switch err := c.pool.QueryRow(ctx,
+		`SELECT status FROM batch_items WHERE id = $1`, fin.BatchID,
+	).Scan(&committed); {
+	case errors.Is(err, pgx.ErrNoRows):
+		// The row is gone: nothing proves an earlier commit of this
+		// document, so the fence failed.
+	case err != nil:
+		// The verification itself failed. Ownership is undetermined — the
+		// fenced UPDATE matched no rows, but this processor may still own the
+		// batch — so surface the transient error instead of a conflict: the
+		// caller retries the finalization rather than abandoning one it may
+		// still hold.
+		return fmt.Errorf("FinalizeResumableBatch: verify committed status of %s: %w", fin.BatchID, err)
+	case jsonEqual(committed, fin.Status):
+		logr.FromContextOrDiscard(ctx).V(logging.INFO).Info("FinalizeResumableBatch: already finalized",
+			"batchId", fin.BatchID, "epoch", fin.Epoch)
+		return nil
+	}
+	return fmt.Errorf("FinalizeResumableBatch: %s is not owned by %s at epoch %d in status %q: %w",
+		fin.BatchID, fin.ProcessorID, fin.Epoch, fin.ExpectedStatus, api.ErrConflict)
+}
+
+// jsonEqual reports whether two JSON documents hold the same value,
+// ignoring key order and whitespace.
+func jsonEqual(a, b []byte) bool {
+	var av, bv any
+	if err := json.Unmarshal(a, &av); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(b, &bv); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(av, bv)
 }
 
 // MarkEntryInFlight records an imminent submission. It returns false when the
@@ -203,7 +304,7 @@ func (c *PostgresResumableStore) RequeueResumableOrphan(ctx context.Context, bat
 func (c *PostgresResumableStore) MarkEntryInFlight(ctx context.Context, batchID, requestID, processorID string, epoch int64) (bool, error) {
 	result, err := c.pool.Exec(ctx,
 		ownerLockCTE+`UPDATE batch_entries e
-		SET status = 'in_flight', attempts = attempts + 1, updated_at = NOW()
+		SET status = 'in_flight', attempts = attempts + 1, submitted_by = $3, updated_at = NOW()
 		FROM owner
 		WHERE e.batch_id = $1 AND e.request_id = $2
 		  AND e.status IN ('pending','in_flight')`,
@@ -332,21 +433,24 @@ func (c *PostgresResumableStore) EntryResumeState(ctx context.Context, batchID s
 	return state, nil
 }
 
-const entrySelectColumns = `request_id, ordinal, custom_id, status, attempts,
+const entrySelectColumns = `request_id, ordinal, custom_id, status, attempts, submitted_by,
 	result_key, result_bytes, result_sha256, error_code`
 
 // scanEntryRow scans one batch_entries row; scan is rows.Scan or QueryRow.Scan.
 func scanEntryRow(scan func(dest ...any) error, batchID string) (*api.ResumableEntry, error) {
 	var entry api.ResumableEntry
-	var resultKey, resultSHA256, errorCode *string
+	var resultKey, resultSHA256, errorCode, submittedBy *string
 	var resultBytes *int64
 	if err := scan(
-		&entry.RequestID, &entry.Ordinal, &entry.CustomID, &entry.Status, &entry.Attempts,
+		&entry.RequestID, &entry.Ordinal, &entry.CustomID, &entry.Status, &entry.Attempts, &submittedBy,
 		&resultKey, &resultBytes, &resultSHA256, &errorCode,
 	); err != nil {
 		return nil, err
 	}
 	entry.BatchID = batchID
+	if submittedBy != nil {
+		entry.SubmittedBy = *submittedBy
+	}
 	if resultKey != nil {
 		entry.ResultKey = *resultKey
 	}
@@ -409,4 +513,21 @@ func (c *PostgresResumableStore) FindEntryByRequestID(ctx context.Context, batch
 		return nil, fmt.Errorf("FindEntryByRequestID: %w", err)
 	}
 	return entry, nil
+}
+
+// HasOpenEntryByRequest reports whether any batch still awaits the result of
+// the request ID (pending or in_flight entry). Request IDs are stable and
+// batch-scoped, so at most one batch matches; the EXISTS over all batches is
+// conservative if duplicates ever existed.
+func (c *PostgresResumableStore) HasOpenEntryByRequest(ctx context.Context, requestID string) (bool, error) {
+	var open bool
+	if err := c.pool.QueryRow(ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM batch_entries
+			WHERE request_id = $1 AND status IN ('pending','in_flight'))`,
+		requestID,
+	).Scan(&open); err != nil {
+		return false, fmt.Errorf("HasOpenEntryByRequest: %w", err)
+	}
+	return open, nil
 }

@@ -59,8 +59,18 @@ func newTestReconciler(
 	queue db.BatchPriorityQueueClient,
 ) (*Reconciler, chan *Result) {
 	t.Helper()
+	return newTestReconcilerWithResumable(t, batchDB, queue, mock.NewMockResumableStore())
+}
+
+func newTestReconcilerWithResumable(
+	t *testing.T,
+	batchDB db.BatchDBClient,
+	queue db.BatchPriorityQueueClient,
+	resumable db.ResumableBatchLeaseStore,
+) (*Reconciler, chan *Result) {
+	t.Helper()
 	resultCh := make(chan *Result, 1)
-	r, err := NewReconciler(batchDB, queue, testInterval, false, func(res *Result) {
+	r, err := NewReconciler(batchDB, queue, resumable, testInterval, false, func(res *Result) {
 		resultCh <- res
 	})
 	if err != nil {
@@ -76,7 +86,7 @@ func newTestDryRunReconciler(
 ) (*Reconciler, chan *Result) {
 	t.Helper()
 	resultCh := make(chan *Result, 1)
-	r, err := NewReconciler(batchDB, queue, testInterval, true, func(res *Result) {
+	r, err := NewReconciler(batchDB, queue, mock.NewMockResumableStore(), testInterval, true, func(res *Result) {
 		resultCh <- res
 	})
 	if err != nil {
@@ -326,41 +336,257 @@ func TestRunCycle_RefreshesLiveSetBeforeTriage(t *testing.T) {
 	}
 }
 
-func TestSkipResumableOrphans(t *testing.T) {
+func TestTriageResumable(t *testing.T) {
 	ctx := context.Background()
+	const (
+		jobID     = "job-1"
+		processor = "processor-0"
+		epoch     = int64(4)
+	)
+
 	tests := []struct {
-		name     string
-		status   openai.BatchStatus
-		priority int64
+		name             string
+		status           openai.BatchStatus
+		priority         int64
+		liveSet          map[string]bool
+		snapshotLease    time.Time
+		storeLeaseLapsed bool
+		wantReEnqueued   int
+		wantRequeued     bool
+		wantStatus       openai.BatchStatus
 	}{
-		{name: "future SLO", status: openai.BatchStatusInProgress, priority: futureSLO()},
-		{name: "expired SLO", status: openai.BatchStatusInProgress, priority: expiredSLO()},
-		{name: "cancelling", status: openai.BatchStatusCancelling, priority: expiredSLO()},
+		{
+			name:           "dead owner is requeued regardless of lease",
+			status:         openai.BatchStatusInProgress,
+			priority:       futureSLO(),
+			liveSet:        map[string]bool{},
+			snapshotLease:  time.Now().Add(time.Hour),
+			wantReEnqueued: 1,
+			wantRequeued:   true,
+			wantStatus:     openai.BatchStatusInProgress,
+		},
+		{
+			name:          "alive owner with unexpired lease is untouched",
+			status:        openai.BatchStatusInProgress,
+			priority:      futureSLO(),
+			liveSet:       map[string]bool{processor: true},
+			snapshotLease: time.Now().Add(time.Hour),
+			wantStatus:    openai.BatchStatusInProgress,
+		},
+		{
+			name:             "alive owner with lapsed lease is requeued",
+			status:           openai.BatchStatusInProgress,
+			priority:         futureSLO(),
+			liveSet:          map[string]bool{processor: true},
+			snapshotLease:    time.Now().Add(-time.Minute),
+			storeLeaseLapsed: true,
+			wantReEnqueued:   1,
+			wantRequeued:     true,
+			wantStatus:       openai.BatchStatusInProgress,
+		},
+		{
+			name:             "alive owner with zero lease is requeued",
+			status:           openai.BatchStatusInProgress,
+			priority:         futureSLO(),
+			liveSet:          map[string]bool{processor: true},
+			snapshotLease:    time.Time{},
+			storeLeaseLapsed: true,
+			wantReEnqueued:   1,
+			wantRequeued:     true,
+			wantStatus:       openai.BatchStatusInProgress,
+		},
+		{
+			name:           "cancelling resumable orphan is requeued, not transitioned",
+			status:         openai.BatchStatusCancelling,
+			priority:       futureSLO(),
+			liveSet:        map[string]bool{},
+			snapshotLease:  time.Now().Add(time.Hour),
+			wantReEnqueued: 1,
+			wantRequeued:   true,
+			wantStatus:     openai.BatchStatusCancelling,
+		},
+		{
+			name:           "SLO-expired resumable orphan is requeued, not failed",
+			status:         openai.BatchStatusInProgress,
+			priority:       expiredSLO(),
+			liveSet:        map[string]bool{},
+			snapshotLease:  time.Now().Add(time.Hour),
+			wantReEnqueued: 1,
+			wantRequeued:   true,
+			wantStatus:     openai.BatchStatusInProgress,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			batchDB := newMockBatchDB()
 			queue := mock.NewMockBatchPriorityQueueClient()
-			item := newTestBatchItem("job-1", "dead-processor", tc.status, tc.priority)
+			resumable := mock.NewMockResumableStore()
+
+			resumable.SeedBatch(jobID, processor, epoch)
+			if err := resumable.ActivateResumableBatch(ctx, &db.ResumableActivation{
+				BatchID:     jobID,
+				ProcessorID: processor,
+				Epoch:       epoch,
+				LeaseTTL:    time.Hour,
+				Entries: []db.ResumableActivationEntry{
+					{RequestID: "r-1", Ordinal: 0, CustomID: "c-1", Status: string(db.ResumableEntryPending)},
+				},
+			}); err != nil {
+				t.Fatalf("ActivateResumableBatch: %v", err)
+			}
+			// The store's lease is fresh at activation; freezing Now past it
+			// simulates a lapsed lease for the wedged-owner cases.
+			if tc.storeLeaseLapsed {
+				resumable.Now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+			}
+
+			item := newTestBatchItem(jobID, processor, tc.status, tc.priority)
+			item.Epoch = epoch
 			item.Resumable = true
+			item.OwnerLeaseExpiresAt = tc.snapshotLease
 			storeItems(t, batchDB, item)
 
-			r, resultCh := newTestReconciler(t, batchDB, queue)
-			r.SetLiveProcessors(map[string]bool{})
+			r, resultCh := newTestReconcilerWithResumable(t, batchDB, queue, resumable)
+			r.SetLiveProcessors(tc.liveSet)
 			r.run(ctx)
 
 			result := <-resultCh
-			if result.Expired != 0 || result.ReEnqueued != 0 || result.Conflicts != 0 || result.Errors != 0 {
-				t.Fatalf("expected no GC mutation for resumable job, got %+v", result)
+			if result.ReEnqueued != tc.wantReEnqueued {
+				t.Errorf("expected %d re-enqueued, got %d", tc.wantReEnqueued, result.ReEnqueued)
 			}
-			assertJobStatus(t, batchDB, "job-1", tc.status)
+			if result.Expired != 0 || result.Conflicts != 0 || result.Errors != 0 {
+				t.Errorf("unexpected counts: %+v", result)
+			}
+
+			assertJobStatus(t, batchDB, jobID, tc.wantStatus)
+
+			// Requeue clears ownership and bumps the epoch in the store; an
+			// untouched batch keeps the owner and the original epoch.
+			gotProcessor, gotEpoch, gotAttempts := resumable.BatchOwnership(jobID)
+			if tc.wantRequeued {
+				if gotProcessor != "" {
+					t.Errorf("expected ownership cleared after requeue, got processor %q", gotProcessor)
+				}
+				if gotEpoch != epoch+1 {
+					t.Errorf("expected epoch %d after requeue, got %d", epoch+1, gotEpoch)
+				}
+				if gotAttempts != 1 {
+					t.Errorf("expected recovery attempts 1 after requeue, got %d", gotAttempts)
+				}
+			} else if gotProcessor != processor || gotEpoch != epoch {
+				t.Errorf("expected ownership retained (%q, epoch %d), got (%q, epoch %d)",
+					processor, epoch, gotProcessor, gotEpoch)
+			}
+
+			// Resumable requeue must not go through the legacy queue.
 			queuedIDs, _ := queue.PQGetIDs(ctx)
-			if queuedIDs["job-1"] {
-				t.Fatal("resumable job was re-enqueued")
+			if queuedIDs[jobID] {
+				t.Error("resumable job was re-enqueued through the legacy queue")
 			}
 		})
 	}
+}
+
+func TestTriageResumable_RenewRace(t *testing.T) {
+	ctx := context.Background()
+	const (
+		jobID     = "job-1"
+		processor = "processor-0"
+		epoch     = int64(4)
+	)
+
+	// The fetched snapshot shows a lapsed lease, but the owner renewed before
+	// the requeue ran: the fenced CAS is a no-op and ownership is retained.
+	batchDB := newMockBatchDB()
+	queue := mock.NewMockBatchPriorityQueueClient()
+	resumable := mock.NewMockResumableStore()
+	resumable.SeedBatch(jobID, processor, epoch)
+	if err := resumable.ActivateResumableBatch(ctx, &db.ResumableActivation{
+		BatchID:     jobID,
+		ProcessorID: processor,
+		Epoch:       epoch,
+		LeaseTTL:    time.Hour,
+		Entries: []db.ResumableActivationEntry{
+			{RequestID: "r-1", Ordinal: 0, CustomID: "c-1", Status: string(db.ResumableEntryPending)},
+		},
+	}); err != nil {
+		t.Fatalf("ActivateResumableBatch: %v", err)
+	}
+
+	item := newTestBatchItem(jobID, processor, openai.BatchStatusInProgress, futureSLO())
+	item.Epoch = epoch
+	item.Resumable = true
+	item.OwnerLeaseExpiresAt = time.Now().Add(-time.Minute)
+	storeItems(t, batchDB, item)
+
+	r, resultCh := newTestReconcilerWithResumable(t, batchDB, queue, resumable)
+	r.SetLiveProcessors(map[string]bool{processor: true})
+	r.run(ctx)
+
+	result := <-resultCh
+	if result.ReEnqueued != 1 || result.Errors != 0 {
+		t.Fatalf("renew race must be a no-op success, got %+v", result)
+	}
+
+	gotProcessor, gotEpoch, _ := resumable.BatchOwnership(jobID)
+	if gotProcessor != processor || gotEpoch != epoch {
+		t.Fatalf("renewal race must retain ownership (%q, epoch %d), got (%q, epoch %d)",
+			processor, epoch, gotProcessor, gotEpoch)
+	}
+	assertJobStatus(t, batchDB, jobID, openai.BatchStatusInProgress)
+}
+
+func TestTriageResumable_DryRun(t *testing.T) {
+	ctx := context.Background()
+	const (
+		jobID     = "job-1"
+		processor = "processor-0"
+		epoch     = int64(4)
+	)
+
+	batchDB := newMockBatchDB()
+	queue := mock.NewMockBatchPriorityQueueClient()
+	resumable := mock.NewMockResumableStore()
+	resumable.SeedBatch(jobID, processor, epoch)
+	if err := resumable.ActivateResumableBatch(ctx, &db.ResumableActivation{
+		BatchID:     jobID,
+		ProcessorID: processor,
+		Epoch:       epoch,
+		LeaseTTL:    time.Hour,
+		Entries: []db.ResumableActivationEntry{
+			{RequestID: "r-1", Ordinal: 0, CustomID: "c-1", Status: string(db.ResumableEntryPending)},
+		},
+	}); err != nil {
+		t.Fatalf("ActivateResumableBatch: %v", err)
+	}
+
+	item := newTestBatchItem(jobID, processor, openai.BatchStatusInProgress, futureSLO())
+	item.Epoch = epoch
+	item.Resumable = true
+	item.OwnerLeaseExpiresAt = time.Now().Add(-time.Minute)
+	storeItems(t, batchDB, item)
+
+	resultCh := make(chan *Result, 1)
+	r, err := NewReconciler(batchDB, queue, resumable, testInterval, true, func(res *Result) {
+		resultCh <- res
+	})
+	if err != nil {
+		t.Fatalf("failed to create dry-run reconciler: %v", err)
+	}
+	r.SetLiveProcessors(map[string]bool{})
+	r.run(ctx)
+
+	result := <-resultCh
+	if result.ReEnqueued != 1 {
+		t.Errorf("expected 1 re-enqueued in dry-run, got %d", result.ReEnqueued)
+	}
+
+	gotProcessor, gotEpoch, _ := resumable.BatchOwnership(jobID)
+	if gotProcessor != processor || gotEpoch != epoch {
+		t.Fatalf("dry-run must not mutate ownership, got (%q, epoch %d)", gotProcessor, gotEpoch)
+	}
+	assertJobStatus(t, batchDB, jobID, openai.BatchStatusInProgress)
 }
 
 func TestRunCycleMixedJobs(t *testing.T) {
@@ -410,7 +636,7 @@ func TestCASConflict(t *testing.T) {
 		queue := mock.NewMockBatchPriorityQueueClient()
 
 		resultCh := make(chan *Result, 1)
-		r, err := NewReconciler(batchDB, queue, testInterval, false, func(res *Result) {
+		r, err := NewReconciler(batchDB, queue, mock.NewMockResumableStore(), testInterval, false, func(res *Result) {
 			resultCh <- res
 		})
 		if err != nil {
@@ -531,7 +757,7 @@ func TestRunLoop(t *testing.T) {
 		queue := mock.NewMockBatchPriorityQueueClient()
 
 		ran := make(chan struct{}, 1)
-		r, err := NewReconciler(batchDB, queue, testInterval, false, func(*Result) {
+		r, err := NewReconciler(batchDB, queue, mock.NewMockResumableStore(), testInterval, false, func(*Result) {
 			select {
 			case ran <- struct{}{}:
 			default:
@@ -562,42 +788,55 @@ func TestRunLoop(t *testing.T) {
 func TestNewReconcilerValidation(t *testing.T) {
 	batchDB := newMockBatchDB()
 	queue := mock.NewMockBatchPriorityQueueClient()
+	resumable := mock.NewMockResumableStore()
 
 	tests := []struct {
-		name     string
-		batchDB  db.BatchDBClient
-		queue    db.BatchPriorityQueueClient
-		interval time.Duration
+		name      string
+		batchDB   db.BatchDBClient
+		queue     db.BatchPriorityQueueClient
+		resumable db.ResumableBatchLeaseStore
+		interval  time.Duration
 	}{
 		{
-			name:     "nil batchDB",
-			batchDB:  nil,
-			queue:    queue,
-			interval: testInterval,
+			name:      "nil batchDB",
+			batchDB:   nil,
+			queue:     queue,
+			resumable: resumable,
+			interval:  testInterval,
 		},
 		{
-			name:     "nil queue",
-			batchDB:  batchDB,
-			queue:    nil,
-			interval: testInterval,
+			name:      "nil queue",
+			batchDB:   batchDB,
+			queue:     nil,
+			resumable: resumable,
+			interval:  testInterval,
 		},
 		{
-			name:     "zero interval",
-			batchDB:  batchDB,
-			queue:    queue,
-			interval: 0,
+			name:      "nil resumable store",
+			batchDB:   batchDB,
+			queue:     queue,
+			resumable: nil,
+			interval:  testInterval,
 		},
 		{
-			name:     "negative interval",
-			batchDB:  batchDB,
-			queue:    queue,
-			interval: -time.Minute,
+			name:      "zero interval",
+			batchDB:   batchDB,
+			queue:     queue,
+			resumable: resumable,
+			interval:  0,
+		},
+		{
+			name:      "negative interval",
+			batchDB:   batchDB,
+			queue:     queue,
+			resumable: resumable,
+			interval:  -time.Minute,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewReconciler(tc.batchDB, tc.queue, tc.interval, false, nil)
+			_, err := NewReconciler(tc.batchDB, tc.queue, tc.resumable, tc.interval, false, nil)
 			if err == nil {
 				t.Fatalf("expected error for %s", tc.name)
 			}
@@ -749,7 +988,7 @@ func TestTrigger(t *testing.T) {
 
 		// Use a very long interval so the ticker never fires.
 		resultCh := make(chan *Result, 10)
-		r, err := NewReconciler(batchDB, queue, 24*time.Hour, false, func(res *Result) {
+		r, err := NewReconciler(batchDB, queue, mock.NewMockResumableStore(), 24*time.Hour, false, func(res *Result) {
 			resultCh <- res
 		})
 		if err != nil {

@@ -1,7 +1,7 @@
 # Batch Processor Design
 
--   **Revision**: 9
--   **Last Updated**: 2026-07-29
+-   **Revision**: 10
+-   **Last Updated**: 2026-10-14
 
 -------------------------------------------------------------------
 
@@ -111,11 +111,11 @@ When the processor starts, `recoverStaleJobs` scans the local work directory for
 -   `validating`: re-enqueue (ingestion had not started). If SLO expired, mark as `expired` (no output files exist at this stage). If re-enqueue fails, mark as `failed`.
 -   Other terminal states: clean up the directory only.
 
-After recovery, stale directories are removed. Resume-from-checkpoint is not supported — recovered jobs are retried from scratch.
+After recovery, stale directories are removed. This path applies to the sync pipeline's local output files; in async dispatch mode, results are checkpointed to object storage as they arrive, so recovery resumes from checkpoints instead of restarting from scratch.
 
 The `batch_startup_recovery_total{status,action}` metric tracks recovery outcomes for operational visibility.
 
-The `resumable` database marker added for [#645](https://github.com/llm-d/llm-d-batch-gateway/issues/645) is currently a reader-side guard only; no production path sets it to `true`. Before a later writer enables resumable rows, this guard-aware version must be deployed to every API server, Processor, and batch-gc instance. Rollback to a marker-unaware version is unsupported while any resumable row remains non-terminal. The initial resumable-recovery implementation must run with one Processor replica, `numWorkers=1`, one Async model queue, PostgreSQL, and batch-gc enabled. Direct Processor scaling and autoscaling are unsupported until multi-replica ownership and takeover are implemented.
+When `dispatch_mode` is `async`, every batch runs on the **resumable pipeline**: per-request results are checkpointed to object storage, batch ownership is a fenced lease in PostgreSQL, and the batch-gc reconciler requeues disrupted batches so any processor resumes them from their checkpoints — no single-replica or `numWorkers=1` restriction. See [Resumable Batch Jobs Design](resumable-jobs.md) for the semantics, topology rules, and operational notes.
 
 --------------------------------------------------------------------
 ### High-Level Architecture

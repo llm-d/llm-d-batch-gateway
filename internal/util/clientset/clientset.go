@@ -266,14 +266,30 @@ func NewClientset(ctx context.Context, component ucom.Component, opts ...Option)
 	// build inference client(s)
 	switch {
 	case cfg.asyncInference != nil:
-		if cfg.asyncInference.RedisURL == "" {
-			redisURL, err := ucom.ReadSecretFile(ucom.SecretKeyRedisURL)
-			if err != nil {
-				return nil, fmt.Errorf("async inference requires a Redis URL (set RedisURL or configure secret %s): %w", ucom.SecretKeyRedisURL, err)
-			}
-			cfg.asyncInference.RedisURL = redisURL
+		transport, err := inference.NormalizeAsyncTransport(cfg.asyncInference.Transport)
+		if err != nil {
+			return nil, err
 		}
-		resolver, err := inference.NewAsyncResolver(*cfg.asyncInference, logger)
+		cfg.asyncInference.Transport = transport
+		switch transport {
+		case inference.AsyncTransportRedisSortedSet:
+			if cfg.asyncInference.RedisURL == "" {
+				redisURL, err := ucom.ReadSecretFile(ucom.SecretKeyRedisURL)
+				if err != nil {
+					return nil, fmt.Errorf("async Redis transport requires a Redis URL (set RedisURL or configure secret %s): %w", ucom.SecretKeyRedisURL, err)
+				}
+				cfg.asyncInference.RedisURL = redisURL
+			}
+		case inference.AsyncTransportSQL:
+			if cfg.dbCfg == nil || cfg.dbCfg.Type != sharedcfg.DBTypePostgreSQL {
+				return nil, fmt.Errorf("async SQL transport requires a PostgreSQL database client")
+			}
+			cfg.asyncInference.SQLURL = cfg.dbCfg.PostgreSQLCfg.Url
+			if cfg.asyncInference.SQLURL == "" {
+				return nil, fmt.Errorf("async SQL transport requires a PostgreSQL URL")
+			}
+		}
+		resolver, err := inference.NewAsyncResolver(ctx, *cfg.asyncInference, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create async inference clients: %w", err)
 		}

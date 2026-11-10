@@ -186,9 +186,14 @@ func (m *MockDBClient[T, Q]) DBUpdate(ctx context.Context, item *T, expectedStat
 		expectedResumableField := updateVal.FieldByName("ExpectedResumable")
 		if expectedResumableField.IsValid() && expectedResumableField.Kind() == reflect.Pointer && !expectedResumableField.IsNil() {
 			existingResumable := val.FieldByName("Resumable")
-			if existingResumable.IsValid() && existingResumable.Kind() == reflect.Bool &&
-				existingResumable.Bool() != expectedResumableField.Elem().Bool() {
-				return fmt.Errorf("DBUpdate: %w", api.ErrConflict)
+			if existingResumable.IsValid() && existingResumable.Kind() == reflect.Bool {
+				if existingResumable.Bool() != expectedResumableField.Elem().Bool() {
+					return fmt.Errorf("DBUpdate: %w", api.ErrConflict)
+				}
+				// Postgres uses resumable only as a WHERE condition — a status
+				// write never changes the column. The item replacement below
+				// must not drop it, or a later fenced write would conflict.
+				reflect.ValueOf(item).Elem().FieldByName("Resumable").SetBool(existingResumable.Bool())
 			}
 		}
 	}
@@ -216,7 +221,12 @@ func (m *MockDBClient[T, Q]) DBUpdateProgress(ctx context.Context, id string, ep
 	}
 
 	if existingItem, ok := existing.(*T); ok {
-		val := reflect.ValueOf(existingItem).Elem()
+		// Copy-on-write: the map is thread-safe but the items are not, so the
+		// merged status is published via Store on a shallow copy. SetBytes
+		// swaps the slice header, leaving the previously stored item stable
+		// for readers that loaded it concurrently.
+		item := *existingItem
+		val := reflect.ValueOf(&item).Elem()
 		// Mirror the Postgres epoch fence: items with an Epoch field are only
 		// updated when the caller carries the current epoch; a stale-epoch write
 		// matches no rows, so surface ErrConflict to the caller.
@@ -243,6 +253,7 @@ func (m *MockDBClient[T, Q]) DBUpdateProgress(ctx context.Context, id string, ep
 			}
 			statusField.SetBytes(newStatus)
 		}
+		m.items.Store(id, &item)
 	}
 	return nil
 }

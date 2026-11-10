@@ -29,9 +29,11 @@ var (
 	errRequestInputRead = errors.New("failed to read request from input file")
 
 	// errFinalizeFailedOver signals that a terminal status transition (completed,
-	// cancelled) or an upload failed, but the fallback to failed status with
-	// surviving file IDs succeeded. The caller must NOT call handleFailed again,
-	// as that would overwrite file IDs with empty strings and orphan
-	// already-uploaded files.
+	// cancelled) or an upload of the legacy ingestion-phase cancel path failed,
+	// but the fallback to failed status with surviving file IDs succeeded. The
+	// caller must NOT call handleFailed again, as that would overwrite file IDs
+	// with empty strings and orphan already-uploaded files. The resumable
+	// finalizers never fall back: they return their errors and leave the row
+	// non-terminal for the reconciler requeue.
 	errFinalizeFailedOver = errors.New("finalization fell back to failed")
 )

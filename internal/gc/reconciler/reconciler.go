@@ -32,7 +32,6 @@ import (
 	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/batch_utils"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
-	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
 	uotel "github.com/llm-d/llm-d-batch-gateway/internal/util/otel"
 )
 
@@ -57,6 +56,7 @@ type Result struct {
 type Reconciler struct {
 	batchDB         db.BatchDBClient
 	queue           db.BatchPriorityQueueClient
+	resumable       db.ResumableBatchLeaseStore
 	interval        time.Duration
 	dryRun          bool
 	onCycleComplete func(*Result)
@@ -77,6 +77,7 @@ type Reconciler struct {
 func NewReconciler(
 	batchDB db.BatchDBClient,
 	queue db.BatchPriorityQueueClient,
+	resumable db.ResumableBatchLeaseStore,
 	interval time.Duration,
 	dryRun bool,
 	onCycleComplete func(*Result),
@@ -87,12 +88,16 @@ func NewReconciler(
 	if queue == nil {
 		return nil, fmt.Errorf("queue client is required")
 	}
+	if resumable == nil {
+		return nil, fmt.Errorf("resumable store is required")
+	}
 	if interval <= 0 {
 		return nil, fmt.Errorf("interval must be positive, got %v", interval)
 	}
 	return &Reconciler{
 		batchDB:         batchDB,
 		queue:           queue,
+		resumable:       resumable,
 		interval:        interval,
 		dryRun:          dryRun,
 		onCycleComplete: onCycleComplete,
@@ -202,6 +207,10 @@ func (r *Reconciler) run(ctx context.Context) {
 	}
 
 	for _, job := range jobs {
+		if job.Resumable {
+			r.triageResumable(ctx, job, result)
+			continue
+		}
 		if !r.isProcessorAlive(job.ProcessorID) {
 			r.triageOrphan(ctx, job, result)
 		}
@@ -242,10 +251,6 @@ func (r *Reconciler) triageOrphan(ctx context.Context, job *db.BatchItem, result
 	defer span.End()
 	span.SetAttributes(attribute.String(uotel.AttrBatchID, job.ID))
 	logger := logr.FromContextOrDiscard(ctx)
-	if job.Resumable {
-		logger.V(logging.DEBUG).Info("Reconciler: startup recovery owns resumable job")
-		return
-	}
 
 	var statusInfo openai.BatchStatusInfo
 	if err := json.Unmarshal(job.Status, &statusInfo); err != nil {
@@ -265,6 +270,44 @@ func (r *Reconciler) triageOrphan(ctx context.Context, job *db.BatchItem, result
 			r.reEnqueueOrphan(ctx, job, statusInfo.Status, result, logger)
 		}
 	}
+}
+
+// triageResumable handles an owned resumable batch: its persisted entry set
+// makes it recoverable, so it is requeued (never transitioned here) when the
+// owner is dead, or when the owner is alive but its lease has lapsed — the
+// wedged-owner trigger. Cancelling and SLO-expired orphans are requeued too;
+// the resuming processor routes them to their terminal state from the entry
+// set. A requeue that raced with a lease renewal is a fenced no-op.
+func (r *Reconciler) triageResumable(ctx context.Context, job *db.BatchItem, result *Result) {
+	ctx = logr.NewContext(ctx, logr.FromContextOrDiscard(ctx).WithValues("jobId", job.ID))
+	ctx, span := uotel.StartSpan(ctx, "reconciler.triage_resumable")
+	defer span.End()
+	span.SetAttributes(attribute.String(uotel.AttrBatchID, job.ID))
+	logger := logr.FromContextOrDiscard(ctx)
+
+	ownerAlive := r.isProcessorAlive(job.ProcessorID)
+	if ownerAlive && job.OwnerLeaseExpiresAt.After(time.Now()) {
+		return
+	}
+
+	if r.dryRun {
+		logger.Info("Reconciler: dry-run: would requeue resumable orphan", "ownerAlive", ownerAlive)
+		result.ReEnqueued++
+		return
+	}
+
+	// A confirmed pod death requeues regardless of the lease; an alive owner
+	// is only displaced once its lease has actually lapsed. The requeue
+	// counts one recovery attempt: the owner failed, and the budget bounds
+	// how often a batch is handed around before it is failed.
+	if err := r.resumable.RequeueResumableOrphan(ctx, job.ID, job.ProcessorID, job.Epoch, ownerAlive, true); err != nil {
+		logger.Error(err, "Reconciler: failed to requeue resumable orphan")
+		result.Errors++
+		return
+	}
+
+	logger.Info("Reconciler: resumable orphan requeued", "ownerAlive", ownerAlive)
+	result.ReEnqueued++
 }
 
 // transitionOrphan transitions an orphaned job to the given terminal status.

@@ -122,16 +122,16 @@ type AsyncModelConfig struct {
 	// When empty, the header is not sent.
 	InferenceObjective string `yaml:"inference_objective"`
 
-	// RequestQueueName overrides the Redis sorted-set queue name used to
-	// submit inference requests. When empty, the name is derived from
-	// InferencePoolName as "llm-d-async:requests:<pool>".
+	// RequestQueueName overrides the async request queue name used to submit
+	// inference requests. When empty, the name is derived from InferencePoolName
+	// as "llm-d-async:requests:<pool>".
 	// Deprecated fallback: the derived naming convention will be removed in
 	// a future release. Set explicit queue names for new deployments.
 	RequestQueueName string `yaml:"request_queue_name"`
 
-	// ResultQueueName overrides the Redis list base name used to read inference
-	// results. The Processor appends its replica identity. When empty, the base
-	// name is derived from InferencePoolName as "llm-d-async:results:<pool>".
+	// ResultQueueName overrides the async result queue base name. The Processor
+	// appends its replica identity. When empty, the base name is derived from
+	// InferencePoolName as "llm-d-async:results:<pool>".
 	// Deprecated fallback: the derived naming convention will be removed in
 	// a future release. Set an explicit queue base name for new deployments.
 	ResultQueueName string `yaml:"result_queue_name"`
@@ -140,14 +140,27 @@ type AsyncModelConfig struct {
 // AsyncDispatchConfig holds configuration for the llm-d-async dispatch backend.
 // Only used when DispatchMode == "async".
 type AsyncDispatchConfig struct {
-	// RedisURL is the full Redis connection URL (e.g. "redis://host:6379",
-	// "rediss://user:pass@host:6379" for TLS). Read from the mounted secret
-	// at runtime (SecretKeyRedisURL)
+	// Transport selects the llm-d-async queue backend. The supported values are
+	// "redis-sortedset" and "sql".
+	Transport string `yaml:"transport"`
+
+	// RedisURL is the full Redis connection URL. Read from the mounted secret
+	// at runtime when the transport is "redis-sortedset".
 	RedisURL string `yaml:"-"`
 
-	// ResultPollTimeout is the timeout per GetResult poll cycle.
-	// Controls how long each blocking poll waits before retrying.
+	// SQLURL is the PostgreSQL connection URL. It is populated from the shared
+	// database client configuration when the transport is "sql".
+	SQLURL string `yaml:"-"`
+
+	// ResultPollTimeout is the timeout per result poll cycle.
 	ResultPollTimeout time.Duration `yaml:"result_poll_timeout"`
+
+	// PollInterval controls how frequently the SQL transport checks for results.
+	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// MaxConnections caps the SQL store connection pool for this processor.
+	// Only used when Transport is "sql".
+	MaxConnections int `yaml:"max_connections"`
 
 	// Models maps model names to their async dispatch targets.
 	// Required when DispatchMode == "async".
@@ -168,6 +181,14 @@ type ResumableConfig struct {
 
 	// FinalizeTimeout bounds the finalization phase of one batch.
 	FinalizeTimeout time.Duration `yaml:"finalize_timeout"`
+
+	// RecoveryWindow bounds how long a resumed batch waits for the stranded
+	// result delivery of an in-flight entry — held under a claim lease on
+	// the previous submitter's per-processor route — before re-submitting
+	// it. It should cover the async result claim lease (default 5m): a
+	// delivery claimed just before the disruption becomes recoverable only
+	// when that lease lapses.
+	RecoveryWindow time.Duration `yaml:"recovery_window"`
 }
 
 type ProcessorConfig struct {
@@ -426,12 +447,16 @@ func NewConfig() *ProcessorConfig {
 
 		DispatchMode: DispatchModeSync,
 		AsyncDispatchConfig: AsyncDispatchConfig{
+			Transport:         inference.AsyncTransportRedisSortedSet,
+			MaxConnections:    inference.DefaultSQLMaxConns,
 			ResultPollTimeout: 5 * time.Second,
+			PollInterval:      time.Second,
 		},
 		Resumable: ResumableConfig{
 			LeaseDuration:       5 * time.Minute,
 			FinalizeConcurrency: 16,
 			FinalizeTimeout:     30 * time.Minute,
+			RecoveryWindow:      5 * time.Minute,
 		},
 	}
 }
@@ -494,6 +519,9 @@ func (c *ProcessorConfig) Validate() error {
 	}
 	if c.Resumable.FinalizeTimeout <= 0 {
 		return fmt.Errorf("resumable.finalize_timeout must be > 0")
+	}
+	if c.Resumable.RecoveryWindow <= 0 {
+		return fmt.Errorf("resumable.recovery_window must be > 0")
 	}
 
 	switch c.RouteKeyMethod {
@@ -584,8 +612,18 @@ func (c *ProcessorConfig) validateSyncDispatchConfig() error {
 }
 
 func (c *ProcessorConfig) validateAsyncDispatchConfig() error {
+	transport, err := inference.NormalizeAsyncTransport(c.AsyncDispatchConfig.Transport)
+	if err != nil {
+		return fmt.Errorf("async_dispatch.transport: %w", err)
+	}
+	if transport == inference.AsyncTransportSQL && c.AsyncDispatchConfig.MaxConnections <= 0 {
+		return fmt.Errorf("async_dispatch.max_connections must be > 0")
+	}
 	if c.AsyncDispatchConfig.ResultPollTimeout <= 0 {
 		return fmt.Errorf("async_dispatch.result_poll_timeout must be > 0")
+	}
+	if c.AsyncDispatchConfig.PollInterval <= 0 {
+		return fmt.Errorf("async_dispatch.poll_interval must be > 0")
 	}
 	if c.GlobalInferenceGateway != nil {
 		return fmt.Errorf("global_inference_gateway is not supported with dispatch_mode %q; use async_dispatch.models instead or explicitly set dispatch_mode: sync", DispatchModeAsync)
@@ -750,8 +788,11 @@ func ResolveModelGateways(cfg *ProcessorConfig) (*ResolvedGateways, error) {
 			}
 		}
 		result.Async = &inference.AsyncClientConfig{
+			Transport:         cfg.AsyncDispatchConfig.Transport,
+			MaxConnections:    cfg.AsyncDispatchConfig.MaxConnections,
 			Models:            models,
 			ResultPollTimeout: cfg.AsyncDispatchConfig.ResultPollTimeout,
+			PollInterval:      cfg.AsyncDispatchConfig.PollInterval,
 		}
 		return result, nil
 	}

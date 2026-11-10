@@ -114,6 +114,16 @@ func (pt *ProgressTracker) AddFailed(n int64) {
 	pt.mu.Unlock()
 }
 
+// AddCompleted adds to the completed counter and marks the tracker as dirty
+// so the next tick pushes the update. A resumed job seeds it with the
+// checkpointed successes of previous incarnations.
+func (pt *ProgressTracker) AddCompleted(n int64) {
+	pt.mu.Lock()
+	pt.completed += n
+	pt.dirty = true
+	pt.mu.Unlock()
+}
+
 func (pt *ProgressTracker) push(ctx context.Context) {
 	if pt.updater == nil {
 		return

@@ -16,6 +16,8 @@ limitations under the License.
 
 package api
 
+import "time"
+
 // BatchItem is the database item type
 type BatchItem struct {
 	BaseIndexes
@@ -47,6 +49,12 @@ type BatchItem struct {
 	// Resumable marks jobs whose durable manifest allows startup recovery to
 	// resume work without GC resetting or terminalizing the batch.
 	Resumable bool
+
+	// OwnerLeaseExpiresAt is the resumable owner's lease deadline
+	// (owner_lease_expires_at). Zero when the batch is not activated. The GC
+	// reconciler evaluates it to detect a wedged owner; lease writes go
+	// through the resumable store, never through DBUpdate.
+	OwnerLeaseExpiresAt time.Time
 
 	// ExpectedResumable optionally fences DBUpdate on the persisted resumable
 	// value. It is a mutation precondition and is not itself persisted.

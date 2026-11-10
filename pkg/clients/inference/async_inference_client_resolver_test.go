@@ -19,6 +19,8 @@ package inference
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +29,38 @@ import (
 )
 
 const testAsyncConsumerID = "processor-0"
+
+func TestNormalizeAsyncTransport(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		want      string
+		wantError bool
+	}{
+		{name: "empty defaults to Redis", input: "", want: AsyncTransportRedisSortedSet},
+		{name: "Redis remains supported", input: AsyncTransportRedisSortedSet, want: AsyncTransportRedisSortedSet},
+		{name: "SQL is supported", input: AsyncTransportSQL, want: AsyncTransportSQL},
+		{name: "unknown transport is rejected", input: "unknown", wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeAsyncTransport(tt.input)
+			if tt.wantError {
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeAsyncTransport: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("transport = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestNewAsyncResolver(t *testing.T) {
 	t.Run("creates per-model clients", func(t *testing.T) {
@@ -42,7 +76,7 @@ func TestNewAsyncResolver(t *testing.T) {
 			ResultPollTimeout: time.Second,
 		}
 
-		r, err := NewAsyncResolver(cfg, testLogger(t))
+		r, err := NewAsyncResolver(context.Background(), cfg, testLogger(t))
 		if err != nil {
 			t.Fatalf("NewAsyncResolver: %v", err)
 		}
@@ -53,6 +87,9 @@ func TestNewAsyncResolver(t *testing.T) {
 		if got := r.SharedClientFor("model-b"); got == nil {
 			t.Fatal("expected non-nil client for model-b")
 		}
+		if !r.SupportsResultRecovery() {
+			t.Fatal("Redis resolver should support result recovery")
+		}
 		if got := r.SharedClientFor("unknown"); got != nil {
 			t.Fatalf("expected nil for unknown model, got %v", got)
 		}
@@ -61,7 +98,7 @@ func TestNewAsyncResolver(t *testing.T) {
 	t.Run("returns nil for unknown model", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 
-		r, err := NewAsyncResolver(AsyncClientConfig{
+		r, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
 			RedisURL:   "redis://" + mr.Addr(),
 			ConsumerID: testAsyncConsumerID,
 			Models: map[string]AsyncModelPoolConfig{
@@ -81,7 +118,7 @@ func TestNewAsyncResolver(t *testing.T) {
 	t.Run("rejects duplicate pool mapping", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 
-		_, err := NewAsyncResolver(AsyncClientConfig{
+		_, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
 			RedisURL:   "redis://" + mr.Addr(),
 			ConsumerID: testAsyncConsumerID,
 			Models: map[string]AsyncModelPoolConfig{
@@ -96,7 +133,7 @@ func TestNewAsyncResolver(t *testing.T) {
 	})
 
 	t.Run("invalid Redis URL returns error", func(t *testing.T) {
-		_, err := NewAsyncResolver(AsyncClientConfig{
+		_, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
 			RedisURL:   "not-a-url",
 			ConsumerID: testAsyncConsumerID,
 			Models: map[string]AsyncModelPoolConfig{
@@ -111,7 +148,7 @@ func TestNewAsyncResolver(t *testing.T) {
 
 	t.Run("rejects empty consumer ID", func(t *testing.T) {
 		mr := miniredis.RunT(t)
-		_, err := NewAsyncResolver(AsyncClientConfig{
+		_, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
 			RedisURL: "redis://" + mr.Addr(),
 			Models: map[string]AsyncModelPoolConfig{
 				"model-a": {PoolName: "pool-a"},
@@ -126,7 +163,7 @@ func TestNewAsyncResolver(t *testing.T) {
 	t.Run("close releases resources", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 
-		r, err := NewAsyncResolver(AsyncClientConfig{
+		r, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
 			RedisURL:   "redis://" + mr.Addr(),
 			ConsumerID: testAsyncConsumerID,
 			Models: map[string]AsyncModelPoolConfig{
@@ -146,7 +183,7 @@ func TestNewAsyncResolver(t *testing.T) {
 	t.Run("SharedClientFor reuses the same client", func(t *testing.T) {
 		mr := miniredis.RunT(t)
 
-		r, err := NewAsyncResolver(AsyncClientConfig{
+		r, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
 			RedisURL:   "redis://" + mr.Addr(),
 			ConsumerID: testAsyncConsumerID,
 			Models: map[string]AsyncModelPoolConfig{
@@ -173,7 +210,7 @@ func TestNewAsyncResolver(t *testing.T) {
 		)
 
 		newResolver := func(consumerID string) *AsyncGatewayResolver {
-			r, err := NewAsyncResolver(AsyncClientConfig{
+			r, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
 				RedisURL:   "redis://" + mr.Addr(),
 				ConsumerID: consumerID,
 				Models: map[string]AsyncModelPoolConfig{
@@ -186,7 +223,7 @@ func TestNewAsyncResolver(t *testing.T) {
 				ResultPollTimeout: time.Second,
 			}, testLogger(t))
 			if err != nil {
-				t.Fatalf("NewAsyncResolver(%q): %v", consumerID, err)
+				t.Fatalf("NewAsyncResolver(context.Background(), %q): %v", consumerID, err)
 			}
 			t.Cleanup(func() { _ = r.Close() })
 			return r
@@ -267,4 +304,63 @@ func TestNewAsyncResolver(t *testing.T) {
 			t.Fatalf("consumer B received %q, want request-b", resultB.RequestID)
 		}
 	})
+	t.Run("requires SQL URL for SQL transport", func(t *testing.T) {
+		_, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
+			Transport:         AsyncTransportSQL,
+			ConsumerID:        testAsyncConsumerID,
+			ResultPollTimeout: time.Second,
+			Models: map[string]AsyncModelPoolConfig{
+				"model-a": {PoolName: "pool-a"},
+			},
+		}, testLogger(t))
+		if err == nil {
+			t.Fatal("expected an error when SQL URL is missing")
+		}
+	})
+	t.Run("does not build unsafe SQL recovery clients", func(t *testing.T) {
+		r := &AsyncGatewayResolver{
+			transport:  AsyncTransportSQL,
+			routeBases: map[string]string{"model-a": "results:model-a"},
+		}
+		if r.SupportsResultRecovery() {
+			t.Fatal("SQL resolver should not support result recovery")
+		}
+
+		_, err := r.RecoveryClientFor("model-a", "processor-1")
+		if err == nil {
+			t.Fatal("expected SQL recovery to be unsupported")
+		}
+		if !strings.Contains(err.Error(), "does not support cross-processor result recovery") {
+			t.Fatalf("error = %q, want SQL recovery limitation", err)
+		}
+	})
+}
+
+func TestNewAsyncResolverSQLPostgres(t *testing.T) {
+	sqlURL := os.Getenv("TEST_POSTGRES_URL")
+	if sqlURL == "" {
+		t.Skip("TEST_POSTGRES_URL not set")
+	}
+
+	r, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
+		Transport:         AsyncTransportSQL,
+		SQLURL:            sqlURL,
+		ConsumerID:        testAsyncConsumerID,
+		ResultPollTimeout: time.Second,
+		Models: map[string]AsyncModelPoolConfig{
+			"model-a": {
+				PoolName:         "sql-smoke-pool",
+				RequestQueueName: "sql-smoke-request",
+				ResultQueueName:  "sql-smoke-result",
+			},
+		},
+	}, testLogger(t))
+	if err != nil {
+		t.Fatalf("NewAsyncResolver SQL: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+
+	if r.SharedClientFor("model-a") == nil {
+		t.Fatal("expected SQL async client for model-a")
+	}
 }

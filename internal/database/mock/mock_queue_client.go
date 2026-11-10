@@ -77,45 +77,21 @@ func (m *MockBatchPriorityQueueClient) PQEnqueue(ctx context.Context, jobPriorit
 	return nil
 }
 
-func (m *MockBatchPriorityQueueClient) PQDequeue(ctx context.Context, timeout time.Duration, maxObjs int) ([]*api.BatchJobPriority, error) {
-	deadline := time.Now().Add(timeout)
+// PQDequeue returns up to maxObjs tasks without blocking, mirroring the
+// Postgres implementation's non-blocking claim. The lease parameter is
+// irrelevant in memory: tests seed requeued resumable tasks directly.
+func (m *MockBatchPriorityQueueClient) PQDequeue(ctx context.Context, _ time.Duration, maxObjs int) ([]*api.BatchJobPriority, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	for {
-		m.mu.Lock()
-		if len(m.queue) > 0 {
-			// Determine how many objects to return
-			count := min(maxObjs, len(m.queue))
-
-			// Get the first 'count' items (highest priority)
-			result := make([]*api.BatchJobPriority, count)
-			copy(result, m.queue[:count])
-
-			// Remove them from the queue
-			m.queue = m.queue[count:]
-
-			m.mu.Unlock()
-			return result, nil
-		}
-		m.mu.Unlock()
-
-		// If timeout is zero, return immediately
-		if timeout == 0 {
-			return []*api.BatchJobPriority{}, nil
-		}
-
-		// Check if we've exceeded the timeout
-		if time.Now().After(deadline) {
-			return []*api.BatchJobPriority{}, nil
-		}
-
-		// Check if context is cancelled
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(10 * time.Millisecond):
-			// Small sleep before checking again
-		}
+	count := min(maxObjs, len(m.queue))
+	if count == 0 {
+		return []*api.BatchJobPriority{}, nil
 	}
+	result := make([]*api.BatchJobPriority, count)
+	copy(result, m.queue[:count])
+	m.queue = m.queue[count:]
+	return result, nil
 }
 
 func (m *MockBatchPriorityQueueClient) PQDelete(ctx context.Context, jobPriority *api.BatchJobPriority) (nDeleted int, err error) {

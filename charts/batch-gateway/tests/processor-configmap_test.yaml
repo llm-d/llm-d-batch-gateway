@@ -15,6 +15,9 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: 'dispatch_mode: "sync"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'max_connections: 8'
 
   - it: should render shared extra endpoints
     set:
@@ -455,6 +458,53 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: '"sim-model-inject":[\s\S]*inference_pool_name: "sim-pool-inject"'
+
+  - it: should render SQL async transport settings
+    set:
+      processor.config.dispatchMode: async
+      processor.config.asyncDispatch:
+        transport: sql
+        resultPollTimeout: "30s"
+        pollInterval: "2s"
+        maxConnections: 12
+        models:
+          "sim-model":
+            inferencePoolName: "sim-pool"
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'async_dispatch:[\s\S]*transport: "sql"[\s\S]*poll_interval: "2s"[\s\S]*max_connections: 12'
+  - it: should preserve an explicit zero max connections value
+    set:
+      processor.config.dispatchMode: async
+      processor.config.asyncDispatch:
+        transport: sql
+        resultPollTimeout: "30s"
+        pollInterval: "2s"
+        maxConnections: 0
+        models:
+          "sim-model":
+            inferencePoolName: "sim-pool"
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'async_dispatch:[\s\S]*max_connections: 0'
+  - it: should render resumable tunables with defaults
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'resumable:[\s\S]*lease_duration: "5m"[\s\S]*finalize_concurrency: 16[\s\S]*finalize_timeout: "30m"'
+
+  - it: should render resumable tunables when overridden
+    set:
+      processor.config.resumable:
+        leaseDuration: "2m"
+        finalizeConcurrency: 8
+        finalizeTimeout: "10m"
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'resumable:[\s\S]*lease_duration: "2m"[\s\S]*finalize_concurrency: 8[\s\S]*finalize_timeout: "10m"'
 
   - it: should not render send_fairness_header when false (default)
     asserts:

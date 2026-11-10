@@ -82,6 +82,44 @@ func (s *StatusUpdater) UpdatePersistentStatus(
 	return s.updatePersistentStatus(ctx, dbJob, newStatus, counts, slo, nil, modifiers...)
 }
 
+// BuildStatus derives the marshaled status document of one transition from
+// dbJob's current status: validation, the timestamp/counts build, then the
+// modifiers. It performs no write — both the row-store update path and the
+// fenced resumable finalization build their documents with it, so the two
+// write the same shape.
+func (s *StatusUpdater) BuildStatus(
+	dbJob *db.BatchItem,
+	newStatus openai.BatchStatus,
+	counts *openai.BatchRequestCounts,
+	slo *time.Time,
+	modifiers ...func(*openai.BatchStatusInfo),
+) ([]byte, error) {
+	if dbJob == nil {
+		return nil, fmt.Errorf("dbJob is nil")
+	}
+	if len(dbJob.Status) == 0 {
+		return nil, fmt.Errorf("dbJob.Status is empty")
+	}
+
+	var original openai.BatchStatusInfo
+	if err := json.Unmarshal(dbJob.Status, &original); err != nil {
+		return nil, err
+	}
+
+	// Build base status first (status, timestamps, counts), then apply modifiers
+	// to set additional fields (e.g. file IDs) that aren't part of the standard transition.
+	updated, err := batch_utils.BuildUpdatedStatusInfo(&original, newStatus, counts, slo)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, fn := range modifiers {
+		fn(updated)
+	}
+
+	return json.Marshal(updated)
+}
+
 func (s *StatusUpdater) updatePersistentStatus(
 	ctx context.Context,
 	dbJob *db.BatchItem,
@@ -91,30 +129,7 @@ func (s *StatusUpdater) updatePersistentStatus(
 	expectedStatus []byte,
 	modifiers ...func(*openai.BatchStatusInfo),
 ) error {
-	if dbJob == nil {
-		return fmt.Errorf("dbJob is nil")
-	}
-	if len(dbJob.Status) == 0 {
-		return fmt.Errorf("dbJob.Status is empty")
-	}
-
-	var original openai.BatchStatusInfo
-	if err := json.Unmarshal(dbJob.Status, &original); err != nil {
-		return err
-	}
-
-	// Build base status first (status, timestamps, counts), then apply modifiers
-	// to set additional fields (e.g. file IDs) that aren't part of the standard transition.
-	updated, err := batch_utils.BuildUpdatedStatusInfo(&original, newStatus, counts, slo)
-	if err != nil {
-		return err
-	}
-
-	for _, fn := range modifiers {
-		fn(updated)
-	}
-
-	statusBytes, err := json.Marshal(updated)
+	statusBytes, err := s.BuildStatus(dbJob, newStatus, counts, slo, modifiers...)
 	if err != nil {
 		return err
 	}
@@ -126,7 +141,8 @@ func (s *StatusUpdater) updatePersistentStatus(
 		BaseContents: db.BaseContents{
 			Status: statusBytes,
 		},
-		Epoch: dbJob.Epoch,
+		Epoch:             dbJob.Epoch,
+		ExpectedResumable: dbJob.ExpectedResumable,
 	}, expectedStatus); err != nil {
 		return err
 	}

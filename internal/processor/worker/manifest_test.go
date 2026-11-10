@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
 	"reflect"
 	"testing"
 
@@ -42,7 +41,7 @@ func TestStableBatchRequestID(t *testing.T) {
 // runPreProcessOnce preprocesses a fixed mixed input (one accepted line, one
 // rejected line for an unregistered model, one accepted line) and returns the
 // manifest and the error-file bytes.
-func runPreProcessOnce(t *testing.T, jobID string) (*requestManifest, []byte) {
+func runPreProcessOnce(t *testing.T, jobID string) *requestManifest {
 	t.Helper()
 	ctx := testLoggerCtx(t)
 
@@ -113,16 +112,11 @@ func runPreProcessOnce(t *testing.T, jobID string) (*requestManifest, []byte) {
 		t.Fatalf("preProcessJob: %v", err)
 	}
 
-	errorPath, _ := p.jobErrorFilePath(jobID, tenantID)
-	errorBytes, err := os.ReadFile(errorPath)
-	if err != nil {
-		t.Fatalf("read error file: %v", err)
-	}
-	return manifest, errorBytes
+	return manifest
 }
 
 func TestPreProcess_ManifestAccumulation(t *testing.T) {
-	manifest, errorBytes := runPreProcessOnce(t, "job-manifest")
+	manifest := runPreProcessOnce(t, "job-manifest")
 
 	if len(manifest.Entries) != 3 {
 		t.Fatalf("manifest entries = %d, want 3", len(manifest.Entries))
@@ -148,9 +142,9 @@ func TestPreProcess_ManifestAccumulation(t *testing.T) {
 		t.Fatalf("rejected result key %q", rejected.ResultKey)
 	}
 
-	// The rejected entry's metadata must describe the error-object line that
-	// ingestion actually wrote (including its trailing newline).
-	errLine := errorBytes
+	// The rejected entry's metadata must describe its error-object line
+	// (including its trailing newline).
+	errLine := rejected.ErrLine
 	if int64(len(errLine)) != rejected.ResultBytes {
 		t.Fatalf("ResultBytes = %d, want %d", rejected.ResultBytes, len(errLine))
 	}
@@ -164,9 +158,43 @@ func TestPreProcess_ManifestAccumulation(t *testing.T) {
 }
 
 func TestPreProcess_ManifestDeterministic(t *testing.T) {
-	first, _ := runPreProcessOnce(t, "job-manifest")
-	second, _ := runPreProcessOnce(t, "job-manifest")
+	first := runPreProcessOnce(t, "job-manifest")
+	second := runPreProcessOnce(t, "job-manifest")
 	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("manifests differ across runs:\n%+v\n%+v", first.Entries, second.Entries)
+	}
+}
+
+func TestManifest_ActivationEntries(t *testing.T) {
+	manifest := runPreProcessOnce(t, "job-manifest")
+
+	entries := manifest.activationEntries()
+	if len(entries) != len(manifest.Entries) {
+		t.Fatalf("activation entries = %d, want %d", len(entries), len(manifest.Entries))
+	}
+
+	for i, e := range entries {
+		if e.RequestID != manifest.Entries[i].RequestID ||
+			e.Ordinal != manifest.Entries[i].Ordinal ||
+			e.CustomID != manifest.Entries[i].CustomID {
+			t.Fatalf("entry %d does not mirror the manifest: %+v", i, e)
+		}
+	}
+
+	accepted, rejected := entries[0], entries[1]
+	if accepted.Status != string(db.ResumableEntryPending) {
+		t.Fatalf("accepted entry activates as %q, want pending", accepted.Status)
+	}
+	if accepted.ErrorCode != "" || accepted.ResultKey != "" || accepted.ResultBytes != 0 || accepted.ResultSHA256 != "" {
+		t.Fatalf("pending entry carries result metadata: %+v", accepted)
+	}
+
+	src := manifest.Entries[1]
+	if rejected.Status != string(db.ResumableEntryFailed) {
+		t.Fatalf("rejected entry activates as %q, want failed", rejected.Status)
+	}
+	if rejected.ErrorCode != src.ErrorCode || rejected.ResultKey != src.ResultKey ||
+		rejected.ResultBytes != src.ResultBytes || rejected.ResultSHA256 != src.ResultSHA256 {
+		t.Fatalf("rejected entry = %+v, want the manifest metadata %+v", rejected, src)
 	}
 }

@@ -58,7 +58,7 @@ var (
 // user/shutdown/expiry state.
 func Cause(ctx context.Context) error {
 	switch cause := context.Cause(ctx); {
-	case errors.Is(cause, context.DeadlineExceeded):
+	case errors.Is(cause, context.DeadlineExceeded), errors.Is(cause, ErrExpired):
 		return ErrExpired
 	case errors.Is(cause, ErrCancelled):
 		return ErrCancelled

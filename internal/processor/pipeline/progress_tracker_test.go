@@ -2,21 +2,27 @@ package pipeline
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+
+	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 )
 
 func TestProgressTracker_Run(t *testing.T) {
 	tests := []struct {
-		name       string
-		total      int64
-		preFailed  int64
-		wantFailed int64
+		name          string
+		total         int64
+		preFailed     int64
+		preCompleted  int64
+		wantFailed    int64
+		wantCompleted int64
 	}{
 		{name: "pushes total before the first tick", total: 5},
 		{name: "initial push includes rejected lines recorded before Run", total: 5, preFailed: 2, wantFailed: 2},
+		{name: "initial push includes checkpointed successes recorded before Run", total: 5, preCompleted: 2, wantCompleted: 2},
 	}
 
 	for _, tt := range tests {
@@ -25,6 +31,7 @@ func TestProgressTracker_Run(t *testing.T) {
 			// The interval is long, so a push seen here cannot come from a tick.
 			tracker := NewProgressTracker(tt.total, updater, "test-job", time.Hour, logr.Discard())
 			tracker.AddFailed(tt.preFailed)
+			tracker.AddCompleted(tt.preCompleted)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
@@ -53,12 +60,38 @@ func TestProgressTracker_Run(t *testing.T) {
 			if last.Total != tt.total {
 				t.Errorf("Total = %d, want %d", last.Total, tt.total)
 			}
-			if last.Completed != 0 {
-				t.Errorf("Completed = %d, want 0", last.Completed)
+			if last.Completed != tt.wantCompleted {
+				t.Errorf("Completed = %d, want %d", last.Completed, tt.wantCompleted)
 			}
 			if last.Failed != tt.wantFailed {
 				t.Errorf("Failed = %d, want %d", last.Failed, tt.wantFailed)
 			}
 		})
 	}
+}
+
+type countingUpdater struct {
+	mu    sync.Mutex
+	calls int
+	last  *openai.BatchRequestCounts
+}
+
+func (u *countingUpdater) UpdateProgressCounts(_ context.Context, _ string, counts *openai.BatchRequestCounts) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.calls++
+	u.last = counts
+	return nil
+}
+
+func (u *countingUpdater) getCalls() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.calls
+}
+
+func (u *countingUpdater) getLast() *openai.BatchRequestCounts {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.last
 }

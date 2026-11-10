@@ -159,12 +159,111 @@ func TestMockResumableStore_Lease(t *testing.T) {
 	})
 }
 
+func TestMockResumableStore_Finalize(t *testing.T) {
+	ctx := context.Background()
+	doc := []byte(`{"status":"completed","request_counts":{"total":2,"completed":2}}`)
+
+	finOf := func(expected string) *api.ResumableFinalization {
+		return &api.ResumableFinalization{
+			BatchID: "job-1", ProcessorID: "proc-1", Epoch: activationEpoch,
+			ExpectedStatus: expected, Status: doc,
+		}
+	}
+
+	t.Run("persists the terminal status and releases ownership", func(t *testing.T) {
+		store, _ := seedActivated(t)
+		if err := store.FinalizeResumableBatch(ctx, finOf("in_progress")); err != nil {
+			t.Fatalf("FinalizeResumableBatch: %v", err)
+		}
+		// The released owner fences out of every subsequent write.
+		if _, err := store.MarkEntryInFlight(ctx, "job-1", "r-1", "proc-1", activationEpoch); !errors.Is(err, api.ErrConflict) {
+			t.Fatalf("entry write after finalize: expected ErrConflict, got %v", err)
+		}
+		if err := store.RenewResumableBatchLease(ctx, "job-1", "proc-1", activationEpoch, activationLeaseTTL); !errors.Is(err, api.ErrConflict) {
+			t.Fatalf("renew after finalize: expected ErrConflict, got %v", err)
+		}
+	})
+
+	t.Run("fenced transitions conflict", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			mutate func(store *MockResumableStore, clock *frozenClock)
+			fin    *api.ResumableFinalization
+		}{
+			{name: "expected status does not match the row",
+				fin: finOf("finalizing")},
+			{name: "stale epoch",
+				fin: func() *api.ResumableFinalization {
+					f := finOf("in_progress")
+					f.Epoch = activationEpoch + 1
+					return f
+				}()},
+			{name: "foreign owner",
+				fin: func() *api.ResumableFinalization {
+					f := finOf("in_progress")
+					f.ProcessorID = "proc-other"
+					return f
+				}()},
+			{name: "lapsed lease",
+				mutate: func(_ *MockResumableStore, clock *frozenClock) {
+					clock.Advance(activationLeaseTTL + time.Minute)
+				},
+				fin: finOf("in_progress")},
+			{name: "requeued batch lost its owner",
+				mutate: func(store *MockResumableStore, _ *frozenClock) {
+					_ = store.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch, false, true)
+				},
+				fin: finOf("in_progress")},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				store, clock := seedActivated(t)
+				if tt.mutate != nil {
+					tt.mutate(store, clock)
+				}
+				if err := store.FinalizeResumableBatch(ctx, tt.fin); !errors.Is(err, api.ErrConflict) {
+					t.Fatalf("expected ErrConflict, got %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("retry with the identical status document is idempotent", func(t *testing.T) {
+		store, _ := seedActivated(t)
+		if err := store.FinalizeResumableBatch(ctx, finOf("in_progress")); err != nil {
+			t.Fatalf("first finalize: %v", err)
+		}
+		if err := store.FinalizeResumableBatch(ctx, finOf("in_progress")); err != nil {
+			t.Fatalf("identical retry: %v", err)
+		}
+		// A different document over the committed terminal state conflicts.
+		other := finOf("in_progress")
+		other.Status = []byte(`{"status":"cancelled"}`)
+		if err := store.FinalizeResumableBatch(ctx, other); !errors.Is(err, api.ErrConflict) {
+			t.Fatalf("diverging retry: expected ErrConflict, got %v", err)
+		}
+	})
+
+	t.Run("validates input", func(t *testing.T) {
+		store, _ := seedActivated(t)
+		for _, fin := range []*api.ResumableFinalization{
+			nil,
+			{BatchID: "job-1", ProcessorID: "proc-1", Epoch: activationEpoch, ExpectedStatus: "in_progress"},
+			{BatchID: "job-1", ProcessorID: "proc-1", Epoch: activationEpoch, Status: doc},
+		} {
+			if err := store.FinalizeResumableBatch(ctx, fin); err == nil {
+				t.Fatalf("finalization %+v: expected validation error, got nil", fin)
+			}
+		}
+	})
+}
+
 func TestMockResumableStore_Requeue(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("clears ownership, bumps epoch, keeps entries", func(t *testing.T) {
 		store, _ := seedActivated(t)
-		if err := store.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch, false); err != nil {
+		if err := store.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch, false, true); err != nil {
 			t.Fatalf("requeue: %v", err)
 		}
 		// The owner's fenced writes no longer match at the old epoch.
@@ -178,9 +277,31 @@ func TestMockResumableStore_Requeue(t *testing.T) {
 		}
 	})
 
+	t.Run("bumpAttempts=false leaves the recovery budget untouched", func(t *testing.T) {
+		// The startup-recovery requeue: PQClaimOwned already counted the
+		// restart, so the requeue must not spend a second attempt — one
+		// restart costs one attempt of the budget, not two.
+		store, _ := seedActivated(t)
+		if err := store.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch, false, false); err != nil {
+			t.Fatalf("requeue: %v", err)
+		}
+		if _, _, attempts := store.BatchOwnership("job-1"); attempts != 0 {
+			t.Fatalf("recovery_attempts = %d, want 0 (the claim already counted the restart)", attempts)
+		}
+
+		// The GC requeue still counts.
+		store2, _ := seedActivated(t)
+		if err := store2.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch, false, true); err != nil {
+			t.Fatalf("requeue: %v", err)
+		}
+		if _, _, attempts := store2.BatchOwnership("job-1"); attempts != 1 {
+			t.Fatalf("recovery_attempts = %d, want 1 for a counted requeue", attempts)
+		}
+	})
+
 	t.Run("stale snapshot is a no-op", func(t *testing.T) {
 		store, _ := seedActivated(t)
-		if err := store.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch-1, false); err != nil {
+		if err := store.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch-1, false, true); err != nil {
 			t.Fatalf("stale requeue: %v", err)
 		}
 		if err := store.RenewResumableBatchLease(ctx, "job-1", "proc-1", activationEpoch, activationLeaseTTL); err != nil {
@@ -190,14 +311,14 @@ func TestMockResumableStore_Requeue(t *testing.T) {
 
 	t.Run("wedged-owner trigger requires a lapsed lease", func(t *testing.T) {
 		store, clock := seedActivated(t)
-		if err := store.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch, true); err != nil {
+		if err := store.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch, true, true); err != nil {
 			t.Fatalf("requeue with live lease: %v", err)
 		}
 		if err := store.RenewResumableBatchLease(ctx, "job-1", "proc-1", activationEpoch, activationLeaseTTL); err != nil {
 			t.Fatalf("live lease must block the requeue: %v", err)
 		}
 		clock.Advance(activationLeaseTTL + time.Minute)
-		if err := store.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch, true); err != nil {
+		if err := store.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch, true, true); err != nil {
 			t.Fatalf("requeue after lapse: %v", err)
 		}
 		if err := store.RenewResumableBatchLease(ctx, "job-1", "proc-1", activationEpoch, activationLeaseTTL); !errors.Is(err, api.ErrConflict) {
@@ -208,7 +329,7 @@ func TestMockResumableStore_Requeue(t *testing.T) {
 	t.Run("terminal batch is left alone", func(t *testing.T) {
 		store, _ := seedActivated(t)
 		store.MarkTerminal("job-1")
-		if err := store.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch, false); err != nil {
+		if err := store.RequeueResumableOrphan(ctx, "job-1", "proc-1", activationEpoch, false, true); err != nil {
 			t.Fatalf("requeue terminal: %v", err)
 		}
 		if err := store.RenewResumableBatchLease(ctx, "job-1", "proc-1", activationEpoch, activationLeaseTTL); !errors.Is(err, api.ErrConflict) {
@@ -347,7 +468,7 @@ func TestMockResumableStore_Queries(t *testing.T) {
 		if err != nil || entry == nil {
 			t.Fatalf("find r-3: err=%v entry=%v", err, entry)
 		}
-		if entry.Status != api.ResumableEntryFailed || entry.Attempts != 1 ||
+		if entry.Status != api.ResumableEntryFailed || entry.Attempts != 0 ||
 			entry.ErrorCode != "model_not_found" || entry.ResultKey != "results/job-1/r-3.jsonl" ||
 			entry.ResultBytes != 42 || entry.ResultSHA256 != "abc123" {
 			t.Fatalf("rejected entry = %+v", entry)

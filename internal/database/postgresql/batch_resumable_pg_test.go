@@ -18,11 +18,16 @@ package postgresql
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/database/api"
@@ -31,6 +36,7 @@ import (
 // resumablePgEnv bundles the real clients and pool the pg-backed tests use.
 type resumablePgEnv struct {
 	ctx     context.Context
+	url     string
 	store   *PostgresResumableStore
 	batchDB *PostgresBatchDBClient
 	queue   *PostgresBatchQueueClient
@@ -47,7 +53,7 @@ func newResumablePgEnv(t *testing.T) *resumablePgEnv {
 	ctx := context.Background()
 
 	cfg := &PostgreSQLConfig{Url: url}
-	env := &resumablePgEnv{ctx: ctx}
+	env := &resumablePgEnv{ctx: ctx, url: url}
 	var err error
 	if env.store, err = NewPostgresResumableStore(ctx, cfg); err != nil {
 		t.Fatalf("NewPostgresResumableStore: %v", err)
@@ -167,7 +173,7 @@ func TestActivateResumableBatchPG(t *testing.T) {
 		rejected := entries[2]
 		if rejected.Status != api.ResumableEntryFailed || rejected.ErrorCode != "model_not_found" ||
 			rejected.ResultKey != "results/j1/batch_req_r.jsonl" || rejected.ResultBytes != 42 ||
-			rejected.ResultSHA256 != "sha-r" || rejected.Attempts != 1 {
+			rejected.ResultSHA256 != "sha-r" || rejected.Attempts != 0 {
 			t.Fatalf("rejected entry not persisted with its error object: %+v", rejected)
 		}
 	})
@@ -323,7 +329,7 @@ func TestRequeueResumableOrphanPG(t *testing.T) {
 		const id = "batch-requeue"
 		epoch := env.activate(t, id)
 
-		if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, epoch, false); err != nil {
+		if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, epoch, false, true); err != nil {
 			t.Fatalf("RequeueResumableOrphan: %v", err)
 		}
 
@@ -346,11 +352,41 @@ func TestRequeueResumableOrphanPG(t *testing.T) {
 		}
 	})
 
+	t.Run("startup requeue leaves the recovery budget to the claim", func(t *testing.T) {
+		// PQClaimOwned already bumps recovery_attempts when startup recovery
+		// claims the owned row, so the hand-back requeue must not bump again:
+		// one restart costs one attempt, not two — after two rollouts a
+		// healthy batch sits at 2, inside the default budget of 3.
+		const id = "batch-requeue-startup"
+		epoch := env.activate(t, id)
+		// The claim's bump, as PQClaimOwned would leave it.
+		if _, err := env.pool.Exec(env.ctx,
+			`UPDATE batch_items SET recovery_attempts = 1 WHERE id = $1`, id,
+		); err != nil {
+			t.Fatalf("stage claim bump: %v", err)
+		}
+
+		if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, epoch, false, false); err != nil {
+			t.Fatalf("RequeueResumableOrphan: %v", err)
+		}
+
+		s := readRow(t, id)
+		if s.processor != nil {
+			t.Fatalf("ownership not cleared: processor=%v", s.processor)
+		}
+		if s.epoch != epoch+1 {
+			t.Fatalf("epoch not bumped: got %d want %d", s.epoch, epoch+1)
+		}
+		if s.attempts != 1 {
+			t.Fatalf("recovery_attempts = %d, want 1 (only the claim's bump)", s.attempts)
+		}
+	})
+
 	t.Run("no-ops when the snapshot is stale", func(t *testing.T) {
 		const id = "batch-requeue-race"
 		epoch := env.activate(t, id)
 
-		if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, epoch+5, false); err != nil {
+		if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, epoch+5, false, true); err != nil {
 			t.Fatalf("stale snapshot must be a no-op success, got %v", err)
 		}
 		if s := readRow(t, id); s.processor == nil || *s.processor != testProcessorID {
@@ -362,7 +398,7 @@ func TestRequeueResumableOrphanPG(t *testing.T) {
 		const id = "batch-requeue-wedged"
 		epoch := env.activate(t, id)
 
-		if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, epoch, true); err != nil {
+		if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, epoch, true, true); err != nil {
 			t.Fatalf("RequeueResumableOrphan: %v", err)
 		}
 		if s := readRow(t, id); s.processor == nil {
@@ -370,7 +406,7 @@ func TestRequeueResumableOrphanPG(t *testing.T) {
 		}
 
 		env.expireLease(t, id)
-		if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, epoch, true); err != nil {
+		if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, epoch, true, true); err != nil {
 			t.Fatalf("RequeueResumableOrphan: %v", err)
 		}
 		if s := readRow(t, id); s.processor != nil {
@@ -387,7 +423,7 @@ func TestRequeueResumableOrphanPG(t *testing.T) {
 			t.Fatalf("claim: %v", err)
 		}
 
-		if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, 0, false); err != nil {
+		if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, 0, false, true); err != nil {
 			t.Fatalf("RequeueResumableOrphan: %v", err)
 		}
 		if s := readRow(t, id); s.processor == nil || *s.processor != testProcessorID {
@@ -395,6 +431,239 @@ func TestRequeueResumableOrphanPG(t *testing.T) {
 		}
 	})
 }
+
+func TestFinalizeResumableBatchPG(t *testing.T) {
+	env := newResumablePgEnv(t)
+	doc := []byte(`{"status":"completed","request_counts":{"total":3,"completed":3}}`)
+
+	// setBatchStatus rewrites the row's status name, staging the transitions
+	// the row store performs (in_progress → finalizing, the cancel CAS, …).
+	setBatchStatus := func(t *testing.T, id, status string) {
+		t.Helper()
+		if _, err := env.pool.Exec(env.ctx,
+			`UPDATE batch_items SET status = jsonb_set(status, '{status}', $2::jsonb) WHERE id = $1`,
+			id, `"`+status+`"`,
+		); err != nil {
+			t.Fatalf("set status %s: %v", status, err)
+		}
+	}
+
+	t.Run("persists the terminal status and releases ownership", func(t *testing.T) {
+		const id = "batch-fin"
+		epoch := env.activate(t, id)
+
+		if err := env.store.FinalizeResumableBatch(env.ctx, &api.ResumableFinalization{
+			BatchID: id, ProcessorID: testProcessorID, Epoch: epoch,
+			ExpectedStatus: "in_progress", Status: doc,
+		}); err != nil {
+			t.Fatalf("FinalizeResumableBatch: %v", err)
+		}
+
+		var status []byte
+		var resumable bool
+		var processor *string
+		var lease *time.Time
+		if err := env.pool.QueryRow(env.ctx,
+			`SELECT status, resumable, processor_id, owner_lease_expires_at
+			 FROM batch_items WHERE id = $1`, id,
+		).Scan(&status, &resumable, &processor, &lease); err != nil {
+			t.Fatalf("read row: %v", err)
+		}
+		// jsonb canonicalizes the document, so compare semantically.
+		var got, want any
+		if err := json.Unmarshal(status, &got); err != nil {
+			t.Fatalf("stored status is not JSON: %v", err)
+		}
+		if err := json.Unmarshal(doc, &want); err != nil {
+			t.Fatalf("test document is not JSON: %v", err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("status = %s, want the terminal document %s", status, doc)
+		}
+		if resumable || lease != nil || processor == nil || *processor != testProcessorID {
+			t.Fatalf("ownership not released: resumable=%v processor=%v lease=%v", resumable, processor, lease)
+		}
+		// The released owner fences out of entry writes.
+		if _, err := env.store.MarkEntryInFlight(env.ctx, id, "batch_req_a", testProcessorID, epoch); !errors.Is(err, api.ErrConflict) {
+			t.Fatalf("entry write after finalize: expected ErrConflict, got %v", err)
+		}
+	})
+
+	t.Run("transition table over source statuses", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			source   string // row status before the finalization
+			expected string // expected status the finalizer passes
+			wantErr  bool
+		}{
+			{name: "in_progress", source: "in_progress", expected: "in_progress"},
+			{name: "finalizing", source: "finalizing", expected: "finalizing"},
+			{name: "cancelling", source: "cancelling", expected: "cancelling"},
+			{name: "cancel raced the finalizer", source: "cancelling", expected: "finalizing", wantErr: true},
+			{name: "finalizer believes a stale status", source: "finalizing", expected: "in_progress", wantErr: true},
+			{name: "already terminal", source: "completed", expected: "finalizing", wantErr: true},
+		}
+		for i, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				id := fmt.Sprintf("batch-fin-table-%d", i)
+				epoch := env.activate(t, id)
+				setBatchStatus(t, id, tt.source)
+
+				err := env.store.FinalizeResumableBatch(env.ctx, &api.ResumableFinalization{
+					BatchID: id, ProcessorID: testProcessorID, Epoch: epoch,
+					ExpectedStatus: tt.expected, Status: doc,
+				})
+				if tt.wantErr && !errors.Is(err, api.ErrConflict) {
+					t.Fatalf("expected ErrConflict, got %v", err)
+				}
+				if !tt.wantErr && err != nil {
+					t.Fatalf("FinalizeResumableBatch: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("fenced out by stale epoch, foreign owner, and lapsed lease", func(t *testing.T) {
+		const id = "batch-fin-fence"
+		epoch := env.activate(t, id)
+
+		fin := &api.ResumableFinalization{
+			BatchID: id, ProcessorID: testProcessorID, Epoch: epoch,
+			ExpectedStatus: "in_progress", Status: doc,
+		}
+		stale := *fin
+		stale.Epoch = epoch + 1
+		if err := env.store.FinalizeResumableBatch(env.ctx, &stale); !errors.Is(err, api.ErrConflict) {
+			t.Fatalf("stale epoch: expected ErrConflict, got %v", err)
+		}
+		foreign := *fin
+		foreign.ProcessorID = "proc-other"
+		if err := env.store.FinalizeResumableBatch(env.ctx, &foreign); !errors.Is(err, api.ErrConflict) {
+			t.Fatalf("foreign owner: expected ErrConflict, got %v", err)
+		}
+		env.expireLease(t, id)
+		if err := env.store.FinalizeResumableBatch(env.ctx, fin); !errors.Is(err, api.ErrConflict) {
+			t.Fatalf("lapsed lease: expected ErrConflict, got %v", err)
+		}
+	})
+
+	t.Run("requeued zombie cannot finalize", func(t *testing.T) {
+		const id = "batch-fin-zombie"
+		epoch := env.activate(t, id)
+		if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, epoch, false, true); err != nil {
+			t.Fatalf("RequeueResumableOrphan: %v", err)
+		}
+
+		err := env.store.FinalizeResumableBatch(env.ctx, &api.ResumableFinalization{
+			BatchID: id, ProcessorID: testProcessorID, Epoch: epoch,
+			ExpectedStatus: "in_progress", Status: doc,
+		})
+		if !errors.Is(err, api.ErrConflict) {
+			t.Fatalf("zombie finalize: expected ErrConflict, got %v", err)
+		}
+		var status string
+		if err := env.pool.QueryRow(env.ctx,
+			`SELECT status->>'status' FROM batch_items WHERE id = $1`, id,
+		).Scan(&status); err != nil {
+			t.Fatalf("read row: %v", err)
+		}
+		if status != "in_progress" {
+			t.Fatalf("zombie must not touch the row, status = %s", status)
+		}
+	})
+
+	t.Run("retry with the identical status document is idempotent", func(t *testing.T) {
+		const id = "batch-fin-idempotent"
+		epoch := env.activate(t, id)
+
+		fin := &api.ResumableFinalization{
+			BatchID: id, ProcessorID: testProcessorID, Epoch: epoch,
+			ExpectedStatus: "in_progress", Status: doc,
+		}
+		if err := env.store.FinalizeResumableBatch(env.ctx, fin); err != nil {
+			t.Fatalf("first finalize: %v", err)
+		}
+		// The retry re-sends the same document after an ambiguous response.
+		if err := env.store.FinalizeResumableBatch(env.ctx, fin); err != nil {
+			t.Fatalf("identical retry: %v", err)
+		}
+		// A diverging document over the committed terminal state conflicts.
+		diverging := *fin
+		diverging.Status = []byte(`{"status":"cancelled"}`)
+		if err := env.store.FinalizeResumableBatch(env.ctx, &diverging); !errors.Is(err, api.ErrConflict) {
+			t.Fatalf("diverging retry: expected ErrConflict, got %v", err)
+		}
+	})
+
+	t.Run("verification query failure is transient, not a conflict", func(t *testing.T) {
+		const id = "batch-fin-verify-error"
+		epoch := env.activate(t, id)
+		// Stage a fence failure the verification must distinguish from an
+		// idempotent retry: the row is owned but holds a different status.
+		setBatchStatus(t, id, "finalizing")
+
+		fin := &api.ResumableFinalization{
+			BatchID: id, ProcessorID: testProcessorID, Epoch: epoch,
+			ExpectedStatus: "in_progress", Status: doc,
+		}
+
+		// Without the injected fault this is a plain conflict.
+		if err := env.store.FinalizeResumableBatch(env.ctx, fin); !errors.Is(err, api.ErrConflict) {
+			t.Fatalf("fence failure: expected ErrConflict, got %v", err)
+		}
+
+		// A transient failure of the verification query must surface as that
+		// error, not as ownership loss: this processor may still own the batch,
+		// so the caller must retry rather than abandon the finalization.
+		injected := errors.New("injected verification query failure")
+		store := &PostgresResumableStore{pgCore: &pgCore{pool: &failingQueryRowPool{
+			pgxPool: env.pool,
+			failSQL: "SELECT status FROM batch_items WHERE id = $1",
+			err:     injected,
+		}}}
+		err := store.FinalizeResumableBatch(env.ctx, fin)
+		if !errors.Is(err, injected) {
+			t.Fatalf("verification failure: expected the injected error, got %v", err)
+		}
+		if errors.Is(err, api.ErrConflict) {
+			t.Fatal("verification failure must not be classified as a conflict")
+		}
+
+		// The row was not touched by either attempt.
+		var status string
+		if err := env.pool.QueryRow(env.ctx,
+			`SELECT status->>'status' FROM batch_items WHERE id = $1`, id,
+		).Scan(&status); err != nil {
+			t.Fatalf("read row: %v", err)
+		}
+		if status != "finalizing" {
+			t.Fatalf("row status = %s, want finalizing (untouched)", status)
+		}
+	})
+}
+
+// failingQueryRowPool wraps a pgxPool and fails every QueryRow whose SQL
+// contains failSQL with err — used to inject a transient verification-query
+// failure deterministically.
+type failingQueryRowPool struct {
+	pgxPool
+	failSQL string
+	err     error
+}
+
+func (p *failingQueryRowPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, p.failSQL) {
+		return failedRow{err: p.err}
+	}
+	return p.pgxPool.QueryRow(ctx, sql, args...)
+}
+
+// failedRow is a pgx.Row that always fails to scan.
+type failedRow struct {
+	err error
+}
+
+func (r failedRow) Scan(dest ...any) error { return r.err }
 
 func TestResumableEntryWritesPG(t *testing.T) {
 	env := newResumablePgEnv(t)
@@ -630,6 +899,133 @@ func TestResumableEntryQueriesPG(t *testing.T) {
 		}
 		if n != 0 {
 			t.Fatalf("entries must cascade with the batch row, %d remain", n)
+		}
+	})
+}
+
+// TestSchemaBackfillSkipsRequeuedRows verifies that the migration backfill —
+// which hands ownerless in-flight rows to the 'pre-migration' sentinel and
+// runs on every client initialization — leaves requeued resumable rows alone:
+// such a row legitimately has no owner while it waits for the next dequeue,
+// and stamping it would make it unclaimable until the reconciler's next
+// cycle.
+func TestSchemaBackfillSkipsRequeuedRows(t *testing.T) {
+	env := newResumablePgEnv(t)
+
+	// A requeued resumable row: activated, then handed back — ownership
+	// cleared, non-terminal, waiting for the next dequeue.
+	const id = "batch-backfill-requeued"
+	epoch := env.activate(t, id)
+	if err := env.store.RequeueResumableOrphan(env.ctx, id, testProcessorID, epoch, false, true); err != nil {
+		t.Fatalf("RequeueResumableOrphan: %v", err)
+	}
+
+	// Any pod (re)starting runs the embedded schema, backfill included.
+	batchDB, err := NewPostgresBatchDBClient(env.ctx, &PostgreSQLConfig{Url: env.url})
+	if err != nil {
+		t.Fatalf("NewPostgresBatchDBClient (schema re-run): %v", err)
+	}
+	t.Cleanup(func() { _ = batchDB.Close() })
+
+	// The waiting row was not stamped and remains claimable by the queue.
+	var processor *string
+	if err := env.pool.QueryRow(env.ctx,
+		`SELECT processor_id FROM batch_items WHERE id = $1`, id,
+	).Scan(&processor); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if processor != nil {
+		t.Fatalf("requeued row was stamped %q by the migration backfill: it becomes unclaimable until the reconciler cycle", *processor)
+	}
+
+	tasks, err := env.queue.PQDequeue(env.ctx, time.Minute, 10)
+	if err != nil {
+		t.Fatalf("PQDequeue: %v", err)
+	}
+	found := false
+	for _, task := range tasks {
+		if task.ID == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("requeued row %s was not claimable after a schema re-run: %+v", id, tasks)
+	}
+}
+
+// TestResumableSubmitterTrackingPG pins the submitter bookkeeping that
+// cross-processor recovery routes on: MarkEntryInFlight records the
+// submitting processor, an orphan requeue backfills it for entries written
+// before submitter tracking, and HasOpenEntryByRequest resolves an unrouted
+// delivery to the open entry that can still account for it.
+func TestResumableSubmitterTrackingPG(t *testing.T) {
+	env := newResumablePgEnv(t)
+
+	const batchID = "batch-submitter"
+	epoch := env.activate(t, batchID)
+
+	t.Run("mark in flight records the submitter", func(t *testing.T) {
+		if _, err := env.store.MarkEntryInFlight(env.ctx, batchID, "batch_req_a", testProcessorID, epoch); err != nil {
+			t.Fatalf("MarkEntryInFlight: %v", err)
+		}
+		entry, err := env.store.FindEntryByRequestID(env.ctx, batchID, "batch_req_a")
+		if err != nil || entry == nil {
+			t.Fatalf("FindEntryByRequestID: entry=%v err=%v", entry, err)
+		}
+		if entry.SubmittedBy != testProcessorID {
+			t.Fatalf("SubmittedBy = %q, want %q", entry.SubmittedBy, testProcessorID)
+		}
+	})
+
+	t.Run("has open entry by request", func(t *testing.T) {
+		open, err := env.store.HasOpenEntryByRequest(env.ctx, "batch_req_a")
+		if err != nil || !open {
+			t.Fatalf("HasOpenEntryByRequest(in-flight) = %v (err %v), want true", open, err)
+		}
+		open, err = env.store.HasOpenEntryByRequest(env.ctx, "batch_req_b")
+		if err != nil || !open {
+			t.Fatalf("HasOpenEntryByRequest(pending) = %v (err %v), want true", open, err)
+		}
+		open, err = env.store.HasOpenEntryByRequest(env.ctx, "batch_req_unknown")
+		if err != nil || open {
+			t.Fatalf("HasOpenEntryByRequest(unknown) = %v (err %v), want false", open, err)
+		}
+
+		// A checkpointed entry can no longer account for a delivery.
+		if _, err := env.store.MarkEntryInFlight(env.ctx, batchID, "batch_req_b", testProcessorID, epoch); err != nil {
+			t.Fatalf("MarkEntryInFlight: %v", err)
+		}
+		if _, err := env.store.CheckpointEntryResult(env.ctx, batchID, "batch_req_b", testProcessorID, epoch,
+			&api.ResumableResult{Status: api.ResumableEntryCompleted,
+				ResultKey: "results/j1/batch_req_b.jsonl", ResultBytes: 10, ResultSHA256: "sha-b"}); err != nil {
+			t.Fatalf("CheckpointEntryResult: %v", err)
+		}
+		open, err = env.store.HasOpenEntryByRequest(env.ctx, "batch_req_b")
+		if err != nil || open {
+			t.Fatalf("HasOpenEntryByRequest(terminal) = %v (err %v), want false", open, err)
+		}
+	})
+
+	t.Run("orphan requeue backfills the submitter of in-flight entries", func(t *testing.T) {
+		// batch_req_a is in flight; simulate a row written before submitter
+		// tracking by clearing its stamp.
+		if _, err := env.pool.Exec(env.ctx,
+			`UPDATE batch_entries SET submitted_by = NULL WHERE batch_id = $1 AND request_id = $2`,
+			batchID, "batch_req_a"); err != nil {
+			t.Fatalf("clear submitted_by: %v", err)
+		}
+
+		// The batch is requeued as an orphan of its owner.
+		if err := env.store.RequeueResumableOrphan(env.ctx, batchID, testProcessorID, epoch, false, true); err != nil {
+			t.Fatalf("RequeueResumableOrphan: %v", err)
+		}
+
+		entry, err := env.store.FindEntryByRequestID(env.ctx, batchID, "batch_req_a")
+		if err != nil || entry == nil {
+			t.Fatalf("FindEntryByRequestID: entry=%v err=%v", entry, err)
+		}
+		if entry.SubmittedBy != testProcessorID {
+			t.Fatalf("SubmittedBy after requeue = %q, want the orphaned owner %q", entry.SubmittedBy, testProcessorID)
 		}
 	})
 }
