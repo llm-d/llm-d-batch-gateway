@@ -119,36 +119,41 @@ func TestTenantIsolation(t *testing.T) {
 	})
 }
 
-func TestDefaultTenant(t *testing.T) {
+func TestMissingTenantHeader(t *testing.T) {
 	ts := newTestServer(t)
 
-	content := `{"custom_id":"req-1","method":"POST","url":"/v1/chat/completions","body":{}}` + "\n"
-
-	// Upload as explicit tenant
-	resp := ts.uploadFileAs(t, "explicit.jsonl", "batch", content, "explicit-tenant")
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("upload: expected 200, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	// Request without tenant header — should use "default" tenant
+	// Request without tenant header — should be rejected
 	req, err := http.NewRequest(http.MethodGet, ts.URL+"/v1/files", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Deliberately NOT setting the tenant header
 
+	resp, err := ts.Client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("list: expected 401, got %d", resp.StatusCode)
+	}
+	errResp := decodeJSON[openai.ErrorResponse](t, resp)
+
+	if errResp.Error.Type != "authentication_error" {
+		t.Errorf("expected error type %q, got %q", "authentication_error", errResp.Error.Type)
+	}
+
+	// CORS preflight carries no tenant header and is still answered
+	req, err = http.NewRequest(http.MethodOptions, ts.URL+"/v1/files", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	resp, err = ts.Client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("list: expected 200, got %d", resp.StatusCode)
-	}
-	listResp := decodeJSON[openai.ListFilesResponse](t, resp)
-
-	// "default" tenant should not see "explicit-tenant"'s files
-	if len(listResp.Data) != 0 {
-		t.Errorf("default tenant: expected 0 files, got %d", len(listResp.Data))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("preflight: expected 204, got %d", resp.StatusCode)
 	}
 }

@@ -185,6 +185,9 @@ apiserver:
     observabilityPort: "8081"
     inputHeaders:
       tenant: "X-MaaS-Username"
+    # Serve requests that carry no tenant header as the "default" tenant instead
+    # of rejecting them with 401. For local development without an auth proxy.
+    allowAnonymousTenant: false
     readHeaderTimeoutSeconds: 10
     readTimeoutSeconds: 900
     writeTimeoutSeconds: 120

@@ -128,6 +128,7 @@ func newTestServer(t *testing.T) *testServer {
 		middleware.Recovery,
 		middleware.NewRequestMiddleware(config),
 		middleware.SecurityHeaders,
+		middleware.RequireTenant,
 	}
 	for _, h := range []common.ApiHandler{fileHandler, batchHandler} {
 		common.RegisterHandler(mux, h, middlewares...)
