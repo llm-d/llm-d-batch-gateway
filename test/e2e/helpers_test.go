@@ -1164,13 +1164,29 @@ func waitForProcessorReady(t *testing.T, timeout time.Duration) {
 	podLabel := fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/component=processor", testHelmRelease)
 	waitCtx, waitCancel := context.WithDeadline(context.Background(), deadline)
 	defer waitCancel()
-	if out, err := exec.CommandContext(waitCtx, "kubectl", "wait", "pod",
-		"-l", podLabel,
-		"-n", testNamespace,
-		"--for=condition=Ready",
-		fmt.Sprintf("--timeout=%ds", int(time.Until(deadline).Seconds())),
-	).CombinedOutput(); err != nil {
-		t.Fatalf("processor pod not ready after %v: %v\n%s", timeout, err, out)
+	// Wait for the processor pod to be Running and Ready before attempting
+	// a port-forward. The replacement pod may not exist yet when this runs:
+	// kubectl delete returns after the old pod is fully removed, and until the
+	// StatefulSet controller creates the replacement, kubectl wait matches no
+	// resources and fails immediately instead of waiting. Retry while the
+	// selector matches nothing, bounded by the overall deadline.
+	for {
+		out, err := exec.CommandContext(waitCtx, "kubectl", "wait", "pod",
+			"-l", podLabel,
+			"-n", testNamespace,
+			"--for=condition=Ready",
+			fmt.Sprintf("--timeout=%ds", int(time.Until(deadline).Seconds())),
+		).CombinedOutput()
+		if err == nil {
+			break
+		}
+		if !strings.Contains(string(out), "no matching resources found") {
+			t.Fatalf("processor pod not ready after %v: %v\n%s", timeout, err, out)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("processor pod not ready after %v: %v\n%s", timeout, err, out)
+		}
+		time.Sleep(time.Second)
 	}
 
 	for {
