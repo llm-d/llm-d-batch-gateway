@@ -18,8 +18,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -901,6 +903,14 @@ func assertSliceEqual(t *testing.T, want, got []string) {
 	if len(got) != len(want) {
 		t.Errorf("length mismatch: got %d, want %d", len(got), len(want))
 	}
+}
+
+// isUnreachable reports whether err is a failure to open a connection: a
+// refused connection, a DNS failure or a dial timeout. Errors from a server
+// that was reached, such as an authentication failure, return false.
+func isUnreachable(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
 }
 
 func waitForReady(t *testing.T, url string, timeout time.Duration) {

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
@@ -28,6 +29,14 @@ import (
 func TestDispatcherOTelTraces(t *testing.T) {
 	if !detectDispatcherDeployed(t) {
 		t.Skip("skipping: dispatcher not deployed")
+	}
+	if os.Getenv("TEST_APISERVER_OBS_URL") == "" {
+		probe := &http.Client{Timeout: 5 * time.Second}
+		if resp, err := probe.Get(testApiserverObsURL + "/ready"); err == nil {
+			resp.Body.Close()
+		} else if isUnreachable(err) {
+			t.Skipf("skipping: APIServer observability endpoint not reachable at default %s; set TEST_APISERVER_OBS_URL or port-forward it: %v", testApiserverObsURL, err)
+		}
 	}
 	waitForReady(t, testApiserverObsURL, 30*time.Second)
 
