@@ -58,8 +58,12 @@ func NewRequestMiddleware(config *common.ServerConfig) common.RouteMiddleware {
 			}
 			w.Header().Set(RequestIdHeaderKey, requestID)
 
-			// Extract tenant ID from header.
-			tenantID := common.LastHeaderValue(r, config.GetTenantHeader(), common.DefaultTenantID)
+			// Extract tenant ID from header. Without the header it stays empty and
+			// RequireTenant rejects the request, unless anonymous tenants are allowed.
+			tenantID := common.LastHeaderValue(r, config.GetTenantHeader(), "")
+			if tenantID == "" && config.AllowAnonymousTenant {
+				tenantID = common.DefaultTenantID
+			}
 
 			// Extract file ID and batch ID from path values for logging
 			fileID := r.PathValue(common.PathParamFileID)

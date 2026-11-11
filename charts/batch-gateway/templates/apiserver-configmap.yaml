@@ -17,6 +17,7 @@ data:
       {{ $key }}: {{ $value | quote }}
       {{- end }}
     {{- end }}
+    allow_anonymous_tenant: {{ .Values.apiserver.config.allowAnonymousTenant }}
     read_header_timeout_seconds: {{ .Values.apiserver.config.readHeaderTimeoutSeconds }}
     read_timeout_seconds: {{ .Values.apiserver.config.readTimeoutSeconds }}
     write_timeout_seconds: {{ .Values.apiserver.config.writeTimeoutSeconds }}
