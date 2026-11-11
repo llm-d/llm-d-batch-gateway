@@ -466,11 +466,21 @@ func newTestProcessorEnv(t *testing.T, cfg *config.ProcessorConfig, inferClient 
 // seedDBJob stores a BatchItem in the DB so the updater can find and update it.
 func seedDBJob(t *testing.T, dbClient db.BatchProgressDBClient, jobID string) *db.BatchItem {
 	t.Helper()
+	return seedDBJobWithEpoch(t, dbClient, jobID, 0)
+}
+
+// seedDBJobWithEpoch is seedDBJob for rows fenced to a nonzero epoch.
+// DBUpdateProgress mirrors the Postgres epoch fence, so progress writes
+// carrying an activation's epoch need a row seeded with that epoch — a
+// stale-epoch row makes every write conflict.
+func seedDBJobWithEpoch(t *testing.T, dbClient db.BatchProgressDBClient, jobID string, epoch int64) *db.BatchItem {
+	t.Helper()
 	statusInfo := openai.BatchStatusInfo{Status: openai.BatchStatusInProgress}
 	statusBytes, _ := json.Marshal(statusInfo)
 	item := &db.BatchItem{
 		BaseIndexes:  db.BaseIndexes{ID: jobID, TenantID: "tenant-1", Tags: db.Tags{}},
 		BaseContents: db.BaseContents{Status: statusBytes},
+		Epoch:        epoch,
 	}
 	if err := dbClient.DBStore(context.Background(), item); err != nil {
 		t.Fatalf("seed DB job: %v", err)
