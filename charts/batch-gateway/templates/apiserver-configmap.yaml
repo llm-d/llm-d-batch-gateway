@@ -25,6 +25,9 @@ data:
     observability_shutdown_timeout_seconds: {{ .Values.apiserver.config.observabilityShutdownTimeoutSeconds }}
     db_client:
       type: {{ .Values.global.dbClient.type | quote }}
+      postgresql:
+        pool:
+          max_connections: {{ dig "postgresql" "pool" "maxConnections" 0 .Values.global.dbClient }}
     file_client:
       type: {{ .Values.global.fileClient.type | quote }}
       fs:

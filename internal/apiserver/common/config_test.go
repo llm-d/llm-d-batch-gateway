@@ -287,6 +287,45 @@ func TestServerConfigValidate_FileClientType(t *testing.T) {
 	}
 }
 
+func TestServerConfig_PostgreSQLPoolMaxConnections(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		want    int
+		wantErr bool
+	}{
+		{name: "unset keeps the pgx default", yaml: "", want: 0},
+		{name: "explicit value", yaml: "  postgresql:\n    pool:\n      max_connections: 8\n", want: 8},
+		{name: "negative is rejected", yaml: "  postgresql:\n    pool:\n      max_connections: -1\n", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			content := "port: \"8080\"\nfile_client:\n  type: \"fs\"\ndb_client:\n  type: \"postgresql\"\n" + tc.yaml
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c := NewConfig()
+			if err := c.loadFromFile(path); err != nil {
+				t.Fatalf("loadFromFile() error: %v", err)
+			}
+			err := c.Validate()
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "db_client.postgresql.pool") {
+					t.Fatalf("Validate() error = %v, want db_client.postgresql.pool error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate() unexpected error: %v", err)
+			}
+			if got := c.DBClientCfg.PostgreSQLCfg.Pool.MaxConnections; got != tc.want {
+				t.Fatalf("Pool.MaxConnections = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGetInputHeader(t *testing.T) {
 	tests := []struct {
 		name     string

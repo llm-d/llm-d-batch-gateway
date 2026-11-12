@@ -212,6 +212,36 @@ func TestProcessorConfig_Validate_FileClientType(t *testing.T) {
 	}
 }
 
+func TestProcessorConfig_Validate_PostgreSQLPoolMaxConnections(t *testing.T) {
+	tests := []struct {
+		name           string
+		maxConnections int
+		wantErr        bool
+	}{
+		{name: "default keeps the pgx default", maxConnections: 0},
+		{name: "explicit value", maxConnections: 8},
+		{name: "negative is rejected", maxConnections: -1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewConfig()
+			c.ModelGateways = validPerModelConfig()
+			c.DBClientCfg.PostgreSQLCfg.Pool.MaxConnections = tt.maxConnections
+
+			err := c.Validate()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "db_client.postgresql.pool") {
+					t.Fatalf("Validate() error = %v, want db_client.postgresql.pool error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate() unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestProcessorConfig_EffectiveNumWorkers(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -743,6 +773,10 @@ default_output_expiration_seconds: 86400
 send_fairness_header: true
 tenant_metadata_key: userid
 route_key_method: tenant
+db_client:
+  postgresql:
+    pool:
+      max_connections: 8
 `)
 
 	if err := os.WriteFile(path, yamlData, 0o600); err != nil {
@@ -752,6 +786,9 @@ route_key_method: tenant
 	c := NewConfig()
 	if err := c.LoadFromYAML(path); err != nil {
 		t.Fatalf("LoadFromYAML() error: %v", err)
+	}
+	if got := c.DBClientCfg.PostgreSQLCfg.Pool.MaxConnections; got != 8 {
+		t.Fatalf("DBClientCfg.PostgreSQLCfg.Pool.MaxConnections = %d, want 8", got)
 	}
 
 	if c.PollInterval != 2*time.Second {

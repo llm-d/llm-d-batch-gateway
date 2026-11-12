@@ -123,6 +123,50 @@ The endpoint remains batch-scoped: every request URL in the input JSONL must exa
 | `processor.config.resumable.finalizeConcurrency` | `16` | Bounds the parallel result-object fetches during resumable finalization. |
 | `processor.config.resumable.finalizeTimeout` | `"30m"` | Budget for one resumable finalization attempt. |
 
+### PostgreSQL connection pools
+
+Each pod opens several independent PostgreSQL connection pools from the same
+URL:
+
+| Component | Pools | Count |
+| --------- | ----- | ----- |
+| API server | batch, file, queue, events | 4 |
+| Processor | batch, file, queue, resumable, events | 5 |
+| GC | batch, file, queue, resumable | 4 |
+
+By default each pool can grow to the pgx default of `max(4, number of CPUs)`
+connections, or to `pool_max_conns` if the PostgreSQL URL sets it. The number
+of CPUs is Go's `runtime.NumCPU()`: the CPUs visible to the process, normally
+those of the node, not the pod's CPU limit. Set
+`global.dbClient.postgresql.pool.maxConnections` to cap every pool:
+
+```yaml
+global:
+  dbClient:
+    postgresql:
+      pool:
+        maxConnections: 4
+```
+
+`0` (the default) leaves the pool size as parsed from the URL. A positive value
+overrides the URL. Every pool is kept at 2 or more connections, the minimum a
+pool needs for `LISTEN`, so a limit of `1` from either source is raised to `2`.
+The limit applies to each pool separately, so budget the total against
+PostgreSQL `max_connections`:
+
+```text
+pool limit = max(2, maxConnections)    when maxConnections > 0
+           = max(2, pool_max_conns)    when maxConnections is 0 and the URL sets pool_max_conns
+           = max(4, number of CPUs)    otherwise
+
+  apiserver replicas × 4 × pool limit
++ processor replicas × 5 × pool limit
++ gc pods            × 4 × pool limit
++ processor replicas × asyncDispatch.maxConnections   (SQL async transport only)
++ other clients (llm-d-async dispatcher, migrations, monitoring)
+< PostgreSQL max_connections
+```
+
 ### Async inference queue transport
 
 Set `processor.config.dispatchMode` to `async` and choose the queue transport
