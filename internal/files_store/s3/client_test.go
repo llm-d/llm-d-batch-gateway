@@ -31,6 +31,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/llm-d/llm-d-batch-gateway/internal/files_store/api"
+	"github.com/llm-d/llm-d-batch-gateway/internal/files_store/retryclient"
+	"github.com/llm-d/llm-d-batch-gateway/internal/util/retry"
 )
 
 const (
@@ -45,6 +47,9 @@ type mockS3Client struct {
 	headErr error
 	delErr  error
 	listErr error
+	// headCalls counts HeadObject invocations so tests can assert exact
+	// attempt counts through the retry-wrapped client.
+	headCalls int
 	// lastPutBodySeekable records whether the last PutObject body
 	// implemented io.ReadSeeker — the SDK's S3 payload-hash middleware
 	// reads and rewinds the body, so a streaming body breaks plain-HTTP
@@ -143,6 +148,7 @@ func (m *mockS3Client) PutObject(_ context.Context, params *s3.PutObjectInput, _
 }
 
 func (m *mockS3Client) HeadObject(_ context.Context, params *s3.HeadObjectInput, _ ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	m.headCalls++
 	if m.headErr != nil {
 		return nil, m.headErr
 	}
@@ -296,6 +302,27 @@ func TestStore(t *testing.T) {
 		_, err = client.Store(ctx, "existing.txt", testFolderName, 1024, 0, bytes.NewReader([]byte("new content")))
 		if !errors.Is(err, api.ErrFileExists) {
 			t.Errorf("expected ErrFileExists, got %v", err)
+		}
+	})
+
+	t.Run("duplicate store through retry client fails on first attempt", func(t *testing.T) {
+		// The retry client is shared by every backend, so the permanent-error
+		// classification must hold for the s3 path too: a duplicate Store is a
+		// permanent condition and must surface the wrapped ErrFileExists after
+		// exactly one attempt, not burn MaxRetries on an unresolvable conflict.
+		mock := newMockS3Client()
+		client := newTestClient(mock)
+		if _, err := client.Store(ctx, "dup.txt", testFolderName, 1024, 0, bytes.NewReader([]byte("first"))); err != nil {
+			t.Fatalf("expected first store to succeed, got %v", err)
+		}
+
+		wrapped := retryclient.New(client, retry.Config{MaxRetries: 3, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond}, "test")
+		_, err := wrapped.Store(ctx, "dup.txt", testFolderName, 1024, 0, bytes.NewReader([]byte("second")))
+		if !errors.Is(err, api.ErrFileExists) {
+			t.Fatalf("expected ErrFileExists to surface through the retry client, got %v", err)
+		}
+		if got := mock.headCalls; got != 2 {
+			t.Errorf("duplicate store must short-circuit retries: expected exactly 2 HeadObject calls (one per Store), got %d", got)
 		}
 	})
 
