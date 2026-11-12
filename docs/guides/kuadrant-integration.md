@@ -492,6 +492,8 @@ Each AuthPolicy has three independent parts:
 | `authorization` | Access control (can you access this model?) | Checks model-level permission (OPA Rego or SubjectAccessReview). Only on llm-route — batch-route does not need model authorization |
 | `response` | Attribute extraction (what tier/identity info?) | Extracts tier, username, group from identity and injects them as HTTP headers (`x-tier`, `x-username`, `x-group`) for downstream rate limiting and backend services |
 
+The batch-route AuthPolicy also injects two headers the batch API server requires. `x-maas-username` is the tenant: the API server scopes all files and batches to it, and takes the last value, so the injected identity wins over one the client sent. `x-gateway-token` is a shared token that proves the request passed through the gateway. The batch API server compares it with the `apiserver-proxy-token` key of its app secret (`global.secretName`) and rejects requests without the right token, or without a tenant header, with **401**. Use the same value in both places. Do not add the token to the llm-route AuthPolicies: their requests go to model servers, which do not need it. See [Security](security.md#1-authentication).
+
 All three solutions share the same rate limiting policies (Section 3). They differ in how authentication is performed, how tier is determined, and how model-level authorization is enforced.
 
 ### 4.1 Option 1: API Key Based
@@ -502,7 +504,7 @@ Uses Kuadrant [API Key](https://docs.kuadrant.io/latest/authorino/docs/user-guid
 
 > **Security**: The API keys below are demo values. For production, generate strong random keys (e.g. `openssl rand -hex 32`).
 
-Each API key is a Kubernetes Secret with `tier` and `models` annotations:
+Each API key is a Kubernetes Secret with `tier`, `models` and `username` annotations. `username` becomes the tenant in the batch API, so every key needs one, and keys of different tenants need different values:
 
 ```yaml
 # Gold tier API key: can access free-model and gold-model
@@ -595,9 +597,15 @@ spec:
           "x-username":
             plain:
               selector: auth.identity.metadata.annotations.username
+          "x-maas-username":           # tenant header the batch API server reads; wins over a client-sent value
+            plain:
+              selector: auth.identity.metadata.annotations.username
           "x-group":
             plain:
               selector: auth.identity.metadata.annotations.group
+          "x-gateway-token":
+            plain:
+              value: "<apiserver-proxy-token>"   # same value as the apiserver-proxy-token key of the batch-gateway app secret
 ```
 
 For llm-route (authentication + model-level authorization via OPA):
@@ -840,9 +848,15 @@ spec:
           "x-username":
             plain:
               selector: auth.identity.user.username
+          "x-maas-username":           # tenant header the batch API server reads; wins over a client-sent value
+            plain:
+              selector: auth.identity.user.username
           "x-group":
             plain:
               selector: auth.identity.user.groups.@tostr
+          "x-gateway-token":
+            plain:
+              value: "<apiserver-proxy-token>"   # same value as the apiserver-proxy-token key of the batch-gateway app secret
 ```
 
 For llm-route (authentication + model-level authorization via SubjectAccessReview):
@@ -1105,9 +1119,15 @@ spec:
           "x-username":
             plain:
               selector: auth.identity.user.username
+          "x-maas-username":           # tenant header the batch API server reads; wins over a client-sent value
+            plain:
+              selector: auth.identity.user.username
           "x-group":
             plain:
               selector: auth.identity.user.groups.@tostr
+          "x-gateway-token":
+            plain:
+              value: "<apiserver-proxy-token>"   # same value as the apiserver-proxy-token key of the batch-gateway app secret
 ```
 
 For llm-route:

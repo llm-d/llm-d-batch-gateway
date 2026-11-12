@@ -33,6 +33,7 @@ const (
 	SecretKeyPostgreSQLURL     = "postgresql-url"
 	SecretKeyInferenceAPI      = "inference-api-key"
 	SecretKeyS3SecretAccessKey = "s3-secret-access-key"
+	SecretKeyProxyToken        = "apiserver-proxy-token"
 )
 
 // ReadSecretFile reads a secret value from the mounted secrets directory.

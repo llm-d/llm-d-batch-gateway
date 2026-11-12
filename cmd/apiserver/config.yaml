@@ -15,8 +15,12 @@ port: "8000"
 # Input headers for special processing (key: logical name, value: HTTP header name)
 input_headers:
   tenant: "X-MaaS-Username"
+  # Header in which the auth proxy sends the shared token
+  # (the apiserver-proxy-token key of the app secret in /etc/.secrets/).
+  # proxy_token: "X-Gateway-Token"
 
-# Serve requests that carry no tenant header as the "default" tenant.
+# Serve requests that carry no tenant header as the "default" tenant, and skip
+# the proxy token check.
 # Local development only: leave unset behind an auth proxy, so such requests get 401.
 allow_anonymous_tenant: true
 

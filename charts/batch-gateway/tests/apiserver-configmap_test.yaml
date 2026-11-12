@@ -177,3 +177,24 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  - it: should render the proxy token header by default
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'proxy_token: "X-Gateway-Token"'
+
+  - it: should fail without an app secret when anonymous tenants are not allowed
+    set:
+      global.secretName: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: "global.secretName must name a Secret with an apiserver-proxy-token key unless apiserver.config.allowAnonymousTenant is true"
+
+  - it: should render without an app secret when anonymous tenants are allowed
+    set:
+      global.secretName: ""
+      apiserver.config.allowAnonymousTenant: true
+    asserts:
+      - isKind:
+          of: ConfigMap

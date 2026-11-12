@@ -1,4 +1,7 @@
 {{- if .Values.apiserver.enabled -}}
+{{- if and (not .Values.apiserver.config.allowAnonymousTenant) (not .Values.global.secretName) }}
+{{- fail "global.secretName must name a Secret with an apiserver-proxy-token key unless apiserver.config.allowAnonymousTenant is true" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

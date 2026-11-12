@@ -34,6 +34,8 @@ global:
   #   inference-api-key     — API key for the inference gateway (optional; omit if not required)
   #   s3-secret-access-key  — S3 secret access key (required when file_client.type is "s3";
   #                          not needed for "gcs" when using Workload Identity / ADC)
+  #   apiserver-proxy-token — shared token the auth proxy sends to the API server
+  #                           (required unless apiserver.config.allowAnonymousTenant is true)
   # Create with: kubectl create secret generic <name> --from-literal=postgresql-url=postgresql://...
   secretName: "batch-gateway-secrets"
 
@@ -216,8 +218,12 @@ apiserver:
     observabilityPort: "8081"
     inputHeaders:
       tenant: "X-MaaS-Username"
+      # Header in which the auth proxy sends the apiserver-proxy-token value.
+      proxy_token: "X-Gateway-Token"
     # Serve requests that carry no tenant header as the "default" tenant instead
-    # of rejecting them with 401. For local development without an auth proxy.
+    # of rejecting them with 401, and skip the proxy token check. For local
+    # development without an auth proxy. When false, global.secretName must hold
+    # an apiserver-proxy-token key, and requests without that token get 401.
     allowAnonymousTenant: false
     readHeaderTimeoutSeconds: 10
     readTimeoutSeconds: 900
