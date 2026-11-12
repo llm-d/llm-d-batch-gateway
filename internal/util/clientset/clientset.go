@@ -31,6 +31,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/database/postgresql"
 	fsapi "github.com/llm-d/llm-d-batch-gateway/internal/files_store/api"
 	fsclient "github.com/llm-d/llm-d-batch-gateway/internal/files_store/fs"
+	gcsclient "github.com/llm-d/llm-d-batch-gateway/internal/files_store/gcs"
 	"github.com/llm-d/llm-d-batch-gateway/internal/files_store/retryclient"
 	s3client "github.com/llm-d/llm-d-batch-gateway/internal/files_store/s3"
 	fstracing "github.com/llm-d/llm-d-batch-gateway/internal/files_store/tracing"
@@ -48,6 +49,7 @@ type Clientset struct {
 	Queue           dbapi.BatchPriorityQueueClient
 	Event           dbapi.BatchEventChannelClient
 	EventGC         dbapi.BatchEventGC
+	Resumable       dbapi.ResumableStore
 	Inference       *inference.GatewayResolver
 	AsyncInference  *inference.AsyncGatewayResolver
 }
@@ -89,6 +91,25 @@ func NewS3FileClient(ctx context.Context, cfg *s3client.Config) (fsapi.BatchFile
 		return nil, fmt.Errorf("failed to create s3 file client: %w", err)
 	}
 	logr.FromContextOrDiscard(ctx).Info("S3 file client created", "region", cfg.Region, "endpoint", cfg.Endpoint)
+	return c, nil
+}
+
+// NewGCSFileClient creates a GCS-based file storage client.
+// Authentication uses Application Default Credentials (e.g. GKE Workload Identity
+// bound to the component's Kubernetes ServiceAccount); no secret key is read from
+// the mounted app secret.
+func NewGCSFileClient(ctx context.Context, cfg *gcsclient.Config) (fsapi.BatchFilesClient, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("gcs config cannot be nil")
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid gcs config: %w", err)
+	}
+	c, err := gcsclient.New(ctx, *cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gcs file client: %w", err)
+	}
+	logr.FromContextOrDiscard(ctx).Info("GCS file client created", "bucket", cfg.Bucket)
 	return c, nil
 }
 
@@ -194,8 +215,14 @@ func NewClientset(ctx context.Context, component ucom.Component, opts ...Option)
 				return nil, err
 			}
 			cs.File = fstracing.Wrap(c, sharedcfg.FileTypeS3)
+		case sharedcfg.FileTypeGCS:
+			c, err := NewGCSFileClient(ctx, &cfg.fileCfg.GCSConfig)
+			if err != nil {
+				return nil, err
+			}
+			cs.File = fstracing.Wrap(c, sharedcfg.FileTypeGCS)
 		default:
-			return nil, fmt.Errorf("unsupported file_client.type: %s (supported values: fs, s3)", cfg.fileCfg.Type)
+			return nil, fmt.Errorf("unsupported file_client.type: %s (supported values: fs, s3, gcs)", cfg.fileCfg.Type)
 		}
 		if cfg.fileCfg.Retry.MaxRetries > 0 {
 			cs.File = retryclient.New(cs.File, cfg.fileCfg.Retry, component)
@@ -228,6 +255,17 @@ func NewClientset(ctx context.Context, component ucom.Component, opts ...Option)
 			}
 			cs.Queue = queueClient
 
+			// The resumable store serves the processor (activation, leases,
+			// entry writes) and the GC (orphan requeue); the apiserver has no
+			// resumable role.
+			if component == ucom.ComponentProcessor || component == ucom.ComponentGC {
+				resumable, err := postgresql.NewPostgresResumableStore(ctx, &cfg.dbCfg.PostgreSQLCfg)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create postgres resumable store: %w", err)
+				}
+				cs.Resumable = resumable
+			}
+
 			var eventClient dbapi.BatchEventChannelClient
 			switch component {
 			case ucom.ComponentProcessor:
@@ -254,14 +292,30 @@ func NewClientset(ctx context.Context, component ucom.Component, opts ...Option)
 	// build inference client(s)
 	switch {
 	case cfg.asyncInference != nil:
-		if cfg.asyncInference.RedisURL == "" {
-			redisURL, err := ucom.ReadSecretFile(ucom.SecretKeyRedisURL)
-			if err != nil {
-				return nil, fmt.Errorf("async inference requires a Redis URL (set RedisURL or configure secret %s): %w", ucom.SecretKeyRedisURL, err)
-			}
-			cfg.asyncInference.RedisURL = redisURL
+		transport, err := inference.NormalizeAsyncTransport(cfg.asyncInference.Transport)
+		if err != nil {
+			return nil, err
 		}
-		resolver, err := inference.NewAsyncResolver(*cfg.asyncInference, logger)
+		cfg.asyncInference.Transport = transport
+		switch transport {
+		case inference.AsyncTransportRedisSortedSet:
+			if cfg.asyncInference.RedisURL == "" {
+				redisURL, err := ucom.ReadSecretFile(ucom.SecretKeyRedisURL)
+				if err != nil {
+					return nil, fmt.Errorf("async Redis transport requires a Redis URL (set RedisURL or configure secret %s): %w", ucom.SecretKeyRedisURL, err)
+				}
+				cfg.asyncInference.RedisURL = redisURL
+			}
+		case inference.AsyncTransportSQL:
+			if cfg.dbCfg == nil || cfg.dbCfg.Type != sharedcfg.DBTypePostgreSQL {
+				return nil, fmt.Errorf("async SQL transport requires a PostgreSQL database client")
+			}
+			cfg.asyncInference.SQLURL = cfg.dbCfg.PostgreSQLCfg.Url
+			if cfg.asyncInference.SQLURL == "" {
+				return nil, fmt.Errorf("async SQL transport requires a PostgreSQL URL")
+			}
+		}
+		resolver, err := inference.NewAsyncResolver(ctx, *cfg.asyncInference, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create async inference clients: %w", err)
 		}
@@ -295,6 +349,11 @@ func (cs *Clientset) Close() error {
 	}
 	if cs.Event != nil {
 		if err := cs.Event.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if cs.Resumable != nil {
+		if err := cs.Resumable.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}

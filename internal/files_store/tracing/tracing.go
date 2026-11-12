@@ -105,6 +105,57 @@ func (r *tracedReadCloser) Close() error {
 	return err
 }
 
+func (c *Client) OpenStream(ctx context.Context, fileName, folderName string) (api.StreamWriter, error) {
+	_, span := uotel.StartSpan(ctx, "storage.OpenStream")
+	span.SetAttributes(
+		c.backend,
+		attribute.String("storage.file_name", fileName),
+		attribute.String("storage.folder", folderName),
+	)
+
+	writer, err := c.inner.OpenStream(ctx, fileName, folderName)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "open stream failed")
+		span.End()
+		return nil, err
+	}
+	// The span is kept open and ended when the caller commits or aborts,
+	// so the streaming write duration is captured.
+	return &tracedStreamWriter{StreamWriter: writer, span: span}, nil
+}
+
+// tracedStreamWriter wraps a StreamWriter and ends the associated span when
+// the stream is committed or aborted.
+type tracedStreamWriter struct {
+	api.StreamWriter
+	span trace.Span
+}
+
+func (w *tracedStreamWriter) Commit(ctx context.Context) (*api.BatchFileMetadata, error) {
+	defer w.span.End()
+	md, err := w.StreamWriter.Commit(ctx)
+	if err != nil {
+		w.span.RecordError(err)
+		w.span.SetStatus(codes.Error, "commit failed")
+		return nil, err
+	}
+	if md != nil {
+		w.span.SetAttributes(attribute.Int64("storage.file_size", md.Size))
+	}
+	return md, nil
+}
+
+func (w *tracedStreamWriter) Abort(ctx context.Context) error {
+	defer w.span.End()
+	err := w.StreamWriter.Abort(ctx)
+	if err != nil {
+		w.span.RecordError(err)
+		w.span.SetStatus(codes.Error, "abort failed")
+	}
+	return err
+}
+
 func (c *Client) Delete(ctx context.Context, fileName, folderName string) error {
 	ctx, span := uotel.StartSpan(ctx, "storage.Delete")
 	defer span.End()
@@ -120,6 +171,25 @@ func (c *Client) Delete(ctx context.Context, fileName, folderName string) error 
 		span.SetStatus(codes.Error, "delete failed")
 	}
 	return err
+}
+
+func (c *Client) DeletePrefix(ctx context.Context, folderName, prefix string) (int, error) {
+	ctx, span := uotel.StartSpan(ctx, "storage.DeletePrefix")
+	defer span.End()
+	span.SetAttributes(
+		c.backend,
+		attribute.String("storage.folder", folderName),
+		attribute.String("storage.prefix", prefix),
+	)
+
+	deleted, err := c.inner.DeletePrefix(ctx, folderName, prefix)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "delete prefix failed")
+		return deleted, err
+	}
+	span.SetAttributes(attribute.Int("storage.deleted_files", deleted))
+	return deleted, nil
 }
 
 func (c *Client) Close() error {

@@ -1,7 +1,7 @@
 # Batch Processor Design
 
--   **Revision**: 9
--   **Last Updated**: 2026-07-29
+-   **Revision**: 10
+-   **Last Updated**: 2026-10-14
 
 -------------------------------------------------------------------
 
@@ -111,9 +111,11 @@ When the processor starts, `recoverStaleJobs` scans the local work directory for
 -   `validating`: re-enqueue (ingestion had not started). If SLO expired, mark as `expired` (no output files exist at this stage). If re-enqueue fails, mark as `failed`.
 -   Other terminal states: clean up the directory only.
 
-After recovery, stale directories are removed. Resume-from-checkpoint is not supported — recovered jobs are retried from scratch.
+After recovery, stale directories are removed. This path applies to the sync pipeline's local output files; in async dispatch mode, results are checkpointed to object storage as they arrive, so recovery resumes from checkpoints instead of restarting from scratch.
 
 The `batch_startup_recovery_total{status,action}` metric tracks recovery outcomes for operational visibility.
+
+When `dispatch_mode` is `async`, every batch runs on the **resumable pipeline**: per-request results are checkpointed to object storage, batch ownership is a fenced lease in PostgreSQL, and the batch-gc reconciler requeues disrupted batches so any processor resumes them from their checkpoints — no single-replica or `numWorkers=1` restriction. See [Resumable Batch Jobs Design](resumable-jobs.md) for the semantics, topology rules, and operational notes.
 
 --------------------------------------------------------------------
 ### High-Level Architecture

@@ -30,6 +30,15 @@ import (
 
 const testProcessorID = "processor-0"
 
+func testReEnqueueTask() *api.BatchJobPriority {
+	return &api.BatchJobPriority{
+		ID:             "batch-1",
+		Epoch:          3,
+		ProcessorID:    testProcessorID,
+		ExpectedStatus: "in_progress",
+	}
+}
+
 func newTestQueueClient(t *testing.T) (*PostgresBatchQueueClient, pgxmock.PgxPoolIface) {
 	t.Helper()
 	mock, err := pgxmock.NewPool()
@@ -50,11 +59,11 @@ func TestPQEnqueue(t *testing.T) {
 		client, mock := newTestQueueClient(t)
 		defer mock.Close()
 
-		mock.ExpectExec("WITH re_enqueued AS").
-			WithArgs("batch-1").
+		mock.ExpectExec("(?s)WITH re_enqueued AS.*resumable = FALSE").
+			WithArgs("batch-1", int64(3), testProcessorID, "in_progress").
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-		if err := client.PQEnqueue(ctx, &api.BatchJobPriority{ID: "batch-1"}); err != nil {
+		if err := client.PQEnqueue(ctx, testReEnqueueTask()); err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -67,10 +76,10 @@ func TestPQEnqueue(t *testing.T) {
 		defer mock.Close()
 
 		mock.ExpectExec("WITH re_enqueued AS").
-			WithArgs("batch-1").
+			WithArgs("batch-1", int64(3), testProcessorID, "in_progress").
 			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
-		if err := client.PQEnqueue(ctx, &api.BatchJobPriority{ID: "batch-1"}); !errors.Is(err, api.ErrConflict) {
+		if err := client.PQEnqueue(ctx, testReEnqueueTask()); !errors.Is(err, api.ErrConflict) {
 			t.Fatalf("expected ErrConflict for a no-op re-enqueue, got %v", err)
 		}
 	})
@@ -93,15 +102,24 @@ func TestPQEnqueue(t *testing.T) {
 		}
 	})
 
+	t.Run("requires ownership preconditions", func(t *testing.T) {
+		client, mock := newTestQueueClient(t)
+		defer mock.Close()
+
+		if err := client.PQEnqueue(ctx, &api.BatchJobPriority{ID: "batch-1"}); err == nil {
+			t.Fatal("expected error for missing ownership preconditions")
+		}
+	})
+
 	t.Run("returns error on failure", func(t *testing.T) {
 		client, mock := newTestQueueClient(t)
 		defer mock.Close()
 
 		mock.ExpectExec("WITH re_enqueued AS").
-			WithArgs("batch-1").
+			WithArgs("batch-1", int64(3), testProcessorID, "in_progress").
 			WillReturnError(fmt.Errorf("connection refused"))
 
-		if err := client.PQEnqueue(ctx, &api.BatchJobPriority{ID: "batch-1"}); err == nil {
+		if err := client.PQEnqueue(ctx, testReEnqueueTask()); err == nil {
 			t.Fatal("expected error")
 		}
 	})
@@ -116,8 +134,8 @@ func TestPQClaimOwned(t *testing.T) {
 
 		mock.ExpectQuery("UPDATE batch_items").
 			WithArgs(testProcessorID).
-			WillReturnRows(pgxmock.NewRows([]string{"id", "priority", "epoch", "recovery_attempts"}).
-				AddRow("batch-1", int64(1234567890123456), int64(4), int64(2)))
+			WillReturnRows(pgxmock.NewRows([]string{"id", "priority", "epoch", "recovery_attempts", "resumable"}).
+				AddRow("batch-1", int64(1234567890123456), int64(4), int64(2), true))
 
 		jobs, err := client.PQClaimOwned(ctx)
 		if err != nil {
@@ -128,6 +146,9 @@ func TestPQClaimOwned(t *testing.T) {
 		}
 		if jobs[0].ID != "batch-1" || jobs[0].Epoch != 4 || jobs[0].RecoveryAttempts != 2 {
 			t.Errorf("unexpected job: %+v", jobs[0])
+		}
+		if !jobs[0].Resumable {
+			t.Error("resumable marker was not returned from the claimed row")
 		}
 		if !jobs[0].SLO.Equal(time.UnixMicro(1234567890123456)) {
 			t.Errorf("SLO: got %v, want %v", jobs[0].SLO, time.UnixMicro(1234567890123456))
@@ -158,11 +179,11 @@ func TestPQDequeue(t *testing.T) {
 		defer mock.Close()
 
 		slo := time.Now().Add(time.Hour)
-		rows := pgxmock.NewRows([]string{"id", "priority", "epoch"}).
-			AddRow("batch-1", slo.UnixMicro(), int64(1))
+		rows := pgxmock.NewRows([]string{"id", "priority", "epoch", "resumable", "status"}).
+			AddRow("batch-1", slo.UnixMicro(), int64(1), false, "validating")
 
-		mock.ExpectQuery("WITH claimed AS").
-			WithArgs(1, testProcessorID).
+		mock.ExpectQuery("(?s)WITH claimed AS.*resumable = FALSE").
+			WithArgs(1, testProcessorID, int64(0)).
 			WillReturnRows(rows)
 
 		result, err := client.PQDequeue(ctx, 0, 1)
@@ -181,6 +202,36 @@ func TestPQDequeue(t *testing.T) {
 		if result[0].Epoch != 1 {
 			t.Errorf("expected Epoch 1, got %d", result[0].Epoch)
 		}
+		if result[0].ProcessorID != testProcessorID || result[0].ExpectedStatus != "validating" || result[0].Resumable {
+			t.Errorf("unexpected fresh-row task: %+v", result[0])
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("claims a requeued resumable row with a lease", func(t *testing.T) {
+		client, mock := newTestQueueClient(t)
+		defer mock.Close()
+
+		slo := time.Now().Add(time.Hour)
+		rows := pgxmock.NewRows([]string{"id", "priority", "epoch", "resumable", "status"}).
+			AddRow("batch-r", slo.UnixMicro(), int64(5), true, "in_progress")
+
+		mock.ExpectQuery("(?s)WITH claimed AS.*resumable = TRUE.*FOR UPDATE SKIP LOCKED").
+			WithArgs(1, testProcessorID, int64(300)).
+			WillReturnRows(rows)
+
+		result, err := client.PQDequeue(ctx, 5*time.Minute, 1)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if len(result) != 1 {
+			t.Fatalf("expected 1 job, got %d", len(result))
+		}
+		if !result[0].Resumable || result[0].ExpectedStatus != "in_progress" || result[0].Epoch != 5 {
+			t.Errorf("unexpected requeued-row task: %+v", result[0])
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet expectations: %v", err)
 		}
@@ -190,10 +241,10 @@ func TestPQDequeue(t *testing.T) {
 		client, mock := newTestQueueClient(t)
 		defer mock.Close()
 
-		rows := pgxmock.NewRows([]string{"id", "priority", "epoch"})
+		rows := pgxmock.NewRows([]string{"id", "priority", "epoch", "resumable", "status"})
 
 		mock.ExpectQuery("WITH claimed AS").
-			WithArgs(1, testProcessorID).
+			WithArgs(1, testProcessorID, int64(0)).
 			WillReturnRows(rows)
 
 		result, err := client.PQDequeue(ctx, 0, 1)
@@ -214,12 +265,12 @@ func TestPQDequeue(t *testing.T) {
 
 		slo1 := time.Now().Add(time.Hour)
 		slo2 := time.Now().Add(2 * time.Hour)
-		rows := pgxmock.NewRows([]string{"id", "priority", "epoch"}).
-			AddRow("batch-1", slo1.UnixMicro(), int64(1)).
-			AddRow("batch-2", slo2.UnixMicro(), int64(1))
+		rows := pgxmock.NewRows([]string{"id", "priority", "epoch", "resumable", "status"}).
+			AddRow("batch-1", slo1.UnixMicro(), int64(1), false, "validating").
+			AddRow("batch-2", slo2.UnixMicro(), int64(1), false, "validating")
 
 		mock.ExpectQuery("WITH claimed AS").
-			WithArgs(5, testProcessorID).
+			WithArgs(5, testProcessorID, int64(0)).
 			WillReturnRows(rows)
 
 		result, err := client.PQDequeue(ctx, 0, 5)
@@ -239,7 +290,7 @@ func TestPQDequeue(t *testing.T) {
 		defer mock.Close()
 
 		mock.ExpectQuery("WITH claimed AS").
-			WithArgs(1, testProcessorID).
+			WithArgs(1, testProcessorID, int64(0)).
 			WillReturnError(fmt.Errorf("connection refused"))
 
 		_, err := client.PQDequeue(ctx, 0, 1)
@@ -256,7 +307,7 @@ func TestPQDelete(t *testing.T) {
 		client, mock := newTestQueueClient(t)
 		defer mock.Close()
 
-		mock.ExpectExec("WITH queued AS").
+		mock.ExpectExec("(?s)WITH queued AS.*resumable = FALSE").
 			WithArgs("batch-1", pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 

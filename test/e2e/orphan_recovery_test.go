@@ -51,8 +51,8 @@ func testOrphanRecovery(t *testing.T) {
 // Timeline:
 //  1. Submit batch → wait for in_progress
 //  2. Scale to 0 (kills pod, no replacement available)
-//  3. Reconciler detects orphan → re-enqueues (SLO valid)
-//  4. Scale back to 1 → processor picks up job and completes it
+//  3. Reconciler detects orphan → requeues it (SLO valid, epoch bumped)
+//  4. Scale back to 1 → processor claims the requeued job and completes it
 func doTestHardCrashOrphanRecovery(t *testing.T) {
 	t.Helper()
 
@@ -74,13 +74,16 @@ func doTestHardCrashOrphanRecovery(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	killAndScaleDown(t, sts)
+	t.Cleanup(func() { scaleUp(t, sts) })
 
-	// The reconciler detects the orphan and re-enqueues it (SLO still valid).
-	// Wait for the job to go back to validating (queued, no processor).
-	waitForBatchStatus(t, batchID, 3*time.Minute, openai.BatchStatusValidating)
-	t.Log("orphan re-enqueued to validating")
+	// The reconciler requeues the resumable orphan: ownership is cleared and
+	// the epoch bumped, but the row stays in_progress (the resume path owns
+	// the terminal routing). The requeue is not observable through the API,
+	// so wait one reconciler interval (30s in dev-deploy) plus margin.
+	time.Sleep(45 * time.Second)
 
-	// Scale back to 1 so the processor picks up the re-enqueued job.
+	// Scale back to 1 so the processor claims the requeued job and completes
+	// it from its checkpoints.
 	scaleUp(t, sts)
 
 	finalBatch := waitForOrphanTerminal(t, batchID, 5*time.Minute, openai.BatchStatusCompleted)
@@ -103,8 +106,8 @@ func doTestHardCrashOrphanRecovery(t *testing.T) {
 //  2. Wait for at least 1 request to complete (deterministic timing)
 //  3. Cancel batch → verify cancelling status
 //  4. Force-kill pod + scale to 0 (no replacement, no cancel handling)
-//  5. Reconciler detects orphan → cancelling transitions to cancelled
-//  6. Scale processor back to 1 (cleanup)
+//  5. Reconciler detects orphan → requeues it
+//  6. Scale back to 1 → the pickup finalizes the cancelling row as cancelled
 func doTestCancellingOrphanRecovery(t *testing.T) {
 	t.Helper()
 
@@ -142,6 +145,14 @@ func doTestCancellingOrphanRecovery(t *testing.T) {
 
 	killAndScaleDown(t, sts)
 	t.Cleanup(func() { scaleUp(t, sts) })
+
+	// The reconciler requeues the cancelling orphan like any other; the
+	// cancelled finalization happens when a processor picks it up (the
+	// pickup routes a cancelling row straight to a cancelled finalization
+	// with partial artifacts). Wait one reconciler interval, then bring the
+	// processor back to drive the pickup.
+	time.Sleep(45 * time.Second)
+	scaleUp(t, sts)
 
 	finalBatch := waitForOrphanTerminal(t, batchID, 5*time.Minute, openai.BatchStatusCancelled)
 

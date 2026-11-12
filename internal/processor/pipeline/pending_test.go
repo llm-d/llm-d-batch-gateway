@@ -8,6 +8,77 @@ import (
 	"time"
 )
 
+func TestPendingRequests_Enrich(t *testing.T) {
+	t.Run("enriches from pending map and keeps the entry pending", func(t *testing.T) {
+		p := NewPendingRequests(0)
+		submitted := time.Now()
+		p.Store(RequestItem{RequestID: "r1", CustomID: "c1", ModelID: "m1", SubmittedAt: submitted})
+
+		result := &ResultItem{RequestID: "r1"}
+		if !p.Enrich(result) {
+			t.Fatal("Enrich returned false for pending request")
+		}
+		if result.CustomID != "c1" || result.ModelID != "m1" || !result.SubmittedAt.Equal(submitted) {
+			t.Fatalf("enriched result = %+v", result)
+		}
+		if !p.Has("r1") {
+			t.Fatal("Enrich removed the pending entry")
+		}
+	})
+
+	t.Run("accepts error result for pending request without removing it", func(t *testing.T) {
+		p := NewPendingRequests(0)
+		p.Store(RequestItem{RequestID: "r1", CustomID: "c1"})
+
+		result := &ResultItem{RequestID: "r1", Error: &OutputError{Code: "server_error", Message: "boom"}}
+		if !p.Enrich(result) {
+			t.Fatal("Enrich returned false for pending error result")
+		}
+		if !p.Has("r1") {
+			t.Fatal("Enrich removed the pending entry")
+		}
+	})
+
+	t.Run("accepts results that already carry metadata", func(t *testing.T) {
+		p := NewPendingRequests(0)
+		if !p.Enrich(&ResultItem{RequestID: "r1", CustomID: "c1"}) {
+			t.Fatal("Enrich rejected result with CustomID")
+		}
+		if !p.Enrich(&ResultItem{RequestID: "r1", CustomID: "c1", Error: &OutputError{Code: "x", Message: "y"}}) {
+			t.Fatal("Enrich rejected inline error with CustomID")
+		}
+	})
+
+	t.Run("rejects unknown broadcast result", func(t *testing.T) {
+		p := NewPendingRequests(0)
+		if p.Enrich(&ResultItem{RequestID: "other-job"}) {
+			t.Fatal("Enrich accepted result from another job")
+		}
+		if p.Enrich(&ResultItem{RequestID: "other-job", Error: &OutputError{Code: "x", Message: "y"}}) {
+			t.Fatal("Enrich accepted error result from another job")
+		}
+	})
+
+	t.Run("resolve after enrich completes the cycle", func(t *testing.T) {
+		p := NewPendingRequests(0)
+		p.Store(RequestItem{RequestID: "r1", CustomID: "c1"})
+
+		result := &ResultItem{RequestID: "r1"}
+		if !p.Enrich(result) {
+			t.Fatal("Enrich returned false")
+		}
+		if !p.Resolve(result) {
+			t.Fatal("Resolve returned false after Enrich")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		p.Wait(ctx)
+		if ctx.Err() != nil {
+			t.Fatal("Wait blocked after Enrich + Resolve")
+		}
+	})
+}
+
 func TestPendingRequests(t *testing.T) {
 	t.Run("resolve enriches result with request metadata", func(t *testing.T) {
 		p := NewPendingRequests(0)
@@ -257,4 +328,141 @@ func TestPendingRequests(t *testing.T) {
 			t.Fatal("Wait did not return after DrainUnresolved")
 		}
 	})
+}
+
+// TestPendingRequests_StoreResolveInterleaving pins the fallback-submission
+// race the previous split map+atomic design admitted: a Store that refreshes
+// an entry concurrent with a Resolve removing the same entry must not
+// resurrect an uncounted entry. If it did, resolving that phantom entry
+// could drive the count to zero while another request (B) is still in
+// flight, Wait would return, and DrainUnresolved would commit B as
+// batch_failed.
+func TestPendingRequests_StoreResolveInterleaving(t *testing.T) {
+	const iterations = 1000
+	for i := range iterations {
+		p := NewPendingRequests(0)
+		p.Store(RequestItem{RequestID: "A", CustomID: "a"})
+		p.Store(RequestItem{RequestID: "B", CustomID: "b"}) // stays pending
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			// The refresh path a re-submitted recovered entry takes.
+			p.Store(RequestItem{RequestID: "A", CustomID: "a", ModelID: "refreshed"})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			p.Resolve(&ResultItem{RequestID: "A"})
+		}()
+		close(start)
+		wg.Wait()
+
+		done := make(chan struct{})
+		go func() {
+			p.Wait(context.Background())
+			close(done)
+		}()
+		assertPending := func(stage string) {
+			t.Helper()
+			select {
+			case <-done:
+				t.Fatalf("iteration %d: Wait returned prematurely %s; B is still pending", i, stage)
+			case <-time.After(time.Millisecond):
+			}
+		}
+
+		// B is always outstanding after the race, regardless of how A
+		// interleaved.
+		assertPending("after the Store/Resolve race")
+
+		// Remove A if the refresh re-added it (no-op otherwise). On the
+		// buggy design this resolve could zero the count while B is live.
+		p.Resolve(&ResultItem{RequestID: "A"})
+		assertPending("after resolving A")
+
+		if !p.Resolve(&ResultItem{RequestID: "B"}) {
+			t.Fatalf("iteration %d: B did not resolve", i)
+		}
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("iteration %d: Wait did not return after B resolved", i)
+		}
+	}
+}
+
+// TestPendingRequests_Has covers the per-request routing predicate: a
+// request is owned from its submission until its result's checkpoint
+// succeeds (Resolve); enrichment alone keeps the ownership.
+func TestPendingRequests_Has(t *testing.T) {
+	pending := NewPendingRequests(0)
+
+	if pending.Has("req-1") {
+		t.Fatal("unknown request reported as owned")
+	}
+
+	pending.Store(RequestItem{RequestID: "req-1", CustomID: "c-1"})
+	if !pending.Has("req-1") {
+		t.Fatal("submitted request not reported as owned")
+	}
+
+	// Enriching (a result arriving) keeps the ownership: the entry is
+	// released only when the result's checkpoint succeeded, so a
+	// redelivery between enrichment and checkpoint still routes here.
+	r := successResult("req-1")
+	if !pending.Enrich(&r) {
+		t.Fatal("expected the stored request to be enriched")
+	}
+	if !pending.Has("req-1") {
+		t.Fatal("enriched request no longer reported as owned")
+	}
+
+	// Resolving (the checkpoint succeeded) releases the ownership.
+	if !pending.Resolve(&r) {
+		t.Fatal("expected the enriched result to resolve")
+	}
+	if pending.Has("req-1") {
+		t.Fatal("resolved request still reported as owned")
+	}
+}
+
+// TestPendingRequests_StoreIdempotent pins the recovery pre-store contract:
+// storing the same request twice — the source's pre-store before the
+// dispatcher's store at (re-)submission — counts one pending entry, and the
+// later store's metadata wins.
+func TestPendingRequests_StoreIdempotent(t *testing.T) {
+	pending := NewPendingRequests(2)
+
+	pending.Store(RequestItem{RequestID: "req-1", CustomID: "c-1"})
+	pending.Store(RequestItem{RequestID: "req-1", CustomID: "c-1", ModelID: "m-1"})
+
+	if pending.Has("req-1") {
+		// Still owned: a single Store did not resolve anything.
+	} else {
+		t.Fatal("stored request not reported as owned")
+	}
+
+	r := successResult("req-1")
+	if !pending.Resolve(&r) {
+		t.Fatal("expected the stored request to resolve")
+	}
+	if pending.Has("req-1") {
+		t.Fatal("resolved request still reported as owned")
+	}
+
+	// The double store counted one pending entry, so one resolve drained it.
+	waited := make(chan struct{})
+	go func() {
+		pending.Wait(context.Background())
+		close(waited)
+	}()
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pending not drained after a single resolve of a twice-stored request")
+	}
 }

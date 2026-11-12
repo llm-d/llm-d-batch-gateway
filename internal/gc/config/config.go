@@ -124,13 +124,15 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("db_client.type must be \"postgresql\", got %q", cfg.DBClientCfg.Type)
 	}
 
-	switch cfg.FileClientCfg.Type {
-	case sharedcfg.FileTypeFS, sharedcfg.FileTypeS3:
-		// valid
-	case "":
-		return nil, fmt.Errorf("file_client.type is required (must be \"fs\" or \"s3\")")
-	default:
-		return nil, fmt.Errorf("file_client.type must be \"fs\" or \"s3\", got %q", cfg.FileClientCfg.Type)
+	// Validate via the shared helper (single source of truth for fs/s3/gcs/mock),
+	// then reject mock: gc only supports the real object stores. Keep this local
+	// rejection so the shared helper can stay generic (apiserver/processor accept mock).
+	if err := cfg.FileClientCfg.ValidateType(); err != nil {
+		return nil, err
+	}
+	if cfg.FileClientCfg.Type == sharedcfg.FileTypeMock {
+		return nil, fmt.Errorf("file_client.type %q is not supported by gc (use %q, %q, or %q)",
+			sharedcfg.FileTypeMock, sharedcfg.FileTypeFS, sharedcfg.FileTypeS3, sharedcfg.FileTypeGCS)
 	}
 
 	if err := cfg.FileClientCfg.Retry.Validate(); err != nil {

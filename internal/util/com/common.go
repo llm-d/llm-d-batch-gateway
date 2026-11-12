@@ -39,6 +39,12 @@ const (
 	ComponentGC        Component = "garbage-collector"
 )
 
+// ID prefixes of the objects the API hands out.
+const (
+	FileIDPrefix  = "file_"
+	BatchIDPrefix = "batch_"
+)
+
 var (
 	letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 )
@@ -46,13 +52,13 @@ var (
 // NewFileID generates a new unique file ID in the format "file_<uuid>",
 // matching the OpenAI Files API convention.
 func NewFileID() string {
-	return fmt.Sprintf("file_%s", uuid.NewString())
+	return FileIDPrefix + uuid.NewString()
 }
 
 // NewBatchID generates a new unique batch ID in the format "batch_<uuid>",
 // matching the OpenAI Batch API convention.
 func NewBatchID() string {
-	return fmt.Sprintf("batch_%s", uuid.NewString())
+	return BatchIDPrefix + uuid.NewString()
 }
 
 func RandString(n int) string {

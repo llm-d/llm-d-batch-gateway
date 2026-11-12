@@ -88,6 +88,9 @@ func TestAsyncSharedClient_SubmitPropagatesTraceContext(t *testing.T) {
 	if ir.PublicRequest == nil {
 		t.Fatal("expected PublicRequest in InternalRequest")
 	}
+	if model := ir.PublicRequest.ReqModel(); model != "test-model" {
+		t.Errorf("request model = %q, want %q", model, "test-model")
+	}
 	metadata := ir.PublicRequest.ReqMetadata()
 	if metadata == nil {
 		t.Fatal("expected non-nil Metadata on enqueued request")

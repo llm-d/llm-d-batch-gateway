@@ -224,6 +224,18 @@ func (c *pgCore) buildGetQuery(
 		argIdx++
 	}
 
+	order, cmp := "ASC", ">"
+	if bq.Descending {
+		order, cmp = "DESC", "<"
+	}
+	if bq.AfterID != "" {
+		conditions = append(conditions, fmt.Sprintf(colID+" %s $%d", cmp, argIdx))
+		args = append(args, bq.AfterID)
+		argIdx++
+		// The cursor replaces the offset.
+		start = 0
+	}
+
 	conditions = append(conditions, rawConditions...)
 
 	if len(conditions) == 0 {
@@ -235,8 +247,8 @@ func (c *pgCore) buildGetQuery(
 	offsetArg := argIdx
 	limitArg := argIdx + 1
 
-	sql := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s OFFSET $%d LIMIT $%d",
-		strings.Join(cols, ", "), c.desc.TableName(), where, colID, offsetArg, limitArg)
+	sql := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s %s OFFSET $%d LIMIT $%d",
+		strings.Join(cols, ", "), c.desc.TableName(), where, colID, order, offsetArg, limitArg)
 	args = append(args, start, limit)
 
 	return sql, args

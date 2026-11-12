@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -247,6 +248,7 @@ func TestExecuteJob_QuietIntervalStatusChange(t *testing.T) {
 				updater:         NewStatusUpdater(spy),
 				jobItem:         newRow(),
 				jobInfo:         jobInfo,
+				resultSink:      env.sink,
 				cancelUser:      func() { abort(batchctx.ErrCancelled) },
 				onOwnershipLost: func() { abort(context.Canceled) },
 			}
@@ -405,4 +407,90 @@ func mapKeys(m map[string]*pipeline.EndpointAIMD) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// TestRecoveryPlan pins the takeover routing plan derived from a resume
+// seed: in-flight entries defer re-submission, foreign submitters get a
+// recovery broadcaster each (deduplicated), and entries this processor
+// submitted itself (same-identity restart) defer without a foreign route.
+func TestRecoveryPlan(t *testing.T) {
+	tests := []struct {
+		name           string
+		seed           *db.ResumableResumeState
+		self           string
+		canRecover     bool
+		wantRecovering []string
+		wantSubmitters []string
+	}{
+		{
+			name: "foreign submitter recovers through its route",
+			seed: &db.ResumableResumeState{InFlightSubmittedBy: map[string]string{
+				"req-1": "proc-a",
+				"req-2": "proc-a",
+			}},
+			self:           "proc-b",
+			canRecover:     true,
+			wantRecovering: []string{"req-1", "req-2"},
+			wantSubmitters: []string{"proc-a"},
+		},
+		{
+			name: "same-identity restart defers without a foreign route",
+			seed: &db.ResumableResumeState{InFlightSubmittedBy: map[string]string{
+				"req-1": "proc-a",
+			}},
+			self:           "proc-a",
+			canRecover:     true,
+			wantRecovering: []string{"req-1"},
+			wantSubmitters: nil,
+		},
+		{
+			name: "unknown submitter re-submits directly",
+			seed: &db.ResumableResumeState{InFlightSubmittedBy: map[string]string{
+				"req-1": "", // written before submitter tracking
+			}},
+			self:           "proc-b",
+			canRecover:     true,
+			wantRecovering: nil,
+			wantSubmitters: nil,
+		},
+		{
+			name:           "sync dispatch never recovers routes",
+			seed:           &db.ResumableResumeState{InFlightSubmittedBy: map[string]string{"req-1": "proc-a"}},
+			self:           "proc-b",
+			canRecover:     false,
+			wantRecovering: nil,
+			wantSubmitters: nil,
+		},
+		{
+			name: "SQL transport re-submits without recovery window",
+			seed: &db.ResumableResumeState{InFlightSubmittedBy: map[string]string{
+				"req-1": "proc-a",
+			}},
+			self:           "proc-b",
+			canRecover:     false,
+			wantRecovering: nil,
+			wantSubmitters: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recovering, submitters := recoveryPlan(tt.seed, tt.self, tt.canRecover)
+			if len(recovering) != len(tt.wantRecovering) {
+				t.Fatalf("recovering = %v, want %v", recovering, tt.wantRecovering)
+			}
+			for _, id := range tt.wantRecovering {
+				if _, ok := recovering[id]; !ok {
+					t.Fatalf("recovering = %v, want %q", recovering, id)
+				}
+			}
+			if len(submitters) != len(tt.wantSubmitters) {
+				t.Fatalf("submitters = %v, want %v", submitters, tt.wantSubmitters)
+			}
+			for _, s := range tt.wantSubmitters {
+				if !slices.Contains(submitters, s) {
+					t.Fatalf("submitters = %v, want %q", submitters, s)
+				}
+			}
+		})
+	}
 }

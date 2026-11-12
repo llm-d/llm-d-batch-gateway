@@ -373,6 +373,94 @@ func TestDelete(t *testing.T) {
 
 }
 
+func TestDeletePrefix(t *testing.T) {
+	ctx := context.Background()
+	prefix := "results/job-1/"
+
+	seed := func(t *testing.T) *Client {
+		t.Helper()
+		client := newTestClient(t)
+		for _, name := range []string{
+			"results/job-1/req-1.jsonl",
+			"results/job-1/req-2.jsonl",
+			"results/job-1/req-2.fallback.jsonl",
+			"results/job-10/req-1.jsonl",
+			"other.txt",
+		} {
+			if _, err := client.Store(ctx, name, testFolder, 1024, 0, bytes.NewReader([]byte("data"))); err != nil {
+				t.Fatalf("failed to store %s: %v", name, err)
+			}
+		}
+		return client
+	}
+
+	t.Run("deletes every file under the prefix", func(t *testing.T) {
+		client := seed(t)
+
+		deleted, err := client.DeletePrefix(ctx, testFolder, prefix)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if deleted != 3 {
+			t.Errorf("deleted = %d, want 3", deleted)
+		}
+		for _, name := range []string{"results/job-1/req-1.jsonl", "results/job-1/req-2.jsonl", "results/job-1/req-2.fallback.jsonl"} {
+			if _, _, err := client.Retrieve(ctx, name, testFolder); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("expected %s to be deleted, got err %v", name, err)
+			}
+		}
+	})
+
+	t.Run("keeps sibling prefixes sharing the prefix string", func(t *testing.T) {
+		client := seed(t)
+
+		// The trailing slash is missing, but the prefix must still not match
+		// results/job-10/.
+		if _, err := client.DeletePrefix(ctx, testFolder, "results/job-1"); err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if _, _, err := client.Retrieve(ctx, "results/job-10/req-1.jsonl", testFolder); err != nil {
+			t.Errorf("expected sibling object to survive, got err %v", err)
+		}
+	})
+
+	t.Run("keeps files outside the prefix", func(t *testing.T) {
+		client := seed(t)
+
+		if _, err := client.DeletePrefix(ctx, testFolder, prefix); err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		for _, name := range []string{"results/job-10/req-1.jsonl", "other.txt"} {
+			if _, _, err := client.Retrieve(ctx, name, testFolder); err != nil {
+				t.Errorf("expected %s to survive, got err %v", name, err)
+			}
+		}
+	})
+
+	t.Run("nonexistent prefix is a no-op", func(t *testing.T) {
+		client := seed(t)
+
+		deleted, err := client.DeletePrefix(ctx, testFolder, "results/never-seen/")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if deleted != 0 {
+			t.Errorf("deleted = %d, want 0", deleted)
+		}
+	})
+
+	t.Run("rejects empty folderName and prefix", func(t *testing.T) {
+		client := newTestClient(t)
+
+		if _, err := client.DeletePrefix(ctx, "", prefix); err == nil {
+			t.Error("expected error when folderName is empty")
+		}
+		if _, err := client.DeletePrefix(ctx, testFolder, ""); err == nil {
+			t.Error("expected error when prefix is empty")
+		}
+	})
+}
+
 func TestGetContext(t *testing.T) {
 	t.Run("uses default timeout when zero", func(t *testing.T) {
 		client := newTestClient(t)
@@ -418,4 +506,183 @@ func TestClose(t *testing.T) {
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
+}
+
+func TestOpenStream(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("commit makes written data visible", func(t *testing.T) {
+		client := newTestClient(t)
+		content := []byte("line1\nline2\n")
+
+		w, err := client.OpenStream(ctx, "out.jsonl", testFolder)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if _, err := w.Write(content); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+
+		md, err := w.Commit(ctx)
+		if err != nil {
+			t.Fatalf("commit failed: %v", err)
+		}
+		if md.Size != int64(len(content)) {
+			t.Errorf("expected size %d, got %d", len(content), md.Size)
+		}
+		if md.Location != filepath.Join(testFolder, "out.jsonl") {
+			t.Errorf("unexpected location %s", md.Location)
+		}
+
+		data, err := os.ReadFile(filepath.Join(client.root.Name(), md.Location))
+		if err != nil {
+			t.Fatalf("failed to read committed file: %v", err)
+		}
+		if !bytes.Equal(data, content) {
+			t.Errorf("expected content %q, got %q", content, data)
+		}
+	})
+
+	t.Run("data is invisible before commit", func(t *testing.T) {
+		client := newTestClient(t)
+
+		w, err := client.OpenStream(ctx, "out.jsonl", testFolder)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if _, err := w.Write([]byte("partial")); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+
+		if _, _, err := client.Retrieve(ctx, "out.jsonl", testFolder); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("expected file to be invisible before commit, got %v", err)
+		}
+		_ = w.Abort(ctx)
+	})
+
+	t.Run("abort leaves no file behind", func(t *testing.T) {
+		client := newTestClient(t)
+
+		w, err := client.OpenStream(ctx, "out.jsonl", testFolder)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if _, err := w.Write([]byte("discarded")); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+		if err := w.Abort(ctx); err != nil {
+			t.Fatalf("abort failed: %v", err)
+		}
+
+		if _, err := client.root.Stat(filepath.Join(testFolder, "out.jsonl")); !os.IsNotExist(err) {
+			t.Error("expected target file to not exist after abort")
+		}
+		// No temp files either.
+		entries, err := os.ReadDir(filepath.Join(client.root.Name(), testFolder))
+		if err != nil {
+			t.Fatalf("failed to read folder: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("expected empty folder after abort, found %d entries", len(entries))
+		}
+	})
+
+	t.Run("returns ErrFileExists for stored file", func(t *testing.T) {
+		client := newTestClient(t)
+
+		w, err := client.OpenStream(ctx, "out.jsonl", testFolder)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if _, err := w.Commit(ctx); err != nil {
+			t.Fatalf("commit failed: %v", err)
+		}
+
+		if _, err := client.OpenStream(ctx, "out.jsonl", testFolder); !errors.Is(err, api.ErrFileExists) {
+			t.Errorf("expected ErrFileExists, got %v", err)
+		}
+	})
+
+	t.Run("commit is create-only: a stale writer cannot replace the winner's file", func(t *testing.T) {
+		client := newTestClient(t)
+
+		// Both writers pass the open-time existence check — the takeover
+		// shape: a stale owner that opened its stream before the current
+		// owner published.
+		winner, err := client.OpenStream(ctx, "out.jsonl", testFolder)
+		if err != nil {
+			t.Fatalf("open winner: %v", err)
+		}
+		stale, err := client.OpenStream(ctx, "out.jsonl", testFolder)
+		if err != nil {
+			t.Fatalf("open stale: %v", err)
+		}
+		if _, err := winner.Write([]byte("winner")); err != nil {
+			t.Fatalf("write winner: %v", err)
+		}
+		if _, err := stale.Write([]byte("stale")); err != nil {
+			t.Fatalf("write stale: %v", err)
+		}
+
+		if _, err := winner.Commit(ctx); err != nil {
+			t.Fatalf("winner commit: %v", err)
+		}
+		if _, err := stale.Commit(ctx); !errors.Is(err, api.ErrFileExists) {
+			t.Fatalf("stale commit: expected ErrFileExists, got %v", err)
+		}
+
+		// The winner's publication stands, byte for byte.
+		data, err := os.ReadFile(filepath.Join(client.root.Name(), testFolder, "out.jsonl"))
+		if err != nil {
+			t.Fatalf("read committed file: %v", err)
+		}
+		if string(data) != "winner" {
+			t.Errorf("committed content = %q, want the winner's %q", data, "winner")
+		}
+
+		// The failed commit cleaned up its temp file: only the publication
+		// remains.
+		entries, err := os.ReadDir(filepath.Join(client.root.Name(), testFolder))
+		if err != nil {
+			t.Fatalf("failed to read folder: %v", err)
+		}
+		if len(entries) != 1 || entries[0].Name() != "out.jsonl" {
+			t.Errorf("expected only out.jsonl after the race, got %v", entries)
+		}
+	})
+
+	t.Run("concurrent streams to the same target leave one visible file", func(t *testing.T) {
+		client := newTestClient(t)
+
+		// Open every stream before any commit so all of them pass the
+		// existence check; the commits then race on the final rename.
+		const writers = 4
+		streams := make([]api.StreamWriter, writers)
+		for i := range writers {
+			w, err := client.OpenStream(ctx, "out.jsonl", testFolder)
+			if err != nil {
+				t.Fatalf("open %d failed: %v", i, err)
+			}
+			streams[i] = w
+		}
+
+		var wg sync.WaitGroup
+		for i, w := range streams {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _ = fmt.Fprintf(w, "writer-%d", i)
+				_, _ = w.Commit(ctx)
+			}()
+		}
+		wg.Wait()
+
+		entries, err := os.ReadDir(filepath.Join(client.root.Name(), testFolder))
+		if err != nil {
+			t.Fatalf("failed to read folder: %v", err)
+		}
+		if len(entries) != 1 || entries[0].Name() != "out.jsonl" {
+			t.Errorf("expected exactly out.jsonl after concurrent commits, got %v", entries)
+		}
+	})
 }

@@ -17,10 +17,10 @@ limitations under the License.
 package worker
 
 import (
-	"context"
 	"fmt"
 
-	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
+	"github.com/google/uuid"
+
 	batch_types "github.com/llm-d/llm-d-batch-gateway/internal/shared/types"
 )
 
@@ -49,8 +49,9 @@ func newBatchRequestID(requestID string) string {
 	return fmt.Sprintf("batch_req_%s", requestID)
 }
 
-// Deprecated: executeJob delegates to executeJobAsync. Kept so existing
-// tests compile until they are migrated or removed.
-func (p *Processor) executeJob(ctx context.Context, params *jobExecutionParams) (*openai.BatchRequestCounts, error) {
-	return p.executeJobAsync(ctx, params)
+// stableBatchRequestID derives a deterministic request ID from the batch and
+// custom IDs, so re-preprocessing the same input yields the same request IDs.
+func stableBatchRequestID(batchID, customID string) string {
+	u := uuid.NewSHA1(uuid.NameSpaceOID, []byte(batchID+"\x00"+customID))
+	return newBatchRequestID(u.String())
 }

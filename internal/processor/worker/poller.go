@@ -20,6 +20,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/go-logr/logr"
 	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
@@ -48,8 +49,11 @@ func (p *Poller) validate() error {
 	return nil
 }
 
-func (p *Poller) dequeueOne(ctx context.Context) (*db.BatchJobPriority, error) {
-	tasks, err := p.pq.PQDequeue(ctx, 0, 1) // get only one job without blocking the queue
+// dequeueOne claims one job from the queue. The lease is the resumable
+// ownership lease a durable processor offers when claiming requeued rows;
+// zero disables the requeued class (sync dispatch).
+func (p *Poller) dequeueOne(ctx context.Context, lease time.Duration) (*db.BatchJobPriority, error) {
+	tasks, err := p.pq.PQDequeue(ctx, lease, 1) // get only one job without blocking the queue
 	if err != nil {
 		return nil, err
 	}

@@ -54,7 +54,10 @@ data:
     dispatch_mode: {{ $dispatchMode | quote }}
     {{- if .Values.processor.config.asyncDispatch }}
     async_dispatch:
+      transport: {{ default "redis-sortedset" .Values.processor.config.asyncDispatch.transport | quote }}
       result_poll_timeout: {{ .Values.processor.config.asyncDispatch.resultPollTimeout | quote }}
+      poll_interval: {{ default "1s" .Values.processor.config.asyncDispatch.pollInterval | quote }}
+      max_connections: {{ .Values.processor.config.asyncDispatch.maxConnections }}
       {{- if .Values.processor.config.asyncDispatch.models }}
       models:
         {{- range $model, $cfg := .Values.processor.config.asyncDispatch.models }}
@@ -72,6 +75,11 @@ data:
         {{- end }}
       {{- end }}
     {{- end }}
+
+    resumable:
+      lease_duration: {{ .Values.processor.config.resumable.leaseDuration | quote }}
+      finalize_concurrency: {{ .Values.processor.config.resumable.finalizeConcurrency }}
+      finalize_timeout: {{ .Values.processor.config.resumable.finalizeTimeout | quote }}
 
     {{- with .Values.processor.config.globalInferenceGateway }}
     global_inference_gateway:
@@ -154,6 +162,12 @@ data:
         prefix: {{ .Values.global.fileClient.s3.prefix | quote }}
         use_path_style: {{ .Values.global.fileClient.s3.usePathStyle }}
         auto_create_bucket: {{ .Values.global.fileClient.s3.autoCreateBucket }}
+      gcs:
+        bucket: {{ .Values.global.fileClient.gcs.bucket | quote }}
+        prefix: {{ .Values.global.fileClient.gcs.prefix | quote }}
+        project_id: {{ .Values.global.fileClient.gcs.projectId | quote }}
+        auto_create_bucket: {{ .Values.global.fileClient.gcs.autoCreateBucket }}
+        verify_bucket_on_start: {{ .Values.global.fileClient.gcs.verifyBucketOnStart }}
       retry:
         max_retries: {{ .Values.global.fileClient.retry.maxRetries }}
         initial_backoff: {{ .Values.global.fileClient.retry.initialBackoff | quote }}

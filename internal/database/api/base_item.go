@@ -25,6 +25,14 @@ type BaseQuery struct {
 	TagSelectors    Tags
 	TagsLogicalCond LogicalCond
 	Expired         bool
+
+	// AfterID is a keyset pagination cursor. When set, only items that sort
+	// strictly after this ID are returned and the 'start' offset passed to DBGet
+	// is ignored. The ID does not have to exist.
+	AfterID string
+	// Descending returns items ordered by ID descending instead of ascending.
+	// With AfterID set, "after" means smaller than AfterID.
+	Descending bool
 }
 
 // BaseIndexes contains common indexed fields for all database items.

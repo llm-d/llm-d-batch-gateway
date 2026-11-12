@@ -21,6 +21,7 @@ import (
 	_ "embed"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -33,22 +34,27 @@ var batchSchemaSql string
 
 // nonTerminalCondition is the SQL WHERE clause fragment that filters for
 // non-terminal batch statuses. Computed once since terminal statuses are fixed.
-var nonTerminalCondition = buildNonTerminalCondition()
+var nonTerminalCondition = buildNonTerminalCondition(colStatus)
 
-func buildNonTerminalCondition() string {
+// buildNonTerminalCondition builds the fragment against the given status
+// column reference, letting a caller qualify it (e.g. "b.status") when the
+// query joins another table that also has a status column.
+func buildNonTerminalCondition(column string) string {
 	statuses := openai.TerminalStatuses()
 	quoted := make([]string, len(statuses))
 	for i, s := range statuses {
 		quoted[i] = "'" + string(s) + "'"
 	}
-	return colStatus + `::jsonb->>'status' NOT IN (` + strings.Join(quoted, ",") + `)`
+	return column + `::jsonb->>'status' NOT IN (` + strings.Join(quoted, ",") + `)`
 }
 
 const (
-	colProcessorID      = "processor_id"
-	colPriority         = "priority"
-	colEpoch            = "epoch"
-	colRecoveryAttempts = "recovery_attempts"
+	colProcessorID        = "processor_id"
+	colPriority           = "priority"
+	colEpoch              = "epoch"
+	colRecoveryAttempts   = "recovery_attempts"
+	colResumable          = "resumable"
+	colOwnerLeaseExpiryAt = "owner_lease_expires_at"
 )
 
 // Compile-time checks.
@@ -63,7 +69,7 @@ type batchDescriptor struct{}
 func (batchDescriptor) TableName() string { return "batch_items" }
 func (batchDescriptor) Schema() string    { return batchSchemaSql }
 func (batchDescriptor) ExtraColumns() []string {
-	return []string{colProcessorID, colPriority, colEpoch, colRecoveryAttempts}
+	return []string{colProcessorID, colPriority, colEpoch, colRecoveryAttempts, colResumable, colOwnerLeaseExpiryAt}
 }
 
 // PostgresBatchDBClient implements api.BatchDBClient using PostgreSQL.
@@ -101,11 +107,17 @@ func (c *PostgresBatchDBClient) DBStore(ctx context.Context, item *api.BatchItem
 	if item.ProcessorID == "" {
 		processorID = nil
 	}
+	var ownerLeaseExpiresAt any
+	if !item.OwnerLeaseExpiresAt.IsZero() {
+		ownerLeaseExpiresAt = item.OwnerLeaseExpiresAt
+	}
 	if err = c.store(ctx, &item.BaseIndexes, &item.BaseContents, map[string]any{
-		colProcessorID:      processorID,
-		colPriority:         item.Priority,
-		colEpoch:            item.Epoch,
-		colRecoveryAttempts: item.RecoveryAttempts,
+		colProcessorID:        processorID,
+		colPriority:           item.Priority,
+		colEpoch:              item.Epoch,
+		colRecoveryAttempts:   item.RecoveryAttempts,
+		colResumable:          item.Resumable,
+		colOwnerLeaseExpiryAt: ownerLeaseExpiresAt,
 	}); err != nil {
 		return
 	}
@@ -145,13 +157,20 @@ func (c *PostgresBatchDBClient) DBGet(
 		priority, _ := extras[i][colPriority].(int64)
 		epoch, _ := extras[i][colEpoch].(int64)
 		recoveryAttempts, _ := extras[i][colRecoveryAttempts].(int64)
+		resumable, _ := extras[i][colResumable].(bool)
+		var ownerLeaseExpiresAt time.Time
+		if v, ok := extras[i][colOwnerLeaseExpiryAt].(time.Time); ok {
+			ownerLeaseExpiresAt = v
+		}
 		items[i] = &api.BatchItem{
-			BaseIndexes:      *indexes[i],
-			BaseContents:     *contents[i],
-			ProcessorID:      processorID,
-			Priority:         priority,
-			Epoch:            epoch,
-			RecoveryAttempts: recoveryAttempts,
+			BaseIndexes:         *indexes[i],
+			BaseContents:        *contents[i],
+			ProcessorID:         processorID,
+			Priority:            priority,
+			Epoch:               epoch,
+			RecoveryAttempts:    recoveryAttempts,
+			Resumable:           resumable,
+			OwnerLeaseExpiresAt: ownerLeaseExpiresAt,
 		}
 	}
 
@@ -163,15 +182,21 @@ func (c *PostgresBatchDBClient) DBUpdate(ctx context.Context, item *api.BatchIte
 		err = fmt.Errorf("item is nil")
 		return
 	}
-	var epochFence map[string]any
-	if item.Epoch > 0 {
-		epochFence = map[string]any{colEpoch: item.Epoch}
+	var updateConditions map[string]any
+	if item.Epoch > 0 || item.BumpEpoch {
+		updateConditions = map[string]any{colEpoch: item.Epoch}
 	}
 	var rawSets []string
 	if item.BumpEpoch {
 		rawSets = append(rawSets, colEpoch+" = "+colEpoch+" + 1")
 	}
-	if err = c.update(ctx, &item.BaseIndexes, &item.BaseContents, expectedStatus, epochFence, rawSets); err != nil {
+	if item.ExpectedResumable != nil {
+		if updateConditions == nil {
+			updateConditions = make(map[string]any)
+		}
+		updateConditions[colResumable] = *item.ExpectedResumable
+	}
+	if err = c.update(ctx, &item.BaseIndexes, &item.BaseContents, expectedStatus, updateConditions, rawSets); err != nil {
 		return
 	}
 	return

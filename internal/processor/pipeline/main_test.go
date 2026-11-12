@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"testing"
@@ -32,62 +33,14 @@ func makeItems(n int, model string) []RequestItem {
 	return items
 }
 
-func tempFile(t *testing.T) *os.File {
-	t.Helper()
-	f, err := os.CreateTemp(t.TempDir(), "test-*.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return f
-}
-
-func readFile(t *testing.T, f *os.File) []byte {
-	t.Helper()
-	data, err := os.ReadFile(f.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
-}
-
 func countLines(data []byte) int {
 	return len(splitLines(data))
 }
 
 func splitLines(data []byte) [][]byte {
-	trimmed := trimBytes(data)
+	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
 		return nil
 	}
-	return splitByNewline(trimmed)
-}
-
-func trimBytes(data []byte) []byte {
-	for len(data) > 0 && (data[len(data)-1] == '\n' || data[len(data)-1] == ' ') {
-		data = data[:len(data)-1]
-	}
-	return data
-}
-
-func splitByNewline(data []byte) [][]byte {
-	var lines [][]byte
-	for len(data) > 0 {
-		idx := indexOf(data, '\n')
-		if idx < 0 {
-			lines = append(lines, data)
-			break
-		}
-		lines = append(lines, data[:idx])
-		data = data[idx+1:]
-	}
-	return lines
-}
-
-func indexOf(data []byte, b byte) int {
-	for i, v := range data {
-		if v == b {
-			return i
-		}
-	}
-	return -1
+	return bytes.Split(trimmed, []byte("\n"))
 }

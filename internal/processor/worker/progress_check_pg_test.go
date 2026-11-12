@@ -119,7 +119,7 @@ func TestProgressTrackerQuietIntervalPostgres(t *testing.T) {
 				onFencedOut:  func() { fencedOut.Store(true) },
 				onCancelling: func() { cancelling.Store(true) },
 			}, jobID, 20*time.Millisecond, testLogger(t))
-			// Like executeJobAsync: the first tick writes the initial counts.
+			// Like executeJob: the first tick writes the initial counts.
 			tracker.AddFailed(0)
 
 			runCtx, cancel := context.WithCancel(ctx)

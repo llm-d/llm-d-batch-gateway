@@ -231,6 +231,18 @@ func (c *GarbageCollector) processBatch(ctx context.Context, job *db.BatchItem) 
 		return false, nil
 	}
 
+	// Purge the resumable result objects before the row goes away: the
+	// entries cascade with the row, so afterwards nobody can derive the
+	// object keys anymore. Best-effort — for non-resumable jobs the prefix
+	// simply holds no objects, and a missing tenant only skips the purge.
+	if folderName, err := ucom.GetFolderNameByTenantID(job.TenantID); err != nil {
+		logger.Error(err, "Failed to derive folder name; skipping result prefix purge",
+			"jobID", job.ID, "tenantID", job.TenantID)
+	} else if _, err := c.filesClient.DeletePrefix(ctx, folderName, "results/"+job.ID+"/"); err != nil {
+		logger.Error(err, "Failed to purge resumable result objects",
+			"jobID", job.ID, "folderName", folderName)
+	}
+
 	deletedIDs, err := c.batchDBClient.DBDelete(ctx, []string{job.ID})
 	if err != nil {
 		return false, err

@@ -1,4 +1,4 @@
-.PHONY: help build build-apiserver build-processor build-gc run-apiserver run-processor run-gc run-apiserver-dev run-processor-dev run-gc-dev build-release package-release publish-helm-chart generate-release test test-coverage test-coverage-func clean lint fmt vet tidy install-tools deps-get deps-verify bench check check-container-tool ci image-build image-build-apiserver image-build-processor image-build-gc test-regression test-integration test-postgres test-postgres-local test-all test-e2e test-helm test-scripts dev-deploy dev-clean dev-rm-cluster pre-commit benchmark-local benchmark-local-teardown benchmark-gpu benchmark-gpu-teardown
+.PHONY: help build build-apiserver build-processor build-gc run-apiserver run-processor run-gc run-apiserver-dev run-processor-dev run-gc-dev build-release package-release publish-helm-chart generate-release test test-coverage test-coverage-func clean lint fmt vet tidy install-tools deps-get deps-verify bench check check-container-tool ci image-build image-build-apiserver image-build-processor image-build-gc test-regression test-integration test-integration-gcs test-postgres test-postgres-local test-all test-e2e test-helm test-scripts dev-deploy dev-clean dev-rm-cluster pre-commit benchmark-local benchmark-local-teardown benchmark-gpu benchmark-gpu-teardown
 
 SHELL := /usr/bin/env bash
 
@@ -330,7 +330,7 @@ test-regression:
 ## test-integration: Run integration tests (in-process server with mock backends and external service integration, no cluster needed)
 test-integration:
 	@echo "Running integration tests..."
-	@$(GO) test -v -tags=integration ./... || \
+	@$(GO) test $(GOFLAGS) -v -tags=integration ./... || \
 		(echo "\n❌ Integration tests failed" && exit 1)
 	@echo "\n✅ Integration tests passed!"
 
@@ -339,6 +339,7 @@ test-integration:
 # batch_items and must not share a database concurrently.
 test-postgres:
 	@test -n "$(TEST_POSTGRES_URL)" || { echo "TEST_POSTGRES_URL is required for PostgreSQL-backed tests"; exit 1; }
+	$(GO) test -count=1 -v ./pkg/clients/inference
 	$(GO) test -count=1 -v ./internal/database/postgresql
 	$(GO) test -count=1 -v ./internal/processor/worker
 	$(GO) test -count=1 -v ./internal/apiserver/batch
@@ -365,6 +366,19 @@ test-postgres-local:
 	mapped="$$("$$tool" port "$$container" 5432/tcp)"; \
 	port="$${mapped##*:}"; \
 	TEST_POSTGRES_URL="postgres://postgres:postgres@127.0.0.1:$$port/batch_gateway_test?sslmode=disable" $(MAKE) test-postgres
+
+## test-integration-gcs: Run the standalone GCS integration tests against a
+##                       containerized fake-gcs-server (fsouza/fake-gcs-server),
+##                       auto-provisioned in-process via GCS_TEST_EMULATOR=1.
+##                       Requires Docker or Podman; the suite skips gracefully
+##                       when no container runtime is present. To run against
+##                       real GCS instead, set GCS_TEST_BUCKET/GCS_TEST_PROJECT
+##                       and call `make test-integration`.
+test-integration-gcs:
+	@echo "Running GCS integration tests against fake-gcs-server..."
+	@GCS_TEST_EMULATOR=1 $(GO) test -v -tags=integration -run TestGCS ./test/integration/... || \
+		(echo "\n❌ GCS integration tests failed" && exit 1)
+	@echo "\n✅ GCS integration tests passed!"
 
 ## test-all: Run all tests (unit + regression + integration + scripts)
 test-all: test test-regression test-integration test-scripts
@@ -494,7 +508,7 @@ test-e2e:
 	@echo "Running E2E tests..."
 	@OUT=$$(mktemp); \
 	echo "Processor observability endpoint: auto-resolved by the e2e test helpers"; \
-	cd test/e2e && $(GO) test -v $(if $(TEST_OUTPUT),-json) -count=1 -timeout=30m $(if $(TEST_RUN),-run $(TEST_RUN)) ./... 2>&1 | tee $$OUT; \
+	cd test/e2e && $(GO) test -v $(if $(TEST_OUTPUT),-json) -count=1 -timeout=60m $(if $(TEST_RUN),-run $(TEST_RUN)) ./... 2>&1 | tee $$OUT; \
 	TEST_EXIT=$${PIPESTATUS[0]}; \
 	PASS_COUNT=$$(grep -- '--- PASS:' $$OUT 2>/dev/null | wc -l | tr -d ' '); \
 	FAIL_COUNT=$$(grep -- '--- FAIL:' $$OUT 2>/dev/null | wc -l | tr -d ' '); \

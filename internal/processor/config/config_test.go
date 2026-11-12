@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/ptr"
+	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 )
 
 // validPerModelConfig returns a minimal valid per-model gateway config for tests.
@@ -113,6 +114,56 @@ func TestNewConfig_Defaults(t *testing.T) {
 	if c.AsyncDispatchConfig.ResultPollTimeout != 5*time.Second {
 		t.Fatalf("AsyncDispatchConfig.ResultPollTimeout = %v, want %v", c.AsyncDispatchConfig.ResultPollTimeout, 5*time.Second)
 	}
+	if c.Resumable.LeaseDuration != 5*time.Minute {
+		t.Fatalf("Resumable.LeaseDuration = %v, want %v", c.Resumable.LeaseDuration, 5*time.Minute)
+	}
+	if c.Resumable.FinalizeConcurrency != 16 {
+		t.Fatalf("Resumable.FinalizeConcurrency = %d, want 16", c.Resumable.FinalizeConcurrency)
+	}
+	if c.Resumable.FinalizeTimeout != 30*time.Minute {
+		t.Fatalf("Resumable.FinalizeTimeout = %v, want %v", c.Resumable.FinalizeTimeout, 30*time.Minute)
+	}
+}
+
+func TestProcessorConfig_Validate_Resumable(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*ResumableConfig)
+		wantErr bool
+	}{
+		{name: "defaults are valid", mutate: func(*ResumableConfig) {}},
+		{name: "zero lease duration", mutate: func(r *ResumableConfig) { r.LeaseDuration = 0 }, wantErr: true},
+		{name: "negative lease duration", mutate: func(r *ResumableConfig) { r.LeaseDuration = -time.Second }, wantErr: true},
+		{name: "sub-second lease duration", mutate: func(r *ResumableConfig) { r.LeaseDuration = 500 * time.Millisecond }, wantErr: true},
+		{name: "non-whole-second lease duration", mutate: func(r *ResumableConfig) { r.LeaseDuration = 1500 * time.Millisecond }, wantErr: true},
+		{name: "zero finalize concurrency", mutate: func(r *ResumableConfig) { r.FinalizeConcurrency = 0 }, wantErr: true},
+		{name: "zero finalize timeout", mutate: func(r *ResumableConfig) { r.FinalizeTimeout = 0 }, wantErr: true},
+		{name: "tuned values are valid", mutate: func(r *ResumableConfig) {
+			r.LeaseDuration = time.Minute
+			r.FinalizeConcurrency = 4
+			r.FinalizeTimeout = 5 * time.Minute
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewConfig()
+			c.DispatchMode = DispatchModeAsync
+			c.AsyncDispatchConfig.Models = map[string]AsyncModelConfig{
+				"model-a": {InferencePoolName: "pool-a"},
+				"model-b": {InferencePoolName: "pool-b"},
+			}
+			c.NumWorkers = 5
+			tt.mutate(&c.Resumable)
+
+			err := c.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatal("Validate() error = nil, want error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() unexpected error: %v", err)
+			}
+		})
+	}
 }
 
 func TestProcessorConfig_Validate_ExtraEndpoints(t *testing.T) {
@@ -126,6 +177,35 @@ func TestProcessorConfig_Validate_ExtraEndpoints(t *testing.T) {
 	c.ExtraEndpoints = []string{"/v1/classify?mode=test"}
 	if err := c.Validate(); err == nil {
 		t.Fatal("Validate() expected error for invalid extra endpoint")
+	}
+}
+
+func TestProcessorConfig_Validate_FileClientType(t *testing.T) {
+	tests := []struct {
+		ftype   string
+		wantErr bool
+	}{
+		{ftype: "fs"},
+		{ftype: "s3"},
+		{ftype: "gcs"},
+		{ftype: "mock"},
+		{ftype: "", wantErr: true},
+		{ftype: "xyz", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run("type="+tt.ftype, func(t *testing.T) {
+			c := NewConfig()
+			c.ModelGateways = validPerModelConfig()
+			c.FileClientCfg.Type = tt.ftype
+
+			err := c.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("Validate() error = nil, want error for file_client.type %q", tt.ftype)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() unexpected error for file_client.type %q: %v", tt.ftype, err)
+			}
+		})
 	}
 }
 
@@ -738,6 +818,69 @@ route_key_method: tenant
 	}
 }
 
+func TestProcessorConfig_AsyncTransportAndPollIntervalFlowFromYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	const yamlData = `
+dispatch_mode: async
+async_dispatch:
+  transport: sql
+  poll_interval: 275ms
+  max_connections: 7
+  result_poll_timeout: 11s
+  models:
+    model-a:
+      inference_pool_name: pool-a
+      request_queue_name: "custom:requests"
+      result_queue_name: "custom:results"
+`
+	if err := os.WriteFile(path, []byte(yamlData), 0o600); err != nil {
+		t.Fatalf("write YAML: %v", err)
+	}
+
+	cfg := NewConfig()
+	if err := cfg.LoadFromYAML(path); err != nil {
+		t.Fatalf("LoadFromYAML: %v", err)
+	}
+	if cfg.AsyncDispatchConfig.Transport != inference.AsyncTransportSQL {
+		t.Fatalf("parsed transport = %q, want %q", cfg.AsyncDispatchConfig.Transport, inference.AsyncTransportSQL)
+	}
+	if cfg.AsyncDispatchConfig.PollInterval != 275*time.Millisecond {
+		t.Fatalf("parsed poll interval = %v, want 275ms", cfg.AsyncDispatchConfig.PollInterval)
+	}
+	if cfg.AsyncDispatchConfig.MaxConnections != 7 {
+		t.Fatalf("parsed max connections = %d, want 7", cfg.AsyncDispatchConfig.MaxConnections)
+	}
+
+	resolved, err := ResolveModelGateways(cfg)
+	if err != nil {
+		t.Fatalf("ResolveModelGateways: %v", err)
+	}
+	if resolved.Async == nil {
+		t.Fatal("expected resolved async configuration")
+	}
+	if resolved.Async.Transport != inference.AsyncTransportSQL {
+		t.Fatalf("resolved transport = %q, want %q", resolved.Async.Transport, inference.AsyncTransportSQL)
+	}
+	if resolved.Async.PollInterval != 275*time.Millisecond {
+		t.Fatalf("resolved poll interval = %v, want 275ms", resolved.Async.PollInterval)
+	}
+	if resolved.Async.MaxConnections != 7 {
+		t.Fatalf("resolved max connections = %d, want 7", resolved.Async.MaxConnections)
+	}
+	if resolved.Async.ResultPollTimeout != 11*time.Second {
+		t.Fatalf("resolved result poll timeout = %v, want 11s", resolved.Async.ResultPollTimeout)
+	}
+	if resolved.Async.Models["model-a"].PoolName != "pool-a" {
+		t.Fatalf("resolved model pool = %q, want pool-a", resolved.Async.Models["model-a"].PoolName)
+	}
+	if resolved.Async.Models["model-a"].RequestQueueName != "custom:requests" {
+		t.Fatalf("resolved request queue = %q, want custom:requests", resolved.Async.Models["model-a"].RequestQueueName)
+	}
+	if resolved.Async.Models["model-a"].ResultQueueName != "custom:results" {
+		t.Fatalf("resolved result queue = %q, want custom:results", resolved.Async.Models["model-a"].ResultQueueName)
+	}
+}
+
 func TestValidate_RouteKeyMethod(t *testing.T) {
 	base := func() *ProcessorConfig {
 		c := NewConfig()
@@ -769,7 +912,9 @@ func TestProcessorConfig_Validate_AsyncDispatch(t *testing.T) {
 		c := NewConfig()
 		c.DispatchMode = DispatchModeAsync
 		c.AsyncDispatchConfig = AsyncDispatchConfig{
+			MaxConnections:    inference.DefaultSQLMaxConns,
 			ResultPollTimeout: 5 * time.Second,
+			PollInterval:      time.Second,
 			Models: map[string]AsyncModelConfig{
 				"llama-3": {InferencePoolName: "pool-a"},
 			},
@@ -786,6 +931,35 @@ func TestProcessorConfig_Validate_AsyncDispatch(t *testing.T) {
 			name:    "valid async config",
 			mutate:  func(_ *ProcessorConfig) {},
 			wantErr: false,
+		},
+		{
+			name: "SQL transport is valid",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.Transport = inference.AsyncTransportSQL
+			},
+			wantErr: false,
+		},
+		{
+			name: "SQL transport requires max connections",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.Transport = inference.AsyncTransportSQL
+				c.AsyncDispatchConfig.MaxConnections = 0
+			},
+			wantErr: true,
+		},
+		{
+			name: "redis transport ignores max connections",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.MaxConnections = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "unknown async transport rejected",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.Transport = "unknown"
+			},
+			wantErr: true,
 		},
 		{
 			name: "sync mode ignores async fields",
@@ -812,6 +986,11 @@ func TestProcessorConfig_Validate_AsyncDispatch(t *testing.T) {
 		{
 			name:    "async zero result_poll_timeout",
 			mutate:  func(c *ProcessorConfig) { c.AsyncDispatchConfig.ResultPollTimeout = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "async zero poll_interval",
+			mutate:  func(c *ProcessorConfig) { c.AsyncDispatchConfig.PollInterval = 0 },
 			wantErr: true,
 		},
 		{

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -241,8 +242,16 @@ func waitForBatchStatus(t *testing.T, batchID string, timeout time.Duration, tar
 		time.Sleep(pollInterval)
 	}
 
+	// The loop above never runs if the deadline was already past (it is capped
+	// at t.Deadline()-5s, which a test entered late in the `go test` timeout can
+	// overshoot), so lastBatch may still be nil. Report that instead of
+	// dereferencing it, which would panic and abort the whole test binary.
+	lastStatus := "<none>"
+	if lastBatch != nil {
+		lastStatus = string(lastBatch.Status)
+	}
 	t.Fatalf("batch %s did not reach status %v within %v (last status: %q)",
-		batchID, targets, timeout, lastBatch.Status)
+		batchID, targets, timeout, lastStatus)
 	return nil, nil // unreachable
 }
 
@@ -306,6 +315,36 @@ func waitForCompletedRequests(t *testing.T, batchID string, minCompleted int64, 
 		time.Sleep(pollInterval)
 	}
 	t.Fatalf("batch %s did not reach %d completed requests within %v", batchID, minCompleted, timeout)
+}
+
+// waitForPartialCompletedRequests waits until a nonzero proper subset of a
+// batch's requests has completed, so disruption tests do not rely on timing.
+func waitForPartialCompletedRequests(t *testing.T, batchID string, total int64, timeout time.Duration) {
+	t.Helper()
+
+	client := newClient()
+	const pollInterval = 500 * time.Millisecond
+
+	deadline := time.Now().Add(timeout)
+	if d, ok := t.Deadline(); ok && d.Before(deadline) {
+		deadline = d.Add(-5 * time.Second)
+	}
+	for time.Now().Before(deadline) {
+		batch, err := client.Batches.Get(context.Background(), batchID)
+		if err != nil {
+			t.Fatalf("retrieve batch failed: %v", err)
+		}
+		if batch.RequestCounts.Completed > 0 && batch.RequestCounts.Completed < total {
+			t.Logf("batch %s has a partial completed set: %d of %d", batchID, batch.RequestCounts.Completed, total)
+			return
+		}
+		if terminalBatchStatuses[batch.Status] {
+			t.Fatalf("batch %s reached terminal status %q before a partial completed set (completed=%d total=%d)",
+				batchID, batch.Status, batch.RequestCounts.Completed, total)
+		}
+		time.Sleep(pollInterval)
+	}
+	t.Fatalf("batch %s did not reach a partial completed set within %v", batchID, timeout)
 }
 
 // waitForIngestionFailure polls a batch until it reaches "failed" status.
@@ -676,25 +715,29 @@ const e2eCurlPod = "batch-gateway-e2e-curl"
 func ensureE2ECurlPod(t *testing.T) {
 	t.Helper()
 
-	if phaseOut, err := exec.Command("kubectl", "get", "pod",
+	// One query returns "<phase> <run-id>"; both are empty if the pod is absent.
+	out, err := exec.Command("kubectl", "get", "pod",
 		e2eCurlPod,
 		"-n", testNamespace,
-		"-o", "jsonpath={.status.phase}",
-	).CombinedOutput(); err != nil || strings.TrimSpace(string(phaseOut)) == "" {
-		createE2ECurlPod(t)
-	} else {
-		phase := strings.TrimSpace(string(phaseOut))
-		if phase != "Running" && phase != "Pending" {
-			out, deleteErr := exec.Command("kubectl", "delete", "pod",
-				e2eCurlPod,
-				"-n", testNamespace,
-				"--ignore-not-found",
-			).CombinedOutput()
-			if deleteErr != nil {
-				t.Fatalf("failed to delete stale e2e curl pod: %v\n%s", deleteErr, out)
-			}
-			createE2ECurlPod(t)
+		"--ignore-not-found",
+		"-o", `jsonpath={.status.phase} {.metadata.labels.e2e_run_id}`,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to read e2e curl pod: %v\n%s", err, out)
+	}
+	phase, podRunID, _ := strings.Cut(strings.TrimSpace(string(out)), " ")
+	if (phase != "Running" && phase != "Pending") || podRunID != testRunID {
+		// Recreating a pod from another run reaps loops it orphaned.
+		out, deleteErr := exec.Command("kubectl", "delete", "pod",
+			e2eCurlPod,
+			"-n", testNamespace,
+			"--ignore-not-found",
+			"--timeout=90s",
+		).CombinedOutput()
+		if deleteErr != nil {
+			t.Fatalf("failed to delete e2e curl pod from a previous run: %v\n%s", deleteErr, out)
 		}
+		createE2ECurlPod(t)
 	}
 
 	waitOut, err := exec.Command("kubectl", "wait",
@@ -711,18 +754,31 @@ func ensureE2ECurlPod(t *testing.T) {
 func createE2ECurlPod(t *testing.T) {
 	t.Helper()
 
+	// Numeric uid: runAsNonRoot can't verify a symbolic image USER on containerd.
 	manifest := fmt.Sprintf(`apiVersion: v1
 kind: Pod
 metadata:
   name: %s
   namespace: %s
+  labels:
+    e2e_run_id: "%s"
 spec:
   restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   containers:
   - name: curl
-    image: curlimages/curl:8.8.0
+    image: %s
     command: ["sleep", "infinity"]
-`, e2eCurlPod, testNamespace)
+    securityContext:
+      runAsUser: 100
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+`, e2eCurlPod, testNamespace, testRunID, testCurlImage)
 
 	cmd := exec.Command("kubectl", "create", "-f", "-")
 	cmd.Stdin = strings.NewReader(manifest)
@@ -1108,13 +1164,29 @@ func waitForProcessorReady(t *testing.T, timeout time.Duration) {
 	podLabel := fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/component=processor", testHelmRelease)
 	waitCtx, waitCancel := context.WithDeadline(context.Background(), deadline)
 	defer waitCancel()
-	if out, err := exec.CommandContext(waitCtx, "kubectl", "wait", "pod",
-		"-l", podLabel,
-		"-n", testNamespace,
-		"--for=condition=Ready",
-		fmt.Sprintf("--timeout=%ds", int(time.Until(deadline).Seconds())),
-	).CombinedOutput(); err != nil {
-		t.Fatalf("processor pod not ready after %v: %v\n%s", timeout, err, out)
+	// Wait for the processor pod to be Running and Ready before attempting
+	// a port-forward. The replacement pod may not exist yet when this runs:
+	// kubectl delete returns after the old pod is fully removed, and until the
+	// StatefulSet controller creates the replacement, kubectl wait matches no
+	// resources and fails immediately instead of waiting. Retry while the
+	// selector matches nothing, bounded by the overall deadline.
+	for {
+		out, err := exec.CommandContext(waitCtx, "kubectl", "wait", "pod",
+			"-l", podLabel,
+			"-n", testNamespace,
+			"--for=condition=Ready",
+			fmt.Sprintf("--timeout=%ds", int(time.Until(deadline).Seconds())),
+		).CombinedOutput()
+		if err == nil {
+			break
+		}
+		if !strings.Contains(string(out), "no matching resources found") {
+			t.Fatalf("processor pod not ready after %v: %v\n%s", timeout, err, out)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("processor pod not ready after %v: %v\n%s", timeout, err, out)
+		}
+		time.Sleep(time.Second)
 	}
 
 	for {
@@ -1150,4 +1222,79 @@ func waitForProcessorReady(t *testing.T, timeout time.Duration) {
 		}
 		time.Sleep(time.Second)
 	}
+}
+
+// processorWorkload returns the Processor workload as kind/name.
+func processorWorkload(t *testing.T) string {
+	t.Helper()
+
+	selector := fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/component=processor", testHelmRelease)
+	var workloads []string
+	var discoveryErrors []string
+	for _, kind := range []string{"deployment", "statefulset"} {
+		out, err := exec.Command("kubectl", "get", kind,
+			"-n", testNamespace,
+			"-l", selector,
+			"-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`,
+		).CombinedOutput()
+		if err != nil {
+			discoveryErrors = append(discoveryErrors, fmt.Sprintf("%s: %v: %s", kind, err, strings.TrimSpace(string(out))))
+			continue
+		}
+		for _, name := range strings.Fields(string(out)) {
+			workloads = append(workloads, kind+"/"+name)
+		}
+	}
+	if len(workloads) != 1 {
+		t.Fatalf("find one Processor workload with selector %q: found %v; discovery errors: %v", selector, workloads, discoveryErrors)
+	}
+	return workloads[0]
+}
+
+// processorReplicaCount returns the current replica count of the workload.
+func processorReplicaCount(t *testing.T, workload string) int {
+	t.Helper()
+
+	out, err := exec.Command("kubectl", "get", workload,
+		"-n", testNamespace, "-o", "jsonpath={.spec.replicas}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("get Processor replica count for %s: %v\n%s", workload, err, out)
+	}
+	replicas, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatalf("parse Processor replica count %q: %v", out, err)
+	}
+	return replicas
+}
+
+// scaleProcessorWorkload scales the Processor workload to the given replica
+// count and waits for the rollout to complete.
+func scaleProcessorWorkload(workload string, replicas int) error {
+	out, err := exec.Command("kubectl", "scale", workload,
+		"-n", testNamespace, fmt.Sprintf("--replicas=%d", replicas)).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("scale Processor to %d replicas: %w\n%s", replicas, err, out)
+	}
+	out, err = exec.Command("kubectl", "rollout", "status", workload,
+		"-n", testNamespace, "--timeout=180s").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("wait for %d Processor replicas: %w\n%s", replicas, err, out)
+	}
+	return nil
+}
+
+// processorPodNames returns the names of the Processor pods.
+func processorPodNames(t *testing.T) []string {
+	t.Helper()
+
+	selector := fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/component=processor", testHelmRelease)
+	out, err := exec.Command("kubectl", "get", "pods",
+		"-n", testNamespace,
+		"-l", selector,
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("list Processor pods: %v\n%s", err, out)
+	}
+	return strings.Fields(string(out))
 }
