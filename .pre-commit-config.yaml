@@ -27,6 +27,12 @@ repos:
         language: system
         pass_filenames: false
         files: '^benchmarks/.*\.py$'
+      - id: scripts-unit-tests
+        name: scripts unit tests
+        entry: python3 -m unittest discover -s scripts -p test_*.py
+        language: system
+        pass_filenames: false
+        files: '^scripts/.*\.py$'
       - id: go-vet
         name: go vet
         entry: go vet ./...
