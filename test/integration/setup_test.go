@@ -42,7 +42,20 @@ import (
 const (
 	testTenantID     = "test-tenant"
 	testTenantHeader = "X-Test-Tenant"
+	testProxyToken   = "test-proxy-token"
 )
+
+// proxyTokenTransport adds the proxy token to every request, the way the auth
+// proxy in front of the API server does.
+type proxyTokenTransport struct {
+	next http.RoundTripper
+}
+
+func (p proxyTokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set(common.DefaultProxyTokenHeader, testProxyToken)
+	return p.next.RoundTrip(req)
+}
 
 type testServer struct {
 	URL    string
@@ -108,6 +121,7 @@ func newTestServer(t *testing.T) *testServer {
 		InputHeaders: map[string]string{
 			common.InputHeaderKeyTenant: testTenantHeader,
 		},
+		ProxyToken: testProxyToken,
 		FileAPI: common.FileAPIConfig{
 			MaxSizeBytes:             common.DefaultMaxFileSizeBytes,
 			MaxLineCount:             common.DefaultMaxFileLineCount,
@@ -128,6 +142,7 @@ func newTestServer(t *testing.T) *testServer {
 		middleware.Recovery,
 		middleware.NewRequestMiddleware(config),
 		middleware.SecurityHeaders,
+		middleware.NewProxyTokenMiddleware(config),
 		middleware.RequireTenant,
 	}
 	for _, h := range []common.ApiHandler{fileHandler, batchHandler} {
@@ -143,7 +158,7 @@ func newTestServer(t *testing.T) *testServer {
 
 	return &testServer{
 		URL:     srv.URL,
-		Client:  srv.Client(),
+		Client:  &http.Client{Transport: proxyTokenTransport{next: srv.Client().Transport}},
 		batchDB: batchDB,
 		fileDB:  fileDB,
 		queue:   queue,
