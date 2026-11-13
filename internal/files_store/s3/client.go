@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -44,6 +45,18 @@ import (
 
 const (
 	defaultTimeout = 30 * time.Second
+
+	// publishBufferLimit is the largest staged object that publish copies
+	// through memory into a single conditional PutObject. Larger objects are
+	// published with a server-side multipart copy, so the processor never
+	// holds them in memory and S3's 5 GiB single PutObject limit does not
+	// apply.
+	publishBufferLimit = 64 << 20
+
+	// minCopyPartSize is the part size of the multipart publish copy. It
+	// grows for objects that would otherwise need more than maxCopyParts.
+	minCopyPartSize = 512 << 20
+	maxCopyParts    = 10000
 )
 
 type s3API interface {
@@ -55,6 +68,10 @@ type s3API interface {
 	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
 	CreateBucket(ctx context.Context, params *s3.CreateBucketInput, optFns ...func(*s3.Options)) (*s3.CreateBucketOutput, error)
 	HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
+	CreateMultipartUpload(ctx context.Context, params *s3.CreateMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error)
+	UploadPartCopy(ctx context.Context, params *s3.UploadPartCopyInput, optFns ...func(*s3.Options)) (*s3.UploadPartCopyOutput, error)
+	CompleteMultipartUpload(ctx context.Context, params *s3.CompleteMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error)
+	AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error)
 }
 
 type uploaderAPI interface {
@@ -259,8 +276,8 @@ var errStreamAborted = errors.New("stream aborted")
 // context passed here: cancelling it fails subsequent writes. The bytes go
 // to a unique staging key and become visible at the destination only when
 // the returned StreamWriter is committed — the commit publishes with a
-// create-only conditional write, which the multipart upload of a large body
-// cannot carry itself.
+// create-only conditional write, which the manager's multipart upload of a
+// large body cannot carry itself.
 func (c *Client) OpenStream(ctx context.Context, fileName, folderName string) (api.StreamWriter, error) {
 	key := c.buildKey(folderName, fileName)
 
@@ -281,12 +298,14 @@ func (c *Client) OpenStream(ctx context.Context, fileName, folderName string) (a
 
 	pr, pw := io.Pipe()
 	w := &s3StreamWriter{
-		pw:         pw,
-		s3Client:   c.s3Client,
-		done:       make(chan error, 1),
-		bucket:     c.bucket,
-		key:        key,
-		stagingKey: stagingKey,
+		pw:          pw,
+		s3Client:    c.s3Client,
+		done:        make(chan error, 1),
+		bucket:      c.bucket,
+		key:         key,
+		stagingKey:  stagingKey,
+		bufferLimit: publishBufferLimit,
+		minPartSize: minCopyPartSize,
 	}
 	go func() {
 		_, uploadErr := c.uploader.Upload(ctx, &s3.PutObjectInput{
@@ -318,6 +337,11 @@ type s3StreamWriter struct {
 	key        string
 	stagingKey string
 	bytes      int64
+	// bufferLimit and minPartSize are publishBufferLimit and
+	// minCopyPartSize; fields so tests can exercise the multipart publish
+	// with small objects.
+	bufferLimit int64
+	minPartSize int64
 }
 
 var _ api.StreamWriter = (*s3StreamWriter)(nil)
@@ -350,13 +374,19 @@ func (w *s3StreamWriter) Commit(ctx context.Context) (*api.BatchFileMetadata, er
 // publish moves the staged object to its destination with an If-None-Match
 // conditional write, making the commit create-only: a writer that opened
 // its stream before the current owner published gets ErrFileExists instead
-// of replacing the winner's object. The staged bytes are buffered first:
-// the SDK's S3 payload-hash middleware reads the PUT body to compute
-// x-amz-content-sha256 and rewinds it, so the body must be seekable — a
-// streaming GetObject body cannot be rewound, and plain-HTTP S3-compatible
-// endpoints (no unsigned-payload escape) cannot sign a streaming body.
-// Store publishes seekable bodies the same way.
+// of replacing the winner's object. Objects above bufferLimit are copied
+// server-side (publishMultipart); smaller ones are buffered and re-uploaded
+// with one PutObject, which every S3-compatible store honors the condition
+// on. The buffer is needed because the SDK's S3 payload-hash middleware
+// reads the PUT body to compute x-amz-content-sha256 and rewinds it, so the
+// body must be seekable: a streaming GetObject body cannot be rewound, and
+// plain-HTTP S3-compatible endpoints (no unsigned-payload escape) cannot
+// sign a streaming body. Store publishes seekable bodies the same way.
 func (w *s3StreamWriter) publish(ctx context.Context) (*api.BatchFileMetadata, error) {
+	if w.bytes > w.bufferLimit {
+		return w.publishMultipart(ctx)
+	}
+
 	staged, err := w.s3Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(w.bucket),
 		Key:    aws.String(w.stagingKey),
@@ -382,40 +412,159 @@ func (w *s3StreamWriter) publish(ctx context.Context) (*api.BatchFileMetadata, e
 		IfNoneMatch:   aws.String("*"),
 	})
 	if err != nil {
-		// This SDK version surfaces the 412 only as an error code, not a
-		// typed error.
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "PreconditionFailed" {
-			// Another writer published first: the winner's object stands, and
-			// this stream's staged bytes are garbage.
-			if _, delErr := w.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
-				Bucket: aws.String(w.bucket),
-				Key:    aws.String(w.stagingKey),
-			}); delErr != nil {
-				logr.FromContextOrDiscard(ctx).Error(delErr, "Failed to delete staged object", "key", w.stagingKey)
-			}
-			return nil, fmt.Errorf("%w: %s", api.ErrFileExists, w.key)
+		if isPreconditionFailed(err) {
+			return nil, w.lostPublish(ctx)
 		}
 		return nil, err
 	}
 
-	// The destination owns the bytes now; drop the staging object.
+	w.deleteStaged(ctx)
+	return &api.BatchFileMetadata{
+		Location: w.key,
+		Size:     size,
+		ModTime:  lastModifiedOrNow(staged.LastModified),
+	}, nil
+}
+
+// publishMultipart publishes a staged object too large to buffer: each part
+// of a multipart upload to the destination is copied server-side from the
+// staged object (UploadPartCopy), and CompleteMultipartUpload carries the
+// If-None-Match condition. No bytes pass through the processor, and the
+// object may exceed the 5 GiB single PutObject limit.
+func (w *s3StreamWriter) publishMultipart(ctx context.Context) (*api.BatchFileMetadata, error) {
+	head, err := w.s3Client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(w.bucket),
+		Key:    aws.String(w.stagingKey),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("head staged object %s: %w", w.stagingKey, err)
+	}
+	size := aws.ToInt64(head.ContentLength)
+
+	created, err := w.s3Client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(w.bucket),
+		Key:    aws.String(w.key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create multipart upload %s: %w", w.key, err)
+	}
+	uploadID := created.UploadId
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		// Drop the uploaded parts even when ctx was cancelled: S3 keeps (and
+		// bills) the parts of an unfinished upload until it is aborted.
+		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultTimeout)
+		defer cancel()
+		if _, err := w.s3Client.AbortMultipartUpload(abortCtx, &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(w.bucket),
+			Key:      aws.String(w.key),
+			UploadId: uploadID,
+		}); err != nil {
+			logr.FromContextOrDiscard(ctx).Error(err, "Failed to abort multipart upload", "key", w.key)
+		}
+	}()
+
+	copySource := encodeCopySource(w.bucket, w.stagingKey)
+	partSize := copyPartSize(size, w.minPartSize)
+	parts := make([]types.CompletedPart, 0, (size+partSize-1)/partSize)
+	for start, num := int64(0), int32(1); start < size; start, num = start+partSize, num+1 {
+		end := min(start+partSize, size) - 1
+		out, err := w.s3Client.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+			Bucket:          aws.String(w.bucket),
+			Key:             aws.String(w.key),
+			UploadId:        uploadID,
+			PartNumber:      aws.Int32(num),
+			CopySource:      aws.String(copySource),
+			CopySourceRange: aws.String(fmt.Sprintf("bytes=%d-%d", start, end)),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("copy part %d of %s: %w", num, w.stagingKey, err)
+		}
+		if out.CopyPartResult == nil {
+			return nil, fmt.Errorf("copy part %d of %s: empty result", num, w.stagingKey)
+		}
+		r := out.CopyPartResult
+		parts = append(parts, types.CompletedPart{
+			PartNumber:        aws.Int32(num),
+			ETag:              r.ETag,
+			ChecksumCRC32:     r.ChecksumCRC32,
+			ChecksumCRC32C:    r.ChecksumCRC32C,
+			ChecksumCRC64NVME: r.ChecksumCRC64NVME,
+			ChecksumSHA1:      r.ChecksumSHA1,
+			ChecksumSHA256:    r.ChecksumSHA256,
+		})
+	}
+
+	_, err = w.s3Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(w.bucket),
+		Key:             aws.String(w.key),
+		UploadId:        uploadID,
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+		IfNoneMatch:     aws.String("*"),
+	})
+	if err != nil {
+		if isPreconditionFailed(err) {
+			return nil, w.lostPublish(ctx)
+		}
+		return nil, fmt.Errorf("complete multipart upload %s: %w", w.key, err)
+	}
+	completed = true
+
+	w.deleteStaged(ctx)
+	return &api.BatchFileMetadata{
+		Location: w.key,
+		Size:     size,
+		ModTime:  lastModifiedOrNow(head.LastModified),
+	}, nil
+}
+
+// copyPartSize returns the part size for a multipart copy of size bytes:
+// minPartSize, grown when needed to stay within maxCopyParts parts.
+func copyPartSize(size, minPartSize int64) int64 {
+	return max(minPartSize, (size+maxCopyParts-1)/maxCopyParts)
+}
+
+// encodeCopySource returns the x-amz-copy-source value for key in bucket.
+func encodeCopySource(bucket, key string) string {
+	return strings.ReplaceAll(url.PathEscape(bucket+"/"+key), "+", "%2B")
+}
+
+// lastModifiedOrNow returns the object's Last-Modified time, or now when the
+// store did not report one.
+func lastModifiedOrNow(t *time.Time) time.Time {
+	if t == nil {
+		return time.Now()
+	}
+	return *t
+}
+
+// isPreconditionFailed reports whether err is the 412 of a conditional
+// write. This SDK version surfaces it only as an error code, not a typed
+// error.
+func isPreconditionFailed(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "PreconditionFailed"
+}
+
+// lostPublish handles a publish that lost the create-only race: another
+// writer published first, the winner's object stands, and this stream's
+// staged bytes are garbage.
+func (w *s3StreamWriter) lostPublish(ctx context.Context) error {
+	w.deleteStaged(ctx)
+	return fmt.Errorf("%w: %s", api.ErrFileExists, w.key)
+}
+
+// deleteStaged removes the staging object best-effort.
+func (w *s3StreamWriter) deleteStaged(ctx context.Context) {
 	if _, err := w.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(w.bucket),
 		Key:    aws.String(w.stagingKey),
 	}); err != nil {
 		logr.FromContextOrDiscard(ctx).Error(err, "Failed to delete staged object", "key", w.stagingKey)
 	}
-
-	modTime := time.Now()
-	if staged.LastModified != nil {
-		modTime = *staged.LastModified
-	}
-	return &api.BatchFileMetadata{
-		Location: w.key,
-		Size:     size,
-		ModTime:  modTime,
-	}, nil
 }
 
 func (w *s3StreamWriter) Abort(ctx context.Context) error {

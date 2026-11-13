@@ -20,8 +20,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,6 +59,23 @@ type mockS3Client struct {
 	// reads and rewinds the body, so a streaming body breaks plain-HTTP
 	// S3-compatible endpoints.
 	lastPutBodySeekable bool
+	// putCalls counts PutObject invocations.
+	putCalls int
+	// uploads holds the parts of in-progress multipart uploads by upload ID.
+	uploads       map[string]*mockUpload
+	nextUploadID  int
+	partCopyErr   error
+	partCopyCalls int
+	aborts        int
+	// abortCtxErr and abortDeadline record the state of the context the
+	// last AbortMultipartUpload received.
+	abortCtxErr   error
+	abortDeadline time.Time
+}
+
+type mockUpload struct {
+	key   string
+	parts map[int32][]byte
 }
 
 type mockObject struct {
@@ -71,6 +92,7 @@ func newMockS3Client() *mockS3Client {
 	return &mockS3Client{
 		objects: make(map[string]mockObject),
 		buckets: map[string]bool{testBucketName: true},
+		uploads: make(map[string]*mockUpload),
 	}
 }
 
@@ -133,6 +155,7 @@ func (m *mockS3Client) GetObject(_ context.Context, params *s3.GetObjectInput, _
 }
 
 func (m *mockS3Client) PutObject(_ context.Context, params *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	m.putCalls++
 	_, m.lastPutBodySeekable = params.Body.(io.ReadSeeker)
 	if params.IfNoneMatch != nil && *params.IfNoneMatch == "*" {
 		if _, exists := m.objects[*params.Key]; exists {
@@ -200,6 +223,82 @@ func (m *mockS3Client) ListObjectsV2(_ context.Context, params *s3.ListObjectsV2
 		Contents:    contents,
 		IsTruncated: aws.Bool(false),
 	}, nil
+}
+
+func (m *mockS3Client) CreateMultipartUpload(_ context.Context, params *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	m.nextUploadID++
+	id := strconv.Itoa(m.nextUploadID)
+	m.uploads[id] = &mockUpload{key: *params.Key, parts: make(map[int32][]byte)}
+	return &s3.CreateMultipartUploadOutput{UploadId: aws.String(id)}, nil
+}
+
+func (m *mockS3Client) UploadPartCopy(_ context.Context, params *s3.UploadPartCopyInput, _ ...func(*s3.Options)) (*s3.UploadPartCopyOutput, error) {
+	m.partCopyCalls++
+	if m.partCopyErr != nil {
+		return nil, m.partCopyErr
+	}
+	upload, ok := m.uploads[*params.UploadId]
+	if !ok {
+		return nil, &types.NoSuchUpload{}
+	}
+	source, err := url.QueryUnescape(*params.CopySource)
+	if err != nil {
+		return nil, err
+	}
+	srcKey, ok := strings.CutPrefix(source, testBucketName+"/")
+	if !ok {
+		return nil, fmt.Errorf("copy source %q is not in bucket %s", source, testBucketName)
+	}
+	obj, ok := m.objects[srcKey]
+	if !ok {
+		return nil, &types.NoSuchKey{}
+	}
+	var start, end int
+	if _, err := fmt.Sscanf(*params.CopySourceRange, "bytes=%d-%d", &start, &end); err != nil {
+		return nil, err
+	}
+	if start > end || end >= len(obj.data) {
+		return nil, fmt.Errorf("invalid range %s for %d bytes", *params.CopySourceRange, len(obj.data))
+	}
+	upload.parts[*params.PartNumber] = bytes.Clone(obj.data[start : end+1])
+	etag := fmt.Sprintf("etag-%d", *params.PartNumber)
+	return &s3.UploadPartCopyOutput{CopyPartResult: &types.CopyPartResult{ETag: aws.String(etag)}}, nil
+}
+
+func (m *mockS3Client) CompleteMultipartUpload(_ context.Context, params *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	upload, ok := m.uploads[*params.UploadId]
+	if !ok {
+		return nil, &types.NoSuchUpload{}
+	}
+	if aws.ToString(params.IfNoneMatch) == "*" {
+		if _, exists := m.objects[*params.Key]; exists {
+			return nil, &smithy.GenericAPIError{Code: "PreconditionFailed", Message: "object already exists"}
+		}
+	}
+	var data []byte
+	for i, part := range params.MultipartUpload.Parts {
+		if *part.PartNumber != int32(i+1) {
+			return nil, fmt.Errorf("part %d out of order", *part.PartNumber)
+		}
+		if want := fmt.Sprintf("etag-%d", *part.PartNumber); aws.ToString(part.ETag) != want {
+			return nil, fmt.Errorf("part %d: etag %q, want %q", *part.PartNumber, aws.ToString(part.ETag), want)
+		}
+		data = append(data, upload.parts[*part.PartNumber]...)
+	}
+	m.objects[upload.key] = mockObject{data: data, lastModTime: time.Now()}
+	delete(m.uploads, *params.UploadId)
+	return &s3.CompleteMultipartUploadOutput{}, nil
+}
+
+func (m *mockS3Client) AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	m.aborts++
+	m.abortCtxErr = ctx.Err()
+	m.abortDeadline, _ = ctx.Deadline()
+	if _, ok := m.uploads[*params.UploadId]; !ok {
+		return nil, &types.NoSuchUpload{}
+	}
+	delete(m.uploads, *params.UploadId)
+	return &s3.AbortMultipartUploadOutput{}, nil
 }
 
 func newTestClient(mock *mockS3Client) *Client {
@@ -881,6 +980,222 @@ func TestOpenStream(t *testing.T) {
 			t.Errorf("expected ErrFileExists, got %v", err)
 		}
 	})
+}
+
+// openSmallPartStream opens a stream whose commit takes the multipart copy
+// path for any object over 4 bytes, in parts of 3 bytes.
+func openSmallPartStream(t *testing.T, client *Client) *s3StreamWriter {
+	t.Helper()
+	sw, err := client.OpenStream(context.Background(), "out.jsonl", testFolderName)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	w, ok := sw.(*s3StreamWriter)
+	if !ok {
+		t.Fatalf("unexpected stream writer type %T", sw)
+	}
+	w.bufferLimit = 4
+	w.minPartSize = 3
+	return w
+}
+
+func TestOpenStream_MultipartPublish(t *testing.T) {
+	key := testFolderName + "/out.jsonl"
+
+	t.Run("a large object is copied server-side, not buffered", func(t *testing.T) {
+		ctx := context.Background()
+		mock := newMockS3Client()
+		client := newTestClient(mock)
+		content := []byte("line1\nline2\n")
+
+		w := openSmallPartStream(t, client)
+		if _, err := w.Write(content); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		md, err := w.Commit(ctx)
+		if err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if md.Size != int64(len(content)) || md.Location != key {
+			t.Errorf("metadata = %+v, want size %d at %s", md, len(content), key)
+		}
+		if got := string(mock.objects[key].data); got != string(content) {
+			t.Errorf("published content = %q, want %q", got, content)
+		}
+		if mock.putCalls != 0 {
+			t.Errorf("expected no PutObject, got %d", mock.putCalls)
+		}
+		if want := (len(content) + 2) / 3; mock.partCopyCalls != want {
+			t.Errorf("expected %d part copies, got %d", want, mock.partCopyCalls)
+		}
+		if len(mock.objects) != 1 {
+			t.Errorf("expected only the destination object, got %v", mock.objects)
+		}
+		if len(mock.uploads) != 0 || mock.aborts != 0 {
+			t.Errorf("expected no pending or aborted uploads, got %d pending and %d aborts", len(mock.uploads), mock.aborts)
+		}
+	})
+
+	t.Run("a staging key containing + is copied", func(t *testing.T) {
+		mock := newMockS3Client()
+		client := newTestClient(mock)
+		client.prefix = "a+b c"
+		content := []byte("line1\nline2\n")
+
+		w := openSmallPartStream(t, client)
+		if _, err := w.Write(content); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		md, err := w.Commit(context.Background())
+		if err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		prefixed := "a+b c/" + key
+		if md.Location != prefixed {
+			t.Errorf("location = %s, want %s", md.Location, prefixed)
+		}
+		if got := string(mock.objects[prefixed].data); got != string(content) {
+			t.Errorf("published content = %q, want %q", got, content)
+		}
+	})
+
+	t.Run("commit is create-only: a stale writer cannot replace the winner's object", func(t *testing.T) {
+		ctx := context.Background()
+		mock := newMockS3Client()
+		client := newTestClient(mock)
+
+		winner := openSmallPartStream(t, client)
+		stale := openSmallPartStream(t, client)
+		if _, err := winner.Write([]byte("winner")); err != nil {
+			t.Fatalf("write winner: %v", err)
+		}
+		if _, err := stale.Write([]byte("stale!")); err != nil {
+			t.Fatalf("write stale: %v", err)
+		}
+		if _, err := winner.Commit(ctx); err != nil {
+			t.Fatalf("winner commit: %v", err)
+		}
+		if _, err := stale.Commit(ctx); !errors.Is(err, api.ErrFileExists) {
+			t.Fatalf("stale commit: expected ErrFileExists, got %v", err)
+		}
+
+		if got := string(mock.objects[key].data); got != "winner" {
+			t.Errorf("published content = %q, want the winner's %q", got, "winner")
+		}
+		if len(mock.objects) != 1 {
+			t.Errorf("expected only the destination object, got %v", mock.objects)
+		}
+		if len(mock.uploads) != 0 || mock.aborts != 1 {
+			t.Errorf("expected the stale upload aborted, got %d pending and %d aborts", len(mock.uploads), mock.aborts)
+		}
+	})
+
+	t.Run("a failed part copy aborts the upload and publishes nothing", func(t *testing.T) {
+		ctx := context.Background()
+		mock := newMockS3Client()
+		mock.partCopyErr = errors.New("injected part copy failure")
+		client := newTestClient(mock)
+
+		w := openSmallPartStream(t, client)
+		if _, err := w.Write([]byte("line1\n")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if _, err := w.Commit(ctx); !errors.Is(err, mock.partCopyErr) {
+			t.Fatalf("commit: expected the part copy error, got %v", err)
+		}
+		if _, ok := mock.objects[key]; ok {
+			t.Error("expected no destination object")
+		}
+		if len(mock.uploads) != 0 || mock.aborts != 1 {
+			t.Errorf("expected the upload aborted, got %d pending and %d aborts", len(mock.uploads), mock.aborts)
+		}
+	})
+
+	t.Run("the abort outlives a cancelled context and has a deadline", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		mock := newMockS3Client()
+		mock.partCopyErr = context.Canceled
+		client := newTestClient(mock)
+
+		w := openSmallPartStream(t, client)
+		if _, err := w.Write([]byte("line1\n")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if _, err := w.Commit(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("commit: expected context.Canceled, got %v", err)
+		}
+		if len(mock.uploads) != 0 || mock.aborts != 1 {
+			t.Errorf("expected the upload aborted, got %d pending and %d aborts", len(mock.uploads), mock.aborts)
+		}
+		if mock.abortCtxErr != nil {
+			t.Errorf("abort context was already done: %v", mock.abortCtxErr)
+		}
+		if left := time.Until(mock.abortDeadline); left <= 0 || left > defaultTimeout {
+			t.Errorf("abort deadline is %s away, want within %s", left, defaultTimeout)
+		}
+	})
+
+	t.Run("an object at the buffer limit is still published with PutObject", func(t *testing.T) {
+		ctx := context.Background()
+		mock := newMockS3Client()
+		client := newTestClient(mock)
+
+		w := openSmallPartStream(t, client)
+		if _, err := w.Write([]byte("four")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if _, err := w.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if mock.putCalls != 1 || mock.partCopyCalls != 0 {
+			t.Errorf("expected 1 PutObject and no part copies, got %d and %d", mock.putCalls, mock.partCopyCalls)
+		}
+	})
+}
+
+func TestCopyPartSize(t *testing.T) {
+	tests := []struct {
+		name string
+		size int64
+		want int64
+	}{
+		{name: "small object uses the minimum part size", size: 100 << 20, want: minCopyPartSize},
+		{name: "object at the minimum part size times the part cap", size: minCopyPartSize * maxCopyParts, want: minCopyPartSize},
+		{name: "larger object grows the part size to fit the part cap", size: minCopyPartSize*maxCopyParts + 1, want: minCopyPartSize + 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := copyPartSize(tt.size, minCopyPartSize)
+			if got != tt.want {
+				t.Errorf("copyPartSize(%d) = %d, want %d", tt.size, got, tt.want)
+			}
+			if parts := (tt.size + got - 1) / got; parts > maxCopyParts {
+				t.Errorf("copyPartSize(%d) needs %d parts, more than %d", tt.size, parts, maxCopyParts)
+			}
+		})
+	}
+}
+
+func TestEncodeCopySource(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{name: "plain key", key: "t-folder/out.jsonl", want: "test-bucket%2Ft-folder%2Fout.jsonl"},
+		{name: "plus sign", key: "a+b/out.jsonl", want: "test-bucket%2Fa%2Bb%2Fout.jsonl"},
+		{name: "space", key: "a b/out.jsonl", want: "test-bucket%2Fa%20b%2Fout.jsonl"},
+		{name: "percent", key: "a%2Bb/out.jsonl", want: "test-bucket%2Fa%252Bb%2Fout.jsonl"},
+		{name: "non-ASCII", key: "é/out.jsonl", want: "test-bucket%2F%C3%A9%2Fout.jsonl"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := encodeCopySource(testBucketName, tt.key); got != tt.want {
+				t.Errorf("encodeCopySource(%q) = %q, want %q", tt.key, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestOpenStream_AbortAfterFailedCommitDoesNotHang(t *testing.T) {
