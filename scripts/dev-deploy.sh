@@ -1131,6 +1131,7 @@ install_batch_gateway() {
         --set "global.otel.postgresqlTracing=true"
         --set "global.dbClient.type=${DB_CLIENT_TYPE}"
         --set "apiserver.config.enablePprof=true"
+        --set "apiserver.config.allowAnonymousTenant=true"
         --set "processor.config.enablePprof=true"
         --set "processor.config.heartbeatInterval=10s"
         --set "processor.resources.requests.memory=256Mi"

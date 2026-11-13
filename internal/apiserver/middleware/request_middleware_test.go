@@ -50,6 +50,7 @@ func TestRequestMiddleware_TenantHeader(t *testing.T) {
 	tests := []struct {
 		name           string
 		headerValues   []string // values to add for the tenant header
+		allowAnonymous bool
 		expectedTenant string
 	}{
 		{
@@ -58,9 +59,21 @@ func TestRequestMiddleware_TenantHeader(t *testing.T) {
 			expectedTenant: "real-user",
 		},
 		{
-			name:           "no tenant header falls back to default",
+			name:           "no tenant header leaves the tenant empty",
 			headerValues:   nil,
+			expectedTenant: "",
+		},
+		{
+			name:           "no tenant header falls back to default when anonymous tenants are allowed",
+			headerValues:   nil,
+			allowAnonymous: true,
 			expectedTenant: common.DefaultTenantID,
+		},
+		{
+			name:           "tenant header wins when anonymous tenants are allowed",
+			headerValues:   []string{"real-user"},
+			allowAnonymous: true,
+			expectedTenant: "real-user",
 		},
 		{
 			// Workaround for ext_authz append behavior: when a client sends a
@@ -76,8 +89,14 @@ func TestRequestMiddleware_TenantHeader(t *testing.T) {
 			expectedTenant: "third",
 		},
 		{
-			name:           "empty single header falls back to default",
+			name:           "empty single header leaves the tenant empty",
 			headerValues:   []string{""},
+			expectedTenant: "",
+		},
+		{
+			name:           "empty single header falls back to default when anonymous tenants are allowed",
+			headerValues:   []string{""},
+			allowAnonymous: true,
 			expectedTenant: common.DefaultTenantID,
 		},
 	}
@@ -85,7 +104,8 @@ func TestRequestMiddleware_TenantHeader(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config := newTestConfig(tenantHeader)
-			var captured string
+			config.AllowAnonymousTenant = tt.allowAnonymous
+			captured := "unset"
 			handler := wrapWithRequestMiddleware(config, func(w http.ResponseWriter, r *http.Request) {
 				if v, ok := r.Context().Value(common.TenantIDKey).(string); ok {
 					captured = v

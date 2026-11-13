@@ -276,6 +276,8 @@ Images are published to:
 
 ## API Usage
 
+The API server reads the caller's identity from the tenant header (`X-MaaS-Username` by default), which the auth proxy injects. It rejects requests without that header with `401`, unless `allow_anonymous_tenant` is set, as in the local development config `cmd/apiserver/config.yaml`.
+
 ### Submit a Batch Job
 
 ```bash
