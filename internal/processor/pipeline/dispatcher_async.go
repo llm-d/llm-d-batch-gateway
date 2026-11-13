@@ -61,6 +61,7 @@ func (d *AsyncDispatcher) Run(ctx context.Context, requestCh <-chan RequestItem,
 			Endpoint:  msg.Endpoint,
 			Params:    msg.Body,
 			Headers:   msg.Headers,
+			Metadata:  msg.Metadata,
 		}
 
 		if submitErr := client.Submit(ctx, req); submitErr != nil {

@@ -33,6 +33,7 @@ type GenerateRequest struct {
 	Endpoint  string                 // API endpoint (e.g., "/v1/chat/completions")
 	Params    map[string]interface{} // parameters (must include "model")
 	Headers   map[string]string      // extra headers to forward to the endpoint
+	Metadata  map[string]string      // async request metadata for dispatch gates; not mutated
 }
 
 // GenerateResponse represents an inference generation response.

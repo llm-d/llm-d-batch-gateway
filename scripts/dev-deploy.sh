@@ -858,9 +858,10 @@ install_vllm_sim() {
     local vllm_extra_args="--reasoning-parser none --tool-call-parser none"
 
     if [[ "${ENABLE_DISPATCHER}" == "true" && "${sim_model}" == "${VLLM_SIM_MODEL}" ]]; then
-        # The composed dispatch-gate E2E routes this dedicated model alias to sim-pool-gate.
+        # The composed dispatch-gate and quota E2Es route these dedicated model
+        # aliases to sim-pool-gate and sim-pool-quota.
         served_model_name=""
-        vllm_extra_args="--served-model-name ${sim_model} sim-model-gate ${vllm_extra_args}"
+        vllm_extra_args="--served-model-name ${sim_model} sim-model-gate sim-model-quota ${vllm_extra_args}"
     fi
 
     step "Installing vllm-vcr '${sim_name}' (model: ${sim_model}, ttft=${time_to_first_token_ms}ms, itl=${inter_token_latency_ms}ms)..."

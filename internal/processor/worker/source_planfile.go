@@ -30,6 +30,7 @@ type PlanFileSource struct {
 	passThroughHeaders map[string]string
 	sloDeadline        time.Time
 	tenantID           string
+	metadata           map[string]string
 	batchID            string
 	skip               func(requestID string) bool
 	// recover holds request IDs whose results may still be recoverable from
@@ -97,6 +98,7 @@ func NewPlanFileSource(cfg PlanFileSourceConfig) *PlanFileSource {
 		passThroughHeaders: cfg.PassThroughHeaders,
 		sloDeadline:        cfg.SLODeadline,
 		tenantID:           cfg.TenantID,
+		metadata:           tenantMetadata(cfg.Cfg, cfg.TenantID),
 		batchID:            cfg.BatchID,
 		skip:               cfg.Skip,
 		recover:            cfg.Recover,
@@ -105,6 +107,16 @@ func NewPlanFileSource(cfg PlanFileSourceConfig) *PlanFileSource {
 		stillPending:       cfg.StillPending,
 		logger:             cfg.Logger,
 	}
+}
+
+// tenantMetadata returns the async request metadata carrying the tenant ID,
+// or nil when the processor isn't configured to send it or the job has no
+// tenant. The map is built once per batch and shared by its requests.
+func tenantMetadata(cfg *config.ProcessorConfig, tenantID string) map[string]string {
+	if cfg == nil || cfg.TenantMetadataKey == "" || tenantID == "" {
+		return nil
+	}
+	return map[string]string{cfg.TenantMetadataKey: tenantID}
 }
 
 // PreStoreRecovering stores every recovering entry in the job's pending
@@ -305,6 +317,7 @@ func (s *PlanFileSource) readEntry(entry planEntry, modelID string) (*pipeline.R
 		Endpoint:  req.URL,
 		Body:      req.Body,
 		Headers:   headers,
+		Metadata:  s.metadata,
 	}, nil
 }
 
