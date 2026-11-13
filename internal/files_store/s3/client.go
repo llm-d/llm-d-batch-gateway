@@ -465,7 +465,7 @@ func (w *s3StreamWriter) publishMultipart(ctx context.Context) (*api.BatchFileMe
 		}
 	}()
 
-	copySource := url.PathEscape(w.bucket + "/" + w.stagingKey)
+	copySource := encodeCopySource(w.bucket, w.stagingKey)
 	partSize := copyPartSize(size, w.minPartSize)
 	parts := make([]types.CompletedPart, 0, (size+partSize-1)/partSize)
 	for start, num := int64(0), int32(1); start < size; start, num = start+partSize, num+1 {
@@ -523,6 +523,11 @@ func (w *s3StreamWriter) publishMultipart(ctx context.Context) (*api.BatchFileMe
 // minPartSize, grown when needed to stay within maxCopyParts parts.
 func copyPartSize(size, minPartSize int64) int64 {
 	return max(minPartSize, (size+maxCopyParts-1)/maxCopyParts)
+}
+
+// encodeCopySource returns the x-amz-copy-source value for key in bucket.
+func encodeCopySource(bucket, key string) string {
+	return strings.ReplaceAll(url.PathEscape(bucket+"/"+key), "+", "%2B")
 }
 
 // lastModifiedOrNow returns the object's Last-Modified time, or now when the

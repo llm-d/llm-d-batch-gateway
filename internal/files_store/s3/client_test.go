@@ -237,7 +237,7 @@ func (m *mockS3Client) UploadPartCopy(_ context.Context, params *s3.UploadPartCo
 	if !ok {
 		return nil, &types.NoSuchUpload{}
 	}
-	source, err := url.PathUnescape(*params.CopySource)
+	source, err := url.QueryUnescape(*params.CopySource)
 	if err != nil {
 		return nil, err
 	}
@@ -1030,6 +1030,29 @@ func TestOpenStream_MultipartPublish(t *testing.T) {
 		}
 	})
 
+	t.Run("a staging key containing + is copied", func(t *testing.T) {
+		mock := newMockS3Client()
+		client := newTestClient(mock)
+		client.prefix = "a+b c"
+		content := []byte("line1\nline2\n")
+
+		w := openSmallPartStream(t, client)
+		if _, err := w.Write(content); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		md, err := w.Commit(context.Background())
+		if err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		prefixed := "a+b c/" + key
+		if md.Location != prefixed {
+			t.Errorf("location = %s, want %s", md.Location, prefixed)
+		}
+		if got := string(mock.objects[prefixed].data); got != string(content) {
+			t.Errorf("published content = %q, want %q", got, content)
+		}
+	})
+
 	t.Run("commit is create-only: a stale writer cannot replace the winner's object", func(t *testing.T) {
 		ctx := context.Background()
 		mock := newMockS3Client()
@@ -1118,6 +1141,27 @@ func TestCopyPartSize(t *testing.T) {
 			}
 			if parts := (tt.size + got - 1) / got; parts > maxCopyParts {
 				t.Errorf("copyPartSize(%d) needs %d parts, more than %d", tt.size, parts, maxCopyParts)
+			}
+		})
+	}
+}
+
+func TestEncodeCopySource(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{name: "plain key", key: "t-folder/out.jsonl", want: "test-bucket%2Ft-folder%2Fout.jsonl"},
+		{name: "plus sign", key: "a+b/out.jsonl", want: "test-bucket%2Fa%2Bb%2Fout.jsonl"},
+		{name: "space", key: "a b/out.jsonl", want: "test-bucket%2Fa%20b%2Fout.jsonl"},
+		{name: "percent", key: "a%2Bb/out.jsonl", want: "test-bucket%2Fa%252Bb%2Fout.jsonl"},
+		{name: "non-ASCII", key: "é/out.jsonl", want: "test-bucket%2F%C3%A9%2Fout.jsonl"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := encodeCopySource(testBucketName, tt.key); got != tt.want {
+				t.Errorf("encodeCopySource(%q) = %q, want %q", tt.key, got, tt.want)
 			}
 		})
 	}
