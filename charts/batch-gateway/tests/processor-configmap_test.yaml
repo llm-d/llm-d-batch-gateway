@@ -2,6 +2,28 @@ suite: processor configmap
 templates:
   - templates/processor-configmap.yaml
 tests:
+  - it: should disable first user message grouping by default
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'group_first_user_message: false'
+
+  - it: should enable first user message grouping when requested
+    set:
+      processor.config.groupFirstUserMessage: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'group_first_user_message: true'
+
+  - it: should allow first user message grouping to remain explicitly disabled
+    set:
+      processor.config.groupFirstUserMessage: false
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'group_first_user_message: false'
+
   - it: should render a ConfigMap with default values (no gateway configured)
     asserts:
       - isKind:
