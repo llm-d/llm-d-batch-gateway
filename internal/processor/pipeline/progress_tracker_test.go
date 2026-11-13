@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -71,16 +72,30 @@ func TestProgressTracker_Run(t *testing.T) {
 }
 
 type countingUpdater struct {
-	mu    sync.Mutex
-	calls int
-	last  *openai.BatchRequestCounts
+	mu     sync.Mutex
+	calls  int
+	checks int
+	last   *openai.BatchRequestCounts
+	// failUpdates is the number of upcoming UpdateProgressCounts calls to fail.
+	failUpdates int
 }
 
 func (u *countingUpdater) UpdateProgressCounts(_ context.Context, _ string, counts *openai.BatchRequestCounts) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.calls++
+	if u.failUpdates > 0 {
+		u.failUpdates--
+		return errors.New("transient write failure")
+	}
 	u.last = counts
+	return nil
+}
+
+func (u *countingUpdater) CheckJobStatus(context.Context, string) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.checks++
 	return nil
 }
 
@@ -90,8 +105,75 @@ func (u *countingUpdater) getCalls() int {
 	return u.calls
 }
 
+func (u *countingUpdater) getChecks() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.checks
+}
+
 func (u *countingUpdater) getLast() *openai.BatchRequestCounts {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return u.last
+}
+
+func TestProgressTracker_Tick(t *testing.T) {
+	tests := []struct {
+		name        string
+		failUpdates int
+		record      bool
+		// done reports whether the tracker has reached the expected state.
+		done func(u *countingUpdater) bool
+		// wantCalls is the exact number of pushes expected once done.
+		wantCalls int
+	}{
+		{
+			name: "checks job status on quiet ticks without writing",
+			done: func(u *countingUpdater) bool { return u.getChecks() >= 3 },
+			// Only the initial push from Run; quiet ticks add none.
+			wantCalls: 1,
+		},
+		{
+			name:        "retries a failed push on the next tick without new results",
+			failUpdates: 1,
+			record:      true,
+			done:        func(u *countingUpdater) bool { return u.getLast() != nil },
+			wantCalls:   2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			updater := &countingUpdater{failUpdates: tt.failUpdates}
+			tracker := NewProgressTracker(1, updater, "test-job", 10*time.Millisecond, logr.Discard())
+			if tt.record {
+				tracker.RecordSuccess(ResultItem{RequestID: "r1"})
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				_ = tracker.Run(ctx)
+				close(done)
+			}()
+
+			deadline := time.Now().Add(5 * time.Second)
+			for !tt.done(updater) {
+				if time.Now().After(deadline) {
+					cancel()
+					<-done
+					t.Fatalf("tracker did not reach the expected state: pushes=%d checks=%d", updater.getCalls(), updater.getChecks())
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			// Read before cancel: the final push on cancel adds a call.
+			calls := updater.getCalls()
+			cancel()
+			<-done
+
+			if calls != tt.wantCalls {
+				t.Fatalf("pushes = %d, want %d", calls, tt.wantCalls)
+			}
+		})
+	}
 }
