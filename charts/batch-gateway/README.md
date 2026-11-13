@@ -178,6 +178,21 @@ Redis; for SQL transport, use `sql-quota` instead of `redis-quota` when a
 database-backed quota is needed. See the [llm-d-async dispatch gate reference](https://github.com/llm-d/llm-d-async/blob/main/docs/dispatch-gates.md)
 for the supported gate types and parameters.
 
+Quota gates (`redis-quota`, and `sql-quota`, which is on llm-d-async `main`
+but not yet in a release) identify the tenant from request metadata
+(`attribute`, default `userid`), and a request without it is not limited. Set
+`processor.config.tenantMetadataKey` to the same key (for example `userid`) so
+the processor adds the job's tenant ID to each async request. Every Batch API
+job has a tenant: callers without the tenant header (`X-MaaS-Username` by
+default) get the tenant `default`, so they share one quota bucket
+(`quota:userid:default`) rather than going unlimited.
+
+With `userid`, llm-d-async's default `random-robin` merge policy also sends the
+tenant ID to the inference gateway in its fairness header
+(`x-llm-d-inference-fairness-id`), where it may be recorded in access logs.
+Prefer an opaque tenant ID over personally identifying values such as email
+addresses, or set the merge policy's `fairness_header` to `""` to disable it.
+
 The SQL transport is experimental and requires Batch Gateway and llm-d-async
 images built with compatible upstream SQL producer support. SQL result reads
 are destructive in the current upstream producer and do not provide Redis-style

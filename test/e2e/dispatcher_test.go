@@ -31,6 +31,7 @@ import (
 	asyncapi "github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/producer"
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	"github.com/redis/go-redis/v9"
 	"gopkg.in/yaml.v3"
 )
@@ -60,6 +61,14 @@ var (
 	injectReqQueue    = "llm-d-async:requests:" + injectPool
 	injectResultQueue = "llm-d-async:results:" + injectPool
 	injectModel       = "sim-model-inject"
+
+	quotaPool        = "sim-pool-quota"
+	quotaReqQueue    = "llm-d-async:requests:" + quotaPool
+	quotaResultQueue = "llm-d-async:results:" + quotaPool
+	quotaModel       = "sim-model-quota"
+	// quotaWindow matches the sim-pool-quota redis-quota gate in
+	// dispatcher/helm-values.yaml: one request per tenant per window.
+	quotaWindow = 10 * time.Second
 )
 
 func newDispatcherRedisClient(t *testing.T) *redis.Client {
@@ -171,6 +180,7 @@ func TestDispatcher(t *testing.T) {
 		rdb.Del(ctx, gateReqQueue, gateResultQueue)
 		rdb.Del(ctx, scrapeReqQueue, scrapeResultQueue)
 		rdb.Del(ctx, promReqQueue, promResultQueue)
+		rdb.Del(ctx, quotaReqQueue, quotaResultQueue)
 	})
 
 	t.Run("BatchThroughDispatcher", func(t *testing.T) {
@@ -193,6 +203,9 @@ func TestDispatcher(t *testing.T) {
 	})
 	t.Run("BatchAPIDispatchGate", func(t *testing.T) {
 		testBatchAPIDispatchGate(t, rdb)
+	})
+	t.Run("QuotaPerTenant", func(t *testing.T) {
+		testDispatcherQuotaPerTenant(t, rdb)
 	})
 	t.Run("BatchAPIHardKillRecovery", func(t *testing.T) {
 		testBatchAPIHardKillRecovery(t, rdb)
@@ -691,6 +704,102 @@ func testBatchAPIDispatchGate(t *testing.T, rdb *redis.Client) {
 	}
 	if after.Running != 0 || after.Waiting != 0 {
 		t.Errorf("simulator is not idle after test: running=%d waiting=%d", after.Running, after.Waiting)
+	}
+}
+
+// testDispatcherQuotaPerTenant verifies that the processor carries the job
+// tenant into the async request metadata (tenantMetadataKey: userid) and that
+// a redis-quota gate limits each tenant separately. sim-pool-quota admits one
+// request per tenant per quotaWindow, so a tenant's requests cannot all finish
+// in less than (perTenant-1) windows. Without the tenant in the metadata the
+// gate lets every request through, writes no per-tenant key, and the batches
+// finish in seconds.
+func testDispatcherQuotaPerTenant(t *testing.T, rdb *redis.Client) {
+	ctx := context.Background()
+	const perTenant = 3
+
+	type tenantBatch struct {
+		tenant   string
+		quotaKey string
+		client   *openai.Client
+		batchID  string
+		keySeen  bool
+		done     *openai.Batch
+		finished time.Duration
+	}
+
+	// Unique tenants per run: quota state is shared Redis state and must not
+	// carry over from an earlier run.
+	var batches []*tenantBatch
+	for _, name := range []string{"quota-a", "quota-b"} {
+		tenant := name + "-" + testRunID
+		quotaKey := "quota:userid:" + tenant
+		t.Cleanup(func() { rdb.Del(context.Background(), quotaKey) })
+		batches = append(batches, &tenantBatch{tenant: tenant, quotaKey: quotaKey, client: newClientForTenant(tenant)})
+	}
+
+	start := time.Now()
+	for _, b := range batches {
+		lines := make([]string, perTenant)
+		for i := range lines {
+			lines[i] = fmt.Sprintf(
+				`{"custom_id":"quota-%d","method":"POST","url":"/v1/chat/completions","body":{"model":"%s","max_tokens":5,"messages":[{"role":"user","content":"Hello quota"}]}}`,
+				i, quotaModel)
+		}
+		fileID := mustCreateFileWithClient(t, b.client, fmt.Sprintf("dispatcher-quota-%s.jsonl", b.tenant), strings.Join(lines, "\n"))
+		b.batchID = mustCreateBatch(t, fileID, option.WithHeader(testTenantHeader, b.tenant))
+		t.Logf("Tenant %s: batch %s", b.tenant, b.batchID)
+	}
+
+	// The quota key expires 2×window after the last admission, so look for it
+	// while the batches are still running rather than after they finish.
+	deadline := time.Now().Add(3 * time.Minute)
+	for pending := len(batches); pending > 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("batches did not complete within 3m")
+		}
+		pending = 0
+		for _, b := range batches {
+			if b.done != nil {
+				continue
+			}
+			if !b.keySeen {
+				n, err := rdb.Exists(ctx, b.quotaKey).Result()
+				if err != nil {
+					t.Fatalf("check quota key %s: %v", b.quotaKey, err)
+				}
+				b.keySeen = n == 1
+			}
+			batch, err := b.client.Batches.Get(ctx, b.batchID)
+			if err != nil {
+				t.Fatalf("retrieve batch %s: %v", b.batchID, err)
+			}
+			switch {
+			case batch.Status == openai.BatchStatusCompleted:
+				b.done, b.finished = batch, time.Since(start)
+			case terminalBatchStatuses[batch.Status]:
+				t.Fatalf("tenant %s batch %s ended %q, want completed", b.tenant, b.batchID, batch.Status)
+			default:
+				pending++
+			}
+		}
+		time.Sleep(time.Second)
+	}
+
+	minDuration := (perTenant - 1) * quotaWindow
+	for _, b := range batches {
+		if !b.keySeen {
+			t.Errorf("tenant %s: quota key %s never appeared; the tenant did not reach the gate", b.tenant, b.quotaKey)
+		}
+		if b.done.RequestCounts.Completed != perTenant || b.done.RequestCounts.Failed != 0 {
+			t.Errorf("tenant %s: counts completed=%d failed=%d, want %d and 0",
+				b.tenant, b.done.RequestCounts.Completed, b.done.RequestCounts.Failed, perTenant)
+		}
+		if b.finished < minDuration {
+			t.Errorf("tenant %s: batch finished in %s, want at least %s (one request per %s)",
+				b.tenant, b.finished.Round(time.Second), minDuration, quotaWindow)
+		}
+		t.Logf("Tenant %s: %d requests completed in %s", b.tenant, perTenant, b.finished.Round(time.Second))
 	}
 }
 
