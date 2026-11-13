@@ -79,9 +79,23 @@ func (p *Processor) finalizeResumableJob(
 	dbJob.ExpectedResumable = &resumable
 
 	// in_progress → finalizing, before artifact assembly so the API server
-	// can reject cancel requests once finalization has begun.
-	if err := updater.UpdatePersistentStatus(ioCtx, dbJob, openai.BatchStatusFinalizing, nil, nil); err != nil {
+	// can reject cancel requests once finalization has begun. A cancel the
+	// API server persisted first wins: terminalize through the cancellation
+	// path instead of overwriting it. The API server persists cancelling
+	// before it sends the cancel event and refuses to cancel a finalizing
+	// row, so once this write succeeds no cancel can follow, and there is no
+	// cancel check after artifact assembly.
+	cancelPersisted, err := markResumableFinalizing(ioCtx, updater, dbJob)
+	if err != nil {
 		return fmt.Errorf("failed to update job status to finalizing: %w", err)
+	}
+	if cancelPersisted {
+		logger.V(logging.INFO).Info("Cancel persisted before finalization; finalizing as cancelled")
+		if err := p.finalizeResumableAs(ctx, updater, dbJob, jobInfo,
+			openai.BatchStatusCancelled, batch_types.ErrCodeBatchCancelled, openai.BatchStatusCancelling); err != nil {
+			return err
+		}
+		return batchctx.ErrCancelled
 	}
 
 	counts, outputFileID, errorFileID, err := p.assembleResumableArtifacts(ioCtx, dbJob, jobInfo, "")
@@ -91,19 +105,6 @@ func (p *Processor) finalizeResumableJob(
 		// for the reconciler requeue instead of an unfenced failed write that
 		// discards the checkpointed work.
 		return fmt.Errorf("assemble resumable artifacts: %w", err)
-	}
-
-	// Best-effort: honour a user cancel that arrived during finalization —
-	// same contract as the legacy finalizer.
-	if errors.Is(context.Cause(ctx), batchctx.ErrCancelled) {
-		logger.V(logging.INFO).Info("Cancel requested during finalization; finalizing as cancelled")
-		if err := p.finalizeResumableStatus(ioCtx, updater, dbJob, openai.BatchStatusFinalizing, openai.BatchStatusCancelled, counts, outputFileID, errorFileID); err != nil {
-			// The row stays non-terminal: the reconciler requeue retries the
-			// finalization, and a pickup routes a cancelling row back here.
-			return fmt.Errorf("cancelled status write failed: %w", err)
-		}
-		setRequestCountAttrs(ctx, counts)
-		return batchctx.ErrCancelled
 	}
 
 	// finalizing → completed
@@ -118,6 +119,56 @@ func (p *Processor) finalizeResumableJob(
 	setRequestCountAttrs(ctx, counts)
 	logger.V(logging.INFO).Info("Resumable finalization completed", "outputFileID", outputFileID, "errorFileID", errorFileID)
 	return nil
+}
+
+// maxFinalizingAttempts bounds the in_progress → finalizing CAS retries
+// against a row whose status document changed without a lifecycle change.
+const maxFinalizingAttempts = 3
+
+// markResumableFinalizing moves the row to finalizing with a CAS on the
+// persisted status document, on top of the epoch and resumable fences.
+// Progress writes rewrite the request counts in place, so dbJob's in-memory
+// document is not a usable CAS value: each attempt re-reads the row and CASes
+// on what it read. It reports cancelPersisted when the row is cancelling — the
+// API server's markCancelling won and does not bump the epoch, so the fences
+// alone would let this write overwrite it. dbJob carries the row's latest
+// status document on return.
+func markResumableFinalizing(ctx context.Context, updater *StatusUpdater, dbJob *db.BatchItem) (cancelPersisted bool, err error) {
+	for attempt := 1; ; attempt++ {
+		items, _, _, err := updater.db.DBGet(ctx, &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{dbJob.ID}}}, true, 0, 1)
+		if err != nil {
+			return false, err
+		}
+		if len(items) != 1 || items[0].Epoch != dbJob.Epoch {
+			return false, fmt.Errorf("batch %s ownership moved: %w", dbJob.ID, db.ErrConflict)
+		}
+		var current openai.BatchStatusInfo
+		if err := json.Unmarshal(items[0].Status, &current); err != nil {
+			return false, err
+		}
+		dbJob.Status = items[0].Status
+
+		switch current.Status {
+		case openai.BatchStatusCancelling:
+			return true, nil
+		case openai.BatchStatusInProgress, openai.BatchStatusFinalizing:
+		default:
+			return false, fmt.Errorf("batch %s is %s: %w", dbJob.ID, current.Status, db.ErrConflict)
+		}
+
+		err = updater.updatePersistentStatus(ctx, dbJob, openai.BatchStatusFinalizing, nil, nil, items[0].Status)
+		if err == nil || !errors.Is(err, db.ErrConflict) {
+			return false, err
+		}
+		if attempt == maxFinalizingAttempts {
+			// Every re-read still matched the epoch, so treat this as
+			// contention on the status document, not lost ownership: return a
+			// plain error, not db.ErrConflict, so runJob leaves the batch to
+			// the reconciler requeue instead of the ownership-lost path.
+			return false, fmt.Errorf("batch %s: finalizing write lost the status CAS %d times: %v",
+				dbJob.ID, maxFinalizingAttempts, err)
+		}
+	}
 }
 
 // finalizeResumableAs terminalizes a durable batch that must not resume

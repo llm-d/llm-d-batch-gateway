@@ -333,15 +333,16 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 			return
 		}
 		if errors.Is(err, batchctx.ErrCancelled) {
-			// Cancel arrived during finalization — DB already updated to cancelled.
-			// Treat as successful cancellation (same as handleCancelled).
+			// The API server persisted a cancel before the finalizing write,
+			// and finalization terminalized the batch as cancelled. Treat it
+			// as a successful cancellation (same as handleCancelled).
 			// Use background context: ctx may be cancelled (SIGTERM) and cleanup is local I/O only.
 			p.cleanupJobArtifacts(context.Background(), params.jobItem.ID, params.jobItem.TenantID)
 			metrics.RecordJobProcessingDuration(time.Since(jobStart), metrics.GetSizeBucket(int(requestCounts.Total)))
 			recordE2ELatency(params.jobInfo, metrics.E2EStatusCancelled)
-			metrics.RecordCancellation(metrics.CancelPhaseFinalizing)
+			metrics.RecordCancellation(metrics.CancelPhaseInProgress)
 			metrics.RecordJobProcessed(metrics.ResultSuccess, metrics.ReasonNone)
-			logger.V(logging.INFO).Info("Job cancelled during finalization")
+			logger.V(logging.INFO).Info("Job cancelled before finalization")
 			return
 		}
 		logger.Error(err, "Failed to finalize job")
