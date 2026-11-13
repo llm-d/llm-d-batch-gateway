@@ -67,6 +67,10 @@ type mockS3Client struct {
 	partCopyErr   error
 	partCopyCalls int
 	aborts        int
+	// abortCtxErr and abortDeadline record the state of the context the
+	// last AbortMultipartUpload received.
+	abortCtxErr   error
+	abortDeadline time.Time
 }
 
 type mockUpload struct {
@@ -286,8 +290,10 @@ func (m *mockS3Client) CompleteMultipartUpload(_ context.Context, params *s3.Com
 	return &s3.CompleteMultipartUploadOutput{}, nil
 }
 
-func (m *mockS3Client) AbortMultipartUpload(_ context.Context, params *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+func (m *mockS3Client) AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
 	m.aborts++
+	m.abortCtxErr = ctx.Err()
+	m.abortDeadline, _ = ctx.Deadline()
 	if _, ok := m.uploads[*params.UploadId]; !ok {
 		return nil, &types.NoSuchUpload{}
 	}
@@ -1102,6 +1108,31 @@ func TestOpenStream_MultipartPublish(t *testing.T) {
 		}
 		if len(mock.uploads) != 0 || mock.aborts != 1 {
 			t.Errorf("expected the upload aborted, got %d pending and %d aborts", len(mock.uploads), mock.aborts)
+		}
+	})
+
+	t.Run("the abort outlives a cancelled context and has a deadline", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		mock := newMockS3Client()
+		mock.partCopyErr = context.Canceled
+		client := newTestClient(mock)
+
+		w := openSmallPartStream(t, client)
+		if _, err := w.Write([]byte("line1\n")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if _, err := w.Commit(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("commit: expected context.Canceled, got %v", err)
+		}
+		if len(mock.uploads) != 0 || mock.aborts != 1 {
+			t.Errorf("expected the upload aborted, got %d pending and %d aborts", len(mock.uploads), mock.aborts)
+		}
+		if mock.abortCtxErr != nil {
+			t.Errorf("abort context was already done: %v", mock.abortCtxErr)
+		}
+		if left := time.Until(mock.abortDeadline); left <= 0 || left > defaultTimeout {
+			t.Errorf("abort deadline is %s away, want within %s", left, defaultTimeout)
 		}
 	})
 

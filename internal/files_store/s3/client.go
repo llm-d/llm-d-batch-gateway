@@ -456,7 +456,9 @@ func (w *s3StreamWriter) publishMultipart(ctx context.Context) (*api.BatchFileMe
 		}
 		// Drop the uploaded parts even when ctx was cancelled: S3 keeps (and
 		// bills) the parts of an unfinished upload until it is aborted.
-		if _, err := w.s3Client.AbortMultipartUpload(context.WithoutCancel(ctx), &s3.AbortMultipartUploadInput{
+		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultTimeout)
+		defer cancel()
+		if _, err := w.s3Client.AbortMultipartUpload(abortCtx, &s3.AbortMultipartUploadInput{
 			Bucket:   aws.String(w.bucket),
 			Key:      aws.String(w.key),
 			UploadId: uploadID,
