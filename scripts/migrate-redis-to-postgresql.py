@@ -21,10 +21,11 @@
 
 Batch Gateway releases up to v0.5.0 can keep their batch and file records in
 Redis or Valkey; from v0.6.0 the gateway reads them from PostgreSQL only. Run
-this after the new gateway has started once on PostgreSQL (it creates its own
-tables) and has been stopped again. The script does not create tables: it
-checks that the gateway's tables can hold the Redis records and copies nothing
-if they cannot. See scripts/README.md for the procedure.
+this after the gateway has been switched to PostgreSQL, has started once (it
+creates its own tables) and has been stopped again. That can be before the
+upgrade to v0.6.0 or after it. The script does not create tables: it checks
+that the gateway's tables can hold the Redis records and copies nothing if
+they cannot. See scripts/README.md for the procedure.
 """
 
 import argparse
