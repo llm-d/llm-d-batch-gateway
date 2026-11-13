@@ -163,6 +163,14 @@ export LLM_NAMESPACE=llm
 export BATCH_NAMESPACE=batch-api
 export KUADRANT_NAMESPACE=kuadrant-system
 
+# Shared token the batch-route AuthPolicy sends to the batch API server.
+# It goes into the app secret (apiserver-proxy-token) and the AuthPolicy; keep the same value in both.
+# Reuse the token of an existing install: the API server reads it only at startup,
+# so a new value takes effect only after restarting the API server.
+export BATCH_PROXY_TOKEN=$(kubectl get secret batch-gateway-secrets -n ${BATCH_NAMESPACE} \
+    -o jsonpath='{.data.apiserver-proxy-token}' 2>/dev/null | base64 -d)
+export BATCH_PROXY_TOKEN=${BATCH_PROXY_TOKEN:-$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')}
+
 # Component versions
 export CERT_MANAGER_VERSION=v1.20.3
 export KUADRANT_VERSION=1.3.1
@@ -857,6 +865,7 @@ kubectl create secret generic batch-gateway-secrets \
     --from-literal=redis-url="redis://redis-master.${BATCH_NAMESPACE}.svc.cluster.local:6379/0" \
     --from-literal=postgresql-url="postgresql://postgres:<your-postgres-password>@postgresql.${BATCH_NAMESPACE}.svc.cluster.local:5432/batch?sslmode=disable" \
     --from-literal=s3-secret-access-key="${S3_SECRET_ACCESS_KEY}" \
+    --from-literal=apiserver-proxy-token="${BATCH_PROXY_TOKEN}" \
     --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -1200,6 +1209,8 @@ EOF
 
 ```bash
 # Batch AuthPolicy (authentication only, no authorization)
+# On success it injects the caller's username as the tenant and the shared proxy
+# token; the API server rejects requests without both with 401.
 kubectl apply -f - <<EOF
 apiVersion: kuadrant.io/v1
 kind: AuthPolicy
@@ -1217,6 +1228,15 @@ spec:
         kubernetesTokenReview:
           audiences:
           - https://kubernetes.default.svc
+    response:
+      success:
+        headers:
+          "x-maas-username":
+            plain:
+              selector: auth.identity.user.username
+          "x-gateway-token":
+            plain:
+              value: "${BATCH_PROXY_TOKEN}"
 EOF
 ```
 

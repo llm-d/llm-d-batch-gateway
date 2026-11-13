@@ -1,4 +1,7 @@
 {{- if .Values.apiserver.enabled -}}
+{{- if and (not .Values.apiserver.config.allowAnonymousTenant) (not .Values.global.secretName) }}
+{{- fail "global.secretName must name a Secret with an apiserver-proxy-token key unless apiserver.config.allowAnonymousTenant is true" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -17,6 +20,7 @@ data:
       {{ $key }}: {{ $value | quote }}
       {{- end }}
     {{- end }}
+    allow_anonymous_tenant: {{ .Values.apiserver.config.allowAnonymousTenant }}
     read_header_timeout_seconds: {{ .Values.apiserver.config.readHeaderTimeoutSeconds }}
     read_timeout_seconds: {{ .Values.apiserver.config.readTimeoutSeconds }}
     write_timeout_seconds: {{ .Values.apiserver.config.writeTimeoutSeconds }}

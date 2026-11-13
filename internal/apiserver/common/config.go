@@ -21,9 +21,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	sharedcfg "github.com/llm-d/llm-d-batch-gateway/internal/shared/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
+	ucom "github.com/llm-d/llm-d-batch-gateway/internal/util/com"
 	"gopkg.in/yaml.v3"
 	"k8s.io/klog/v2"
 )
@@ -41,6 +43,10 @@ const (
 	InputHeaderKeyTenant = "tenant"
 	// DefaultTenantHeader is the default HTTP header name for tenant ID
 	DefaultTenantHeader = "X-MaaS-Username"
+	// InputHeaderKeyProxyToken is the key for the proxy token header in InputHeaders
+	InputHeaderKeyProxyToken = "proxy_token"
+	// DefaultProxyTokenHeader is the default HTTP header in which the auth proxy sends the shared token
+	DefaultProxyTokenHeader = "X-Gateway-Token"
 
 	// HTTP server timeout defaults
 	// DefaultReadHeaderTimeoutSeconds prevents slow-client attacks (Slowloris)
@@ -142,6 +148,15 @@ type ServerConfig struct {
 	// EnablePprof enables pprof profiling endpoints on the observability server.
 	EnablePprof bool `yaml:"enable_pprof"`
 
+	// AllowAnonymousTenant serves requests that carry no tenant header as
+	// DefaultTenantID and turns off the proxy token check. When false, such
+	// requests, and requests without the proxy token, are rejected with 401.
+	AllowAnonymousTenant bool `yaml:"allow_anonymous_tenant"`
+
+	// ProxyToken is the shared token the auth proxy must send in the proxy token
+	// header. Load reads it from the mounted app secret; it is never read from YAML.
+	ProxyToken string `yaml:"-"`
+
 	// OTelCfg holds OpenTelemetry-related settings.
 	OTelCfg sharedcfg.OTelConfig `yaml:"otel"`
 }
@@ -172,12 +187,27 @@ func (c *ServerConfig) Load() error {
 
 	c.applyDefaults()
 
+	if !c.AllowAnonymousTenant {
+		token, err := ucom.ReadSecretFile(ucom.SecretKeyProxyToken)
+		if err != nil {
+			return fmt.Errorf("read proxy token: %w", err)
+		}
+		c.ProxyToken = token
+	}
+
 	return c.Validate()
 }
 
 func (c *ServerConfig) Validate() error {
 	if c.Port == "" {
 		return fmt.Errorf("port cannot be empty")
+	}
+
+	if !c.AllowAnonymousTenant && c.ProxyToken == "" {
+		return fmt.Errorf("the %q key of the app secret is required unless allow_anonymous_tenant is true", ucom.SecretKeyProxyToken)
+	}
+	if strings.EqualFold(c.GetTenantHeader(), c.GetProxyTokenHeader()) {
+		return fmt.Errorf("input_headers.tenant and input_headers.proxy_token must name different headers")
 	}
 
 	// If one SSL file is provided, both must be provided
@@ -306,4 +336,8 @@ func (c *ServerConfig) GetInputHeader(key string, fallback string) string {
 
 func (c *ServerConfig) GetTenantHeader() string {
 	return c.GetInputHeader(InputHeaderKeyTenant, DefaultTenantHeader)
+}
+
+func (c *ServerConfig) GetProxyTokenHeader() string {
+	return c.GetInputHeader(InputHeaderKeyProxyToken, DefaultProxyTokenHeader)
 }

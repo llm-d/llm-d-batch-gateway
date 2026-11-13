@@ -60,6 +60,9 @@ fi
 BATCH_INFERENCE_SERVICE="${BATCH_INFERENCE_SERVICE:-${BATCH_INSTANCE_NAME}-apiserver}"
 BATCH_INFERENCE_PORT="${BATCH_INFERENCE_PORT:-8000}"
 BATCH_APP_SECRET_NAME="${BATCH_APP_SECRET_NAME:-${BATCH_INSTANCE_NAME}-secrets}"
+# Shared token the auth proxy sends to the batch API server (apiserver-proxy-token).
+# Empty: resolve_batch_proxy_token reuses the one in the app secret or generates one.
+BATCH_PROXY_TOKEN="${BATCH_PROXY_TOKEN:-}"
 BATCH_FILES_PVC_NAME="${BATCH_FILES_PVC_NAME:-${BATCH_INSTANCE_NAME}-files}"
 BATCH_DB_TYPE="${BATCH_DB_TYPE:-postgresql}"
 # Default HTTP settings for model gateway entries.
@@ -539,8 +542,31 @@ EOF
     log "PVC '${BATCH_FILES_PVC_NAME}' created."
 }
 
+# Prints the apiserver-proxy-token stored in the app secret, or nothing.
+get_batch_proxy_token_from_secret() {
+    kubectl get secret "${BATCH_APP_SECRET_NAME}" -n "${BATCH_NAMESPACE}" \
+        -o jsonpath='{.data.apiserver-proxy-token}' 2>/dev/null | base64 -d 2>/dev/null || true
+}
+
+# Sets BATCH_PROXY_TOKEN when it is empty. It reuses the token in the app secret,
+# because the API server reads the token only at startup and a re-run does not
+# restart it. Without a stored token it generates one.
+resolve_batch_proxy_token() {
+    if [ -n "${BATCH_PROXY_TOKEN}" ]; then
+        return 0
+    fi
+    BATCH_PROXY_TOKEN="$(get_batch_proxy_token_from_secret)"
+    if [ -z "${BATCH_PROXY_TOKEN}" ]; then
+        BATCH_PROXY_TOKEN="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+}
+
 create_batch_secret() {
     step "Creating app secret '${BATCH_APP_SECRET_NAME}'..."
+
+    local stored_proxy_token
+    stored_proxy_token="$(get_batch_proxy_token_from_secret)"
+    resolve_batch_proxy_token
 
     local exchange_svc="${BATCH_REDIS_RELEASE}-master"
     if [[ "${BATCH_EXCHANGE_CLIENT_TYPE}" == "valkey" ]]; then
@@ -559,8 +585,17 @@ stringData:
   redis-url: "${redis_url}"
   postgresql-url: "${postgresql_url}"
   s3-secret-access-key: "${S3_SECRET_ACCESS_KEY}"
+  apiserver-proxy-token: "${BATCH_PROXY_TOKEN}"
 EOF
     log "Secret '${BATCH_APP_SECRET_NAME}' applied."
+
+    # A caller-supplied BATCH_PROXY_TOKEN that differs from the stored one rotates
+    # the token: restart the API server so it loads the new value.
+    if [ -n "${stored_proxy_token}" ] && [ "${stored_proxy_token}" != "${BATCH_PROXY_TOKEN}" ] \
+        && kubectl get deployment "${BATCH_INSTANCE_NAME}-apiserver" -n "${BATCH_NAMESPACE}" &>/dev/null; then
+        log "Proxy token changed; restarting the API server..."
+        kubectl rollout restart deployment "${BATCH_INSTANCE_NAME}-apiserver" -n "${BATCH_NAMESPACE}"
+    fi
 }
 
 get_batch_gateway_image_tag() {
