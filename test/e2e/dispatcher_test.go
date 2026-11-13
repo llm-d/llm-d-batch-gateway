@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -81,6 +82,9 @@ func newDispatcherRedisClient(t *testing.T) *redis.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
+		if os.Getenv("TEST_REDIS_URL") == "" && isUnreachable(err) {
+			t.Skipf("skipping: Redis not reachable at default %s; set TEST_REDIS_URL or port-forward Redis: %v", testRedisURL, err)
+		}
 		t.Fatalf("Failed to connect to Redis at %s: %v", testRedisURL, err)
 	}
 	return client
