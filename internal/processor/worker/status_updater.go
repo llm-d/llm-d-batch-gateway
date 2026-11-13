@@ -68,6 +68,33 @@ func (s *StatusUpdater) UpdateProgressCounts(
 	return s.db.DBUpdateProgress(ctx, jobID, epoch, countsJSON)
 }
 
+// CheckJobStatus returns the job's lifecycle status while epoch still owns
+// the job. It applies the same fence as UpdateProgressCounts with a read
+// instead of a write: a missing row, another epoch or a terminal status
+// returns db.ErrConflict.
+func (s *StatusUpdater) CheckJobStatus(ctx context.Context, jobID string, epoch int64) (openai.BatchStatus, error) {
+	items, _, _, err := s.db.DBGet(ctx,
+		&db.BatchQuery{
+			BaseQuery: db.BaseQuery{IDs: []string{jobID}},
+		},
+		false, 0, 1)
+	if err != nil {
+		return "", err
+	}
+	if len(items) == 0 || items[0].Epoch != epoch {
+		return "", fmt.Errorf("CheckJobStatus: %w", db.ErrConflict)
+	}
+
+	var info openai.BatchStatusInfo
+	if err := json.Unmarshal(items[0].Status, &info); err != nil {
+		return "", fmt.Errorf("unmarshal job status: %w", err)
+	}
+	if info.Status.IsTerminal() {
+		return "", fmt.Errorf("CheckJobStatus: %w", db.ErrConflict)
+	}
+	return info.Status, nil
+}
+
 // UpdatePersistentStatus writes the job status to the persistent database (e.g. PostgreSQL).
 // Unlike UpdateProgressCounts, this is the authoritative, durable record of job state.
 // Optional modifiers are applied to the status info before marshaling.
