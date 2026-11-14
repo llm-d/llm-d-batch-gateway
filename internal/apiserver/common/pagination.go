@@ -26,14 +26,14 @@ import (
 //
 // Following the OpenAI API, "after" is the ID of the last object of the previous
 // page; idPrefix (e.g. "file_") is the prefix of valid IDs for the listed object.
-// For backward compatibility a non-negative integer is still accepted and treated
-// as an offset. Exactly one of offset and afterID is set in the result; an empty
-// value yields zero values for both.
+// For backward compatibility a non-negative integer with an optional "+" sign is
+// still accepted and treated as an offset. Exactly one of offset and afterID is
+// set in the result; an empty value yields zero values for both.
 func ParseAfter(after, idPrefix string) (offset int, afterID string, err error) {
 	if after == "" {
 		return 0, "", nil
 	}
-	if isDigits(after) {
+	if isDigits(strings.TrimPrefix(after, "+")) {
 		offset, err = strconv.Atoi(after)
 		if err != nil {
 			return 0, "", fmt.Errorf("after offset %q is out of range", after)
