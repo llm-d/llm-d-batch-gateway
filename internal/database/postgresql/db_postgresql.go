@@ -21,6 +21,7 @@ package postgresql
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/exaring/otelpgx"
@@ -46,12 +47,37 @@ type PostgreSQLConfig struct {
 	Url string `yaml:"-"`
 	// EnableTracing enables OpenTelemetry tracing for all PostgreSQL operations.
 	EnableTracing bool
+	// Pool holds the connection pool settings applied to every pool created from this config.
+	Pool PoolConfig `yaml:"pool"`
+}
+
+// PoolConfig holds pgx connection pool settings. A component opens several
+// independent pools from one PostgreSQLConfig (batch, file, queue, resumable,
+// events), and each of them gets these settings.
+type PoolConfig struct {
+	// MaxConnections caps the connections of each pool. 0 leaves the size
+	// parsed from the URL: the pgxpool default, max(4, runtime.NumCPU()),
+	// unless the URL sets pool_max_conns. A positive value overrides the URL.
+	// newPool keeps every pool at 2 or more connections, the minimum the
+	// events pool needs for LISTEN, so 1 is raised to 2.
+	MaxConnections int `yaml:"max_connections"`
+}
+
+// Validate checks that the pool settings are usable.
+func (c PoolConfig) Validate() error {
+	if c.MaxConnections < 0 || c.MaxConnections > math.MaxInt32 {
+		return fmt.Errorf("max_connections must be between 0 and %d, got %d", math.MaxInt32, c.MaxConnections)
+	}
+	return nil
 }
 
 // Validate checks that the required configuration fields are set.
 func (c *PostgreSQLConfig) Validate() error {
 	if c.Url == "" {
 		return fmt.Errorf("url is required")
+	}
+	if err := c.Pool.Validate(); err != nil {
+		return fmt.Errorf("pool: %w", err)
 	}
 	return nil
 }
@@ -108,6 +134,9 @@ func newPool(ctx context.Context, config *PostgreSQLConfig) (*pgxpool.Pool, erro
 	poolConfig, err := pgxpool.ParseConfig(config.Url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse connection string: %w", err)
+	}
+	if config.Pool.MaxConnections > 0 {
+		poolConfig.MaxConns = int32(config.Pool.MaxConnections)
 	}
 	if poolConfig.MaxConns < 2 {
 		logr.FromContextOrDiscard(ctx).Info("Increasing pool max connections to minimum required for LISTEN", "original", poolConfig.MaxConns, "new", 2)

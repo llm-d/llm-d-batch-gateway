@@ -155,6 +155,37 @@ file_client:
 	}
 }
 
+func TestLoad_PostgreSQLPoolMaxConnections(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		want    int
+		wantErr bool
+	}{
+		{name: "unset keeps the pgx default", yaml: "", want: 0},
+		{name: "explicit value", yaml: "  postgresql:\n    pool:\n      max_connections: 8\n", want: 8},
+		{name: "negative is rejected", yaml: "  postgresql:\n    pool:\n      max_connections: -1\n", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempConfig(t, "file_client:\n  type: \"fs\"\ndb_client:\n  type: \"postgresql\"\n"+tc.yaml)
+			cfg, err := Load(path)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "db_client.postgresql.pool") {
+					t.Fatalf("Load() error = %v, want db_client.postgresql.pool error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() unexpected error: %v", err)
+			}
+			if got := cfg.DBClientCfg.PostgreSQLCfg.Pool.MaxConnections; got != tc.want {
+				t.Fatalf("Pool.MaxConnections = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoad_Defaults(t *testing.T) {
 	path := writeTempConfig(t, `
 db_client:

@@ -15,6 +15,9 @@ data:
     metrics_addr: {{ .Values.gc.config.metricsAddr | quote }}
     db_client:
       type: {{ .Values.global.dbClient.type | quote }}
+      postgresql:
+        pool:
+          max_connections: {{ dig "postgresql" "pool" "maxConnections" 0 .Values.global.dbClient }}
     file_client:
       type: {{ .Values.global.fileClient.type | quote }}
       fs:
