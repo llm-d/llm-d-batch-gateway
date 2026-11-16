@@ -40,6 +40,28 @@ const (
 	EndpointModerations     Endpoint = "/v1/moderations"
 )
 
+// Media endpoints whose backends (vLLM's speech-to-text, vllm-omni's image
+// edits) accept only multipart/form-data. Batch lines are JSON, so these work
+// only through async dispatch, where llm-d-async's s3_multipart request
+// transform rewrites each request. They are not default endpoints and must be
+// enabled through extra_endpoints.
+const (
+	EndpointAudioTranscriptions Endpoint = "/v1/audio/transcriptions"
+	EndpointAudioTranslations   Endpoint = "/v1/audio/translations"
+	EndpointImagesEdits         Endpoint = "/v1/images/edits"
+)
+
+// IsMultipartMediaEndpoint reports whether endpoint is one of the media
+// endpoints that need async dispatch.
+func IsMultipartMediaEndpoint(endpoint Endpoint) bool {
+	switch endpoint {
+	case EndpointAudioTranscriptions, EndpointAudioTranslations, EndpointImagesEdits:
+		return true
+	default:
+		return false
+	}
+}
+
 // EndpointAllowlist reports which batch endpoints are accepted. The zero value accepts
 // exactly the OpenAI Batch API endpoints.
 type EndpointAllowlist struct {

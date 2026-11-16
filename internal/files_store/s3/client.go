@@ -141,11 +141,16 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 
 // buildKey constructs the full S3 key from the folder name and file name.
 func (c *Client) buildKey(folderName, fileName string) string {
-	key := folderName + "/" + fileName
-	if c.prefix != "" {
-		key = c.prefix + "/" + key
+	return FolderKeyPrefix(c.prefix, folderName) + fileName
+}
+
+// FolderKeyPrefix returns the key prefix under which a folder's objects are
+// stored, given the configured key prefix: "[prefix/]folderName/".
+func FolderKeyPrefix(prefix, folderName string) string {
+	if prefix != "" {
+		return prefix + "/" + folderName + "/"
 	}
-	return key
+	return folderName + "/"
 }
 
 // ensureBucket checks that the configured bucket exists. When autoCreate is
