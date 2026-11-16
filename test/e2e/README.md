@@ -117,6 +117,15 @@ The harness pins the official llm-d Async v1.0.0 release image, including its mu
 
 `TestDispatcher/QuotaPerTenant` covers per-tenant quotas end to end. The processor runs with `tenantMetadataKey: userid`, so each async request carries the job tenant, and the `sim-model-quota` queue (`sim-pool-quota`) has a `redis-quota` gate that admits one request per tenant every 10 seconds. Two tenants each submit three requests; the test checks that each tenant gets its own `quota:userid:<tenant>` key while the batches run and that neither batch finishes in under two windows.
 
+`TestDispatcherMedia` covers the multipart media endpoints. It needs an llm-d Async with the `s3_multipart` transform (llm-d/llm-d-async#548), which the pinned release image lacks, so its fixtures are opt-in:
+
+```bash
+ENABLE_DISPATCHER=true ENABLE_DISPATCHER_MEDIA=true DISPATCHER_SOURCE=~/src/llm-d-async make dev-deploy
+make test-e2e TEST_RUN=TestDispatcherMedia
+```
+
+This adds the `media-echo` test backend (`test/e2e/mediaecho`), the `dispatcher-media` release with the transform (`test/e2e/dispatcher/helm-values-media.yaml`), and the media endpoints and `media-model` route (`test/e2e/dispatcher/processor-media-values.yaml`). The test uploads audio and an image through the Files API, refers to them as `s3://` references, and checks the SHA-256 that media-echo reports for every input it received, including an image it downloads through a presigned URL. It also checks that a reference to another tenant's upload fails the batch at ingestion. The test skips when the processor does not allow the media endpoints.
+
 The v1.0.0 chart exposes Async's canonical `ap.transport` and `ap.transportConfig` values, including the claim lease and reclaim intervals used by the test. Production durability additionally requires persistent Redis through AOF and/or replication. Roll out claim-aware Async replicas before relying on hard-kill recovery; an older replica can still destructively dequeue work during a mixed-version rollout.
 
 Since chart v0.8.0, the dispatcher Deployment and its immutable selector have been named `llm-d-async` instead of `async-processor`. A clean E2E deployment needs no migration, but an existing local cluster previously deployed with chart 0.7.4 must remove the three old test releases before redeploying: `helm uninstall dispatcher dispatcher-scrape dispatcher-prom --namespace default`.

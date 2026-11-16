@@ -108,13 +108,8 @@ func newDispatcherProducer(t *testing.T, rdb *redis.Client, poolName string) *pr
 func detectDispatcherDeployed(t *testing.T) bool {
 	t.Helper()
 
-	configMap := fmt.Sprintf("%s-processor-config", testHelmRelease)
-	out, err := exec.Command("kubectl", "get", "configmap", configMap,
-		"-n", testNamespace,
-		"-o", "jsonpath={.data.config\\.yaml}",
-	).CombinedOutput()
-	if err != nil {
-		t.Logf("kubectl get processor config failed: %v\n%s", err, out)
+	out, ok := processorConfigYAML(t)
+	if !ok {
 		return false
 	}
 	dispatchMode, err := processorDispatchMode(out)
@@ -123,6 +118,22 @@ func detectDispatcherDeployed(t *testing.T) bool {
 		return false
 	}
 	return dispatchMode == "async"
+}
+
+// processorConfigYAML returns the deployed processor's config.yaml.
+func processorConfigYAML(t *testing.T) ([]byte, bool) {
+	t.Helper()
+
+	configMap := fmt.Sprintf("%s-processor-config", testHelmRelease)
+	out, err := exec.Command("kubectl", "get", "configmap", configMap,
+		"-n", testNamespace,
+		"-o", "jsonpath={.data.config\\.yaml}",
+	).CombinedOutput()
+	if err != nil {
+		t.Logf("kubectl get processor config failed: %v\n%s", err, out)
+		return nil, false
+	}
+	return out, true
 }
 
 func processorDispatchMode(data []byte) (string, error) {

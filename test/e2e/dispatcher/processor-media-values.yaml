@@ -1,0 +1,14 @@
+# Enables the multipart media endpoints (with ENABLE_DISPATCHER_MEDIA=true) and
+# routes the media test model to the dispatcher-media queue. Layered on top of
+# processor-async-values.yaml, so models merge with the async fixtures.
+global:
+  extraEndpoints:
+    - /v1/audio/transcriptions
+    - /v1/audio/translations
+    - /v1/images/edits
+processor:
+  config:
+    asyncDispatch:
+      models:
+        media-model:
+          inferencePoolName: "media-pool"
