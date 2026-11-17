@@ -172,11 +172,19 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 
 		requestMeta, err := extractAndValidateLine(line, p.endpointAllowlist, jobInfo.BatchJob.Endpoint.String())
 		if err != nil {
+			var lineErr *inputLineError
+			if errors.As(err, &lineErr) {
+				lineErr.line = lineCount
+			}
 			return nil, fmt.Errorf("validate request at line %d: %w", lineCount, err)
 		}
 
 		if _, exists := seenCustomIDs[requestMeta.CustomID]; exists {
-			return nil, fmt.Errorf("line %d: duplicate custom_id %q", lineCount, requestMeta.CustomID)
+			return nil, fmt.Errorf("line %d: %w", lineCount, &inputLineError{
+				line:  lineCount,
+				param: "custom_id",
+				err:   fmt.Errorf("duplicate custom_id %q", requestMeta.CustomID),
+			})
 		}
 		seenCustomIDs[requestMeta.CustomID] = struct{}{}
 
@@ -277,6 +285,25 @@ func readNormalizedLine(r *bufio.Reader) ([]byte, bool, error) {
 	return line, false, nil
 }
 
+// inputLineError is an input file line that failed validation. It keeps the
+// line number and the field at fault so the failed batch can report them in
+// its errors list.
+type inputLineError struct {
+	line  int64  // 1-based line number in the input file
+	param string // field at fault; empty when the line is not valid JSON
+	err   error
+}
+
+func (e *inputLineError) Error() string { return e.err.Error() }
+
+func (e *inputLineError) Unwrap() error { return e.err }
+
+// invalidLine returns an inputLineError for the given field. The caller that
+// knows the line number sets it.
+func invalidLine(param string, err error) error {
+	return &inputLineError{param: param, err: err}
+}
+
 type requestMeta struct {
 	CustomID   string
 	ModelID    string
@@ -289,34 +316,34 @@ func extractAndValidateLine(line []byte, endpointAllowlist openai.EndpointAllowl
 	var req planRequestLine
 	trimmedLine := bytes.TrimSuffix(line, []byte{'\n'})
 	if err := json.Unmarshal(trimmedLine, &req); err != nil {
-		return requestMeta{}, err
+		return requestMeta{}, invalidLine("", err)
 	}
 	if req.CustomID == "" {
-		return requestMeta{}, fmt.Errorf("custom_id is required")
+		return requestMeta{}, invalidLine("custom_id", fmt.Errorf("custom_id is required"))
 	}
 	if req.Method == "" {
-		return requestMeta{}, fmt.Errorf("method is required")
+		return requestMeta{}, invalidLine("method", fmt.Errorf("method is required"))
 	}
 	if req.Method != "POST" {
-		return requestMeta{}, fmt.Errorf("invalid method: %s", req.Method)
+		return requestMeta{}, invalidLine("method", fmt.Errorf("invalid method: %s", req.Method))
 	}
 	if req.URL == "" {
-		return requestMeta{}, fmt.Errorf("url is required")
+		return requestMeta{}, invalidLine("url", fmt.Errorf("url is required"))
 	}
 	if !strings.HasPrefix(req.URL, "/") || strings.HasPrefix(req.URL, "//") || strings.Contains(req.URL, "://") {
-		return requestMeta{}, fmt.Errorf("url must be a relative path: %s", req.URL)
+		return requestMeta{}, invalidLine("url", fmt.Errorf("url must be a relative path: %s", req.URL))
 	}
 	if !endpointAllowlist.IsValid(req.URL) {
-		return requestMeta{}, fmt.Errorf("invalid endpoint: %s", req.URL)
+		return requestMeta{}, invalidLine("url", fmt.Errorf("invalid endpoint: %s", req.URL))
 	}
 	if req.URL != batchEndpoint {
-		return requestMeta{}, fmt.Errorf("request endpoint %q does not match batch endpoint %q", req.URL, batchEndpoint)
+		return requestMeta{}, invalidLine("url", fmt.Errorf("request endpoint %q does not match batch endpoint %q", req.URL, batchEndpoint))
 	}
 	if req.Body.Model == "" {
-		return requestMeta{}, fmt.Errorf("model id is empty")
+		return requestMeta{}, invalidLine("body.model", fmt.Errorf("model id is empty"))
 	}
 	if req.Body.Stream != nil && *req.Body.Stream {
-		return requestMeta{}, fmt.Errorf("streaming is not supported in batch requests (model: %s)", req.Body.Model)
+		return requestMeta{}, invalidLine("body.stream", fmt.Errorf("streaming is not supported in batch requests (model: %s)", req.Body.Model))
 	}
 
 	prefixHash := NoPrefixHash
@@ -326,7 +353,7 @@ func extractAndValidateLine(line []byte, endpointAllowlist openai.EndpointAllowl
 		}
 		text, err := messageText(msg.Content)
 		if err != nil {
-			return requestMeta{}, fmt.Errorf("system message content: %w", err)
+			return requestMeta{}, invalidLine("body.messages", fmt.Errorf("system message content: %w", err))
 		}
 		if text != "" {
 			h := fnv.New32a()

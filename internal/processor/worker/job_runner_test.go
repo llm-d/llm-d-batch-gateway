@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/clientset"
 	ucom "github.com/llm-d/llm-d-batch-gateway/internal/util/com"
 	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
+	"k8s.io/utils/ptr"
 )
 
 type errEventClient struct {
@@ -261,9 +264,90 @@ func TestHandleFailed_DBUpdateError_ReturnsError(t *testing.T) {
 		BaseContents: db.BaseContents{
 			Status: mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusInProgress}),
 		},
-	}, nil, nil)
+	}, nil, nil, nil)
 	if !errors.Is(err, updateErr) {
 		t.Fatalf("expected update error, got %v", err)
+	}
+}
+
+func TestHandleFailed_Errors(t *testing.T) {
+	tests := []struct {
+		name  string
+		cause error
+		want  *openai.BatchErrors
+	}{
+		{
+			name: "input line error",
+			cause: fmt.Errorf("validate request at line %d: %w", 2, &inputLineError{
+				line:  2,
+				param: "body.stream",
+				err:   errors.New("streaming is not supported in batch requests (model: m1)"),
+			}),
+			want: &openai.BatchErrors{
+				Object: "list",
+				Data: []openai.BatchError{{
+					Code:    errCodeInvalidRequest,
+					Message: "streaming is not supported in batch requests (model: m1)",
+					Param:   ptr.To("body.stream"),
+					Line:    ptr.To(int64(2)),
+				}},
+			},
+		},
+		{
+			name: "input line error without a field",
+			cause: fmt.Errorf("validate request at line %d: %w", 1, &inputLineError{
+				line: 1,
+				err:  errors.New("unexpected end of JSON input"),
+			}),
+			want: &openai.BatchErrors{
+				Object: "list",
+				Data: []openai.BatchError{{
+					Code:    errCodeInvalidRequest,
+					Message: "unexpected end of JSON input",
+					Line:    ptr.To(int64(1)),
+				}},
+			},
+		},
+		{
+			name:  "internal error",
+			cause: errors.New("open input file stream: connection refused"),
+		},
+		{
+			name: "no cause",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := testLoggerCtx(t)
+			dbClient := newMockBatchDBClient()
+			jobItem := &db.BatchItem{
+				BaseIndexes:  db.BaseIndexes{ID: "job-failed-errors", TenantID: "tenantA"},
+				BaseContents: db.BaseContents{Status: mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusInProgress})},
+			}
+			if err := dbClient.DBStore(ctx, jobItem); err != nil {
+				t.Fatalf("DBStore: %v", err)
+			}
+
+			p := mustNewProcessor(t, config.NewConfig(), &clientset.Clientset{BatchDB: dbClient})
+			if err := p.handleFailed(ctx, NewStatusUpdater(dbClient), jobItem, nil, nil, tt.cause); err != nil {
+				t.Fatalf("handleFailed: %v", err)
+			}
+
+			items, _, _, err := dbClient.DBGet(ctx, &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{"job-failed-errors"}}}, true, 0, 1)
+			if err != nil || len(items) != 1 {
+				t.Fatalf("DBGet: err=%v len=%d", err, len(items))
+			}
+			var got openai.BatchStatusInfo
+			if err := json.Unmarshal(items[0].Status, &got); err != nil {
+				t.Fatalf("unmarshal status: %v", err)
+			}
+			if got.Status != openai.BatchStatusFailed {
+				t.Fatalf("status = %s, want %s", got.Status, openai.BatchStatusFailed)
+			}
+			if !reflect.DeepEqual(got.Errors, tt.want) {
+				t.Errorf("errors = %s, want %s", mustJSON(t, got.Errors), mustJSON(t, tt.want))
+			}
+		})
 	}
 }
 

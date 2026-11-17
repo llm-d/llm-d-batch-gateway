@@ -939,6 +939,7 @@ func doTestDuplicateCustomID(t *testing.T) {
 
 	finalBatch := waitForIngestionFailure(t, batchID, 2*time.Minute)
 	t.Logf("duplicate custom_id batch reached %s", finalBatch.Status)
+	assertInputLineError(t, finalBatch, 2, "custom_id")
 }
 
 // doTestStreamingRejected submits a JSONL with stream:true in the body.
@@ -953,6 +954,7 @@ func doTestStreamingRejected(t *testing.T) {
 
 	finalBatch := waitForIngestionFailure(t, batchID, 2*time.Minute)
 	t.Logf("streaming batch reached %s", finalBatch.Status)
+	assertInputLineError(t, finalBatch, 1, "body.stream")
 }
 
 // doTestAllModelsUnregistered submits a JSONL where every request targets a
