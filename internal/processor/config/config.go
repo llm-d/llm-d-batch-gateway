@@ -113,6 +113,13 @@ const (
 	RouteKeyMethodTenant RouteKeyMethod = "tenant"
 )
 
+const (
+	// AsyncProviderMetadataKey selects the gcs_uri_multipart transform in llm-d-async.
+	AsyncProviderMetadataKey = "provider"
+	// DefaultGCSSignedURLHost is the only signed GCS URL host accepted by default.
+	DefaultGCSSignedURLHost = "storage.googleapis.com"
+)
+
 // AsyncModelConfig describes the async dispatch target for a single model.
 type AsyncModelConfig struct {
 	// InferencePoolName identifies the async dispatch pool for this model.
@@ -136,6 +143,10 @@ type AsyncModelConfig struct {
 	// Deprecated fallback: the derived naming convention will be removed in
 	// a future release. Set an explicit queue base name for new deployments.
 	ResultQueueName string `yaml:"result_queue_name"`
+
+	// Provider is sent as async request metadata so llm-d-async can select a
+	// request transform such as gcs_uri_multipart.
+	Provider string `yaml:"provider"`
 }
 
 // AsyncDispatchConfig holds configuration for the llm-d-async dispatch backend.
@@ -166,6 +177,9 @@ type AsyncDispatchConfig struct {
 	// Models maps model names to their async dispatch targets.
 	// Required when DispatchMode == "async".
 	Models map[string]AsyncModelConfig `yaml:"models"`
+
+	// GCSSignedURLHosts limits the hosts accepted in body.gcs_uri.
+	GCSSignedURLHosts []string `yaml:"gcs_signed_url_hosts"`
 }
 
 // ResumableConfig holds the tunables of the resumable pipeline that async
@@ -384,6 +398,14 @@ func (c *ProcessorConfig) InferenceObjectiveFor(modelID string) string {
 	return ""
 }
 
+// AsyncProviderFor returns the provider metadata configured for an async model.
+func (c *ProcessorConfig) AsyncProviderFor(modelID string) string {
+	if !c.IsAsync() {
+		return ""
+	}
+	return c.AsyncDispatchConfig.Models[modelID].Provider
+}
+
 // LoadFromYAML loads the configuration from a YAML file.
 // Callers should start from NewConfig() so that concurrency/AIMD defaults
 // are already set; YAML values then override only what is explicitly specified.
@@ -462,6 +484,7 @@ func NewConfig() *ProcessorConfig {
 			MaxConnections:    inference.DefaultSQLMaxConns,
 			ResultPollTimeout: 5 * time.Second,
 			PollInterval:      time.Second,
+			GCSSignedURLHosts: []string{DefaultGCSSignedURLHost},
 		},
 		Resumable: ResumableConfig{
 			LeaseDuration:       5 * time.Minute,
@@ -551,7 +574,6 @@ func (c *ProcessorConfig) Validate() error {
 			return fmt.Errorf("tenant_metadata_key %q is reserved for trace context propagation", c.TenantMetadataKey)
 		}
 	}
-
 	if err := c.validateGateways(); err != nil {
 		return err
 	}
@@ -659,6 +681,17 @@ func (c *ProcessorConfig) validateAsyncDispatchConfig() error {
 		}
 		if (m.RequestQueueName == "") != (m.ResultQueueName == "") {
 			return fmt.Errorf("async_dispatch.models[%s]: request_queue_name and result_queue_name must both be set or both be empty", model)
+		}
+	}
+	if strings.EqualFold(c.TenantMetadataKey, AsyncProviderMetadataKey) {
+		return fmt.Errorf("tenant_metadata_key %q is reserved for async provider metadata", c.TenantMetadataKey)
+	}
+	if len(c.AsyncDispatchConfig.GCSSignedURLHosts) == 0 {
+		c.AsyncDispatchConfig.GCSSignedURLHosts = []string{DefaultGCSSignedURLHost}
+	}
+	for _, host := range c.AsyncDispatchConfig.GCSSignedURLHosts {
+		if host == "" || strings.ContainsAny(host, ":/?#") {
+			return fmt.Errorf("async_dispatch.gcs_signed_url_hosts entries must be non-empty hostnames without a scheme, port, path, query, or fragment")
 		}
 	}
 	return nil

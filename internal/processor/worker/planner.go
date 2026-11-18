@@ -39,6 +39,8 @@ type planRequestLine struct {
 	Body     struct {
 		Model    string `json:"model"`
 		Stream   *bool  `json:"stream,omitempty"`
+		GCSURI   string `json:"gcs_uri,omitempty"`
+		File     string `json:"file,omitempty"`
 		Messages []struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`

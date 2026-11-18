@@ -99,9 +99,14 @@ func TestAsyncEndToEnd(t *testing.T) {
 		broadcaster.Run(broadcasterCtx)
 	}()
 
-	tenant := map[string]string{"userid": "tenant-a"}
+	tenant := map[string]string{"userid": "tenant-a", "provider": "whisper"}
 	items := []RequestItem{
-		{RequestID: "req-1", CustomID: "c-1", ModelID: "m1", Endpoint: "/v1/chat/completions", Metadata: tenant},
+		{
+			RequestID: "req-1", CustomID: "c-1", ModelID: "m1",
+			Endpoint: "/v1/audio/transcriptions",
+			Body:     map[string]any{"model": "m1", "gcs_uri": "https://storage.googleapis.com/bucket/audio.wav"},
+			Metadata: tenant,
+		},
 		{RequestID: "req-2", CustomID: "c-2", ModelID: "m1", Endpoint: "/v1/chat/completions", Metadata: tenant},
 		{RequestID: "req-3", CustomID: "c-3", ModelID: "m1", Endpoint: "/v1/chat/completions", Metadata: tenant},
 	}
@@ -168,6 +173,12 @@ func TestAsyncEndToEnd(t *testing.T) {
 		if got := req.Metadata["userid"]; got != "tenant-a" {
 			t.Errorf("submitted %s metadata userid = %q, want %q", req.RequestID, got, "tenant-a")
 		}
+		if got := req.Metadata["provider"]; got != "whisper" {
+			t.Errorf("submitted %s metadata provider = %q, want %q", req.RequestID, got, "whisper")
+		}
+	}
+	if got := submittedReqs[0].Params["gcs_uri"]; got != "https://storage.googleapis.com/bucket/audio.wav" {
+		t.Errorf("submitted req-1 gcs_uri = %v, want the signed URL payload", got)
 	}
 
 	outputData := sinkOutputBytes(t, sink)

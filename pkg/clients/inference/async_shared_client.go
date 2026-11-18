@@ -32,6 +32,8 @@ type asyncSharedClient struct {
 	logger      logr.Logger
 }
 
+const DefaultAsyncRequestDeadline = 5 * time.Minute
+
 var _ AsyncInferenceClient = (*asyncSharedClient)(nil)
 var _ DurableResultClient = (*asyncSharedClient)(nil)
 
@@ -50,7 +52,7 @@ func newAsyncSharedClient(p producer.Producer, pollTimeout time.Duration, logger
 
 func (c *asyncSharedClient) Submit(ctx context.Context, req *GenerateRequest) *ClientError {
 	now := time.Now()
-	deadline := now.Add(defaultDeadline)
+	deadline := now.Add(DefaultAsyncRequestDeadline)
 	if dl, ok := ctx.Deadline(); ok {
 		deadline = dl
 	}

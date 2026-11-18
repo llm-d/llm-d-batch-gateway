@@ -834,9 +834,12 @@ async_dispatch:
   poll_interval: 275ms
   max_connections: 7
   result_poll_timeout: 11s
+  gcs_signed_url_hosts:
+    - storage.googleapis.com
   models:
     model-a:
       inference_pool_name: pool-a
+      provider: whisper
       request_queue_name: "custom:requests"
       result_queue_name: "custom:results"
 `
@@ -856,6 +859,12 @@ async_dispatch:
 	}
 	if cfg.AsyncDispatchConfig.MaxConnections != 7 {
 		t.Fatalf("parsed max connections = %d, want 7", cfg.AsyncDispatchConfig.MaxConnections)
+	}
+	if len(cfg.AsyncDispatchConfig.GCSSignedURLHosts) != 1 || cfg.AsyncDispatchConfig.GCSSignedURLHosts[0] != "storage.googleapis.com" {
+		t.Fatalf("parsed GCS signed URL hosts = %v, want [storage.googleapis.com]", cfg.AsyncDispatchConfig.GCSSignedURLHosts)
+	}
+	if got := cfg.AsyncProviderFor("model-a"); got != "whisper" {
+		t.Fatalf("parsed provider = %q, want %q", got, "whisper")
 	}
 
 	resolved, err := ResolveModelGateways(cfg)
@@ -917,6 +926,7 @@ func TestValidate_RouteKeyMethod(t *testing.T) {
 func TestValidate_TenantMetadataKey(t *testing.T) {
 	tests := []struct {
 		key     string
+		async   bool
 		wantErr bool
 	}{
 		{key: "", wantErr: false},
@@ -926,12 +936,22 @@ func TestValidate_TenantMetadataKey(t *testing.T) {
 		{key: "traceparent", wantErr: true},
 		{key: "tracestate", wantErr: true},
 		{key: "TraceParent", wantErr: true},
+		// Async provider selection needs this metadata key; sync ignores it.
+		{key: "provider", wantErr: false},
+		{key: "provider", async: true, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
 			c := NewConfig()
-			c.DispatchMode = DispatchModeSync
-			c.ModelGateways = validPerModelConfig()
+			if tt.async {
+				c.DispatchMode = DispatchModeAsync
+				c.AsyncDispatchConfig.Models = map[string]AsyncModelConfig{
+					"model-a": {InferencePoolName: "pool-a"},
+				}
+			} else {
+				c.DispatchMode = DispatchModeSync
+				c.ModelGateways = validPerModelConfig()
+			}
 			c.TenantMetadataKey = tt.key
 			if err := c.Validate(); (err != nil) != tt.wantErr {
 				t.Fatalf("Validate() with tenant_metadata_key %q: err = %v, wantErr %v", tt.key, err, tt.wantErr)
@@ -1105,6 +1125,20 @@ func TestProcessorConfig_Validate_AsyncDispatch(t *testing.T) {
 						RequestQueueName:  "custom:req:a",
 					},
 				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "async GCS host with URL rejected",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.GCSSignedURLHosts = []string{"https://storage.googleapis.com"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "async GCS host with path rejected",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.GCSSignedURLHosts = []string{"storage.googleapis.com/bucket"}
 			},
 			wantErr: true,
 		},

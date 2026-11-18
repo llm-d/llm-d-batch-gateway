@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1200,6 +1202,160 @@ func TestExtractAndValidateLine_StreamTrue_ReturnsError(t *testing.T) {
 	if !strings.Contains(err.Error(), "streaming is not supported") {
 		t.Fatalf("unexpected error message: %v", err)
 	}
+}
+
+func v4GCSURI(expiresAt time.Time, signature string) string {
+	return v4GCSURIWithAlgorithm(expiresAt, "GOOG4-RSA-SHA256", signature)
+}
+
+func v4GCSURIWithAlgorithm(expiresAt time.Time, algorithm, signature string) string {
+	date := expiresAt.UTC().Add(-time.Hour).Format("20060102T150405Z")
+	seconds := int(time.Until(expiresAt).Seconds())
+	return "https://storage.googleapis.com/bucket/audio.wav" +
+		"?X-Goog-Algorithm=" + algorithm +
+		"&X-Goog-Credential=test%2Ftest" +
+		"&X-Goog-Date=" + date +
+		"&X-Goog-Expires=" + strconv.Itoa(seconds) +
+		"&X-Goog-SignedHeaders=host" +
+		"&X-Goog-Signature=" + signature
+}
+
+func v4SignatureQuery(expiresAt time.Time) string {
+	query := url.Values{
+		"X-Goog-Algorithm":     {"GOOG4-RSA-SHA256"},
+		"X-Goog-Credential":    {"test/test"},
+		"X-Goog-Date":          {expiresAt.Add(-time.Hour).UTC().Format("20060102T150405Z")},
+		"X-Goog-Expires":       {strconv.Itoa(int(time.Until(expiresAt).Seconds()))},
+		"X-Goog-SignedHeaders": {"host"},
+		"X-Goog-Signature":     {strings.Repeat("a", 512)},
+	}
+	return query.Encode()
+}
+
+func v4GCSURIWithoutField(expiresAt time.Time, field string) string {
+	uri := v4GCSURI(expiresAt, strings.Repeat("a", 512))
+	parsed, err := url.ParseRequestURI(uri)
+	if err != nil {
+		panic(err)
+	}
+	query := parsed.Query()
+	query.Del(field)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func TestValidateGCSURI(t *testing.T) {
+	deadline := time.Now().Add(time.Hour)
+	hosts := []string{"storage.googleapis.com"}
+
+	tests := []struct {
+		name    string
+		uri     string
+		wantErr string
+	}{
+		{name: "valid", uri: v4GCSURI(deadline.Add(time.Hour), strings.Repeat("a", 512))},
+		{name: "valid HMAC", uri: v4GCSURIWithAlgorithm(deadline.Add(time.Hour), "GOOG4-HMAC-SHA256", strings.Repeat("a", 64))},
+		{name: "expired", uri: v4GCSURI(deadline.Add(-time.Minute), strings.Repeat("a", 512)), wantErr: "expires"},
+		{name: "expires at deadline", uri: v4GCSURI(deadline, strings.Repeat("a", 512)), wantErr: "expires"},
+		{name: "missing signature", uri: "https://storage.googleapis.com/bucket/audio.wav?X-Goog-Date=20260101T000000Z&X-Goog-Expires=60", wantErr: "signature"},
+		{name: "invalid signature", uri: v4GCSURI(deadline.Add(time.Hour), "not-hex"), wantErr: "signature"},
+		{name: "short signature", uri: v4GCSURI(deadline.Add(time.Hour), strings.Repeat("a", 64)), wantErr: "signature"},
+		{name: "HMAC signature with RSA length", uri: v4GCSURIWithAlgorithm(deadline.Add(time.Hour), "GOOG4-HMAC-SHA256", strings.Repeat("a", 512)), wantErr: "signature"},
+		{name: "bucket only", uri: "https://storage.googleapis.com/bucket?" + v4SignatureQuery(deadline.Add(time.Hour)), wantErr: "bucket and object"},
+		{name: "bucket with trailing slash", uri: "https://storage.googleapis.com/bucket/?" + v4SignatureQuery(deadline.Add(time.Hour)), wantErr: "bucket and object"},
+		{name: "missing algorithm", uri: v4GCSURIWithoutField(deadline.Add(time.Hour), "X-Goog-Algorithm"), wantErr: "signature"},
+		{name: "missing credential", uri: v4GCSURIWithoutField(deadline.Add(time.Hour), "X-Goog-Credential"), wantErr: "signature"},
+		{name: "missing signed headers", uri: v4GCSURIWithoutField(deadline.Add(time.Hour), "X-Goog-SignedHeaders"), wantErr: "signature"},
+		{name: "unsupported host", uri: "https://example.com/bucket/audio.wav?X-Goog-Signature=" + strings.Repeat("a", 512), wantErr: "host"},
+		{name: "gs URI", uri: "gs://bucket/audio.wav", wantErr: "HTTPS"},
+		{name: "HTTP URI", uri: "http://storage.googleapis.com/bucket/audio.wav?X-Goog-Signature=" + strings.Repeat("a", 512), wantErr: "HTTPS"},
+		{name: "unsupported scheme", uri: "ftp://storage.googleapis.com/bucket/audio.wav", wantErr: "HTTPS"},
+		{name: "missing expiry", uri: v4GCSURIWithoutField(deadline.Add(time.Hour), "X-Goog-Expires"), wantErr: "expiry"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateGCSURI(tt.uri, hosts, deadline)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateGCSURI() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateGCSURI() error = %v, want containing %q", err, tt.wantErr)
+			}
+			if strings.Contains(err.Error(), tt.uri) || strings.Contains(err.Error(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
+				t.Fatal("validateGCSURI() leaked the signed URL or signature")
+			}
+		})
+	}
+}
+
+func TestValidateLineForDispatch_GCSURI(t *testing.T) {
+	deadline := time.Now().Add(time.Hour)
+	validURI := v4GCSURI(deadline.Add(time.Hour), strings.Repeat("a", 512))
+
+	newProcessor := func(mode config.DispatchMode) *Processor {
+		cfg := config.NewConfig()
+		cfg.DispatchMode = mode
+		cfg.AsyncDispatchConfig.Models = map[string]config.AsyncModelConfig{
+			"whisper": {InferencePoolName: "whisper-pool", Provider: "whisper"},
+		}
+		cfg.AsyncDispatchConfig.GCSSignedURLHosts = []string{"storage.googleapis.com"}
+		return &Processor{cfg: cfg, endpointAllowlist: openai.EndpointAllowlist{}}
+	}
+
+	line := func(endpoint, body string) []byte {
+		return []byte(`{"custom_id":"audio-1","method":"POST","url":"` + endpoint + `","body":` + body + `}`)
+	}
+
+	t.Run("transcriptions valid", func(t *testing.T) {
+		p := newProcessor(config.DispatchModeAsync)
+		_, err := p.validateLineForDispatch(line("/v1/audio/transcriptions", `{"model":"whisper","gcs_uri":"`+validURI+`","language":"en"}`), "/v1/audio/transcriptions", deadline)
+		if err != nil {
+			t.Fatalf("validateLineForDispatch() error = %v, want nil", err)
+		}
+	})
+
+	t.Run("translations valid", func(t *testing.T) {
+		p := newProcessor(config.DispatchModeAsync)
+		_, err := p.validateLineForDispatch(line("/v1/audio/translations", `{"model":"whisper","gcs_uri":"`+validURI+`"}`), "/v1/audio/translations", deadline)
+		if err != nil {
+			t.Fatalf("validateLineForDispatch() error = %v, want nil", err)
+		}
+	})
+
+	t.Run("sync dispatch rejected", func(t *testing.T) {
+		p := newProcessor(config.DispatchModeSync)
+		_, err := p.validateLineForDispatch(line("/v1/audio/transcriptions", `{"model":"whisper","gcs_uri":"`+validURI+`"}`), "/v1/audio/transcriptions", deadline)
+		if err == nil || !strings.Contains(err.Error(), "dispatch_mode") {
+			t.Fatalf("validateLineForDispatch() error = %v, want dispatch_mode error", err)
+		}
+	})
+
+	t.Run("missing media rejected", func(t *testing.T) {
+		p := newProcessor(config.DispatchModeAsync)
+		_, err := p.validateLineForDispatch(line("/v1/audio/transcriptions", `{"model":"whisper","language":"en"}`), "/v1/audio/transcriptions", deadline)
+		if err == nil || !strings.Contains(err.Error(), "body.gcs_uri or body.file") {
+			t.Fatalf("validateLineForDispatch() error = %v, want missing media error", err)
+		}
+	})
+
+	t.Run("existing file media unchanged", func(t *testing.T) {
+		p := newProcessor(config.DispatchModeAsync)
+		_, err := p.validateLineForDispatch(line("/v1/audio/transcriptions", `{"model":"whisper","file":"data:audio/wav;base64,QUJD","language":"en"}`), "/v1/audio/transcriptions", deadline)
+		if err != nil {
+			t.Fatalf("validateLineForDispatch() error = %v, want nil", err)
+		}
+	})
+
+	t.Run("unsupported endpoint rejected", func(t *testing.T) {
+		p := newProcessor(config.DispatchModeAsync)
+		_, err := p.validateLineForDispatch(line("/v1/chat/completions", `{"model":"whisper","gcs_uri":"`+validURI+`"}`), "/v1/chat/completions", deadline)
+		if err == nil || !strings.Contains(err.Error(), "audio") {
+			t.Fatalf("validateLineForDispatch() error = %v, want audio endpoint error", err)
+		}
+	})
 }
 
 func TestExtractAndValidateLine_StreamFalse_OK(t *testing.T) {
