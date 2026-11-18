@@ -286,7 +286,7 @@ func TestHandleFailed_Errors(t *testing.T) {
 			want: &openai.BatchErrors{
 				Object: "list",
 				Data: []openai.BatchError{{
-					Code:    errCodeInvalidRequest,
+					Code:    "invalid_request",
 					Message: "streaming is not supported in batch requests (model: m1)",
 					Param:   ptr.To("body.stream"),
 					Line:    ptr.To(int64(2)),
@@ -302,7 +302,7 @@ func TestHandleFailed_Errors(t *testing.T) {
 			want: &openai.BatchErrors{
 				Object: "list",
 				Data: []openai.BatchError{{
-					Code:    errCodeInvalidRequest,
+					Code:    "invalid_request",
 					Message: "unexpected end of JSON input",
 					Line:    ptr.To(int64(1)),
 				}},

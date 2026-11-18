@@ -452,7 +452,7 @@ func (p *Processor) handleJobError(ctx context.Context, params *jobExecutionPara
 			// as the legacy pipeline.
 			logger.V(logging.INFO).Info("SIGTERM received, leaving resumable job for the reconciler")
 		default:
-			if finErr := p.finalizeResumableTerminal(ctx, params, openai.BatchStatusFailed, batch_types.ErrCodeBatchFailed, openai.BatchStatusInProgress); finErr != nil {
+			if finErr := p.finalizeResumableTerminal(ctx, params, openai.BatchStatusFailed, batch_types.ErrCodeBatchFailed, openai.BatchStatusInProgress, withInputLineError(err)); finErr != nil {
 				logger.Error(finErr, "Failed to finalize failed resumable job")
 			}
 		}
@@ -578,7 +578,7 @@ func (p *Processor) handleFailed(
 
 	logger := logr.FromContextOrDiscard(ctx)
 
-	if err := updater.UpdateFailedStatus(ioCtx, jobItem, requestCounts, "", "", withBatchErrors(batchErrorsFor(cause))); err != nil {
+	if err := updater.UpdateFailedStatus(ioCtx, jobItem, requestCounts, "", "", withInputLineError(cause)); err != nil {
 		logger.Error(err, "Failed to update status to failed")
 		return err
 	}
@@ -591,31 +591,6 @@ func (p *Processor) handleFailed(
 	metrics.RecordJobProcessed(metrics.ResultFailed, metrics.ReasonSystemError)
 	logger.V(logging.INFO).Info("Job failed handled")
 	return nil
-}
-
-// errCodeInvalidRequest is the code of a batch error for an input line that
-// failed validation.
-const errCodeInvalidRequest = "invalid_request"
-
-// batchErrorsFor returns the errors list for a failed batch: one entry when
-// cause is an input line that failed validation, nil otherwise.
-func batchErrorsFor(cause error) *openai.BatchErrors {
-	var lineErr *inputLineError
-	if !errors.As(cause, &lineErr) {
-		return nil
-	}
-	batchErr := openai.BatchError{
-		Code:    errCodeInvalidRequest,
-		Message: lineErr.Error(),
-		Line:    &lineErr.line,
-	}
-	if lineErr.param != "" {
-		batchErr.Param = &lineErr.param
-	}
-	return &openai.BatchErrors{
-		Object: "list",
-		Data:   []openai.BatchError{batchErr},
-	}
 }
 
 // handleOwnershipLost is invoked when a fenced progress write reveals this

@@ -20,6 +20,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -196,12 +197,26 @@ func withFileIDs(outputFileID, errorFileID string) func(*openai.BatchStatusInfo)
 	}
 }
 
-// withBatchErrors returns a modifier that sets the errors list on the status info.
-// A nil list is skipped.
-func withBatchErrors(batchErrors *openai.BatchErrors) func(*openai.BatchStatusInfo) {
+// withInputLineError returns a modifier that reports cause in the errors list
+// when it is an input line that failed validation. Any other cause, or nil,
+// leaves the list unset.
+func withInputLineError(cause error) func(*openai.BatchStatusInfo) {
 	return func(info *openai.BatchStatusInfo) {
-		if batchErrors != nil {
-			info.Errors = batchErrors
+		var lineErr *inputLineError
+		if !errors.As(cause, &lineErr) {
+			return
+		}
+		batchErr := openai.BatchError{
+			Code:    "invalid_request",
+			Message: lineErr.Error(),
+			Line:    &lineErr.line,
+		}
+		if lineErr.param != "" {
+			batchErr.Param = &lineErr.param
+		}
+		info.Errors = &openai.BatchErrors{
+			Object: "list",
+			Data:   []openai.BatchError{batchErr},
 		}
 	}
 }
