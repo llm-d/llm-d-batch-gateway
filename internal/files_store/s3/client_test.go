@@ -1221,8 +1221,11 @@ func TestOpenStream_AbortAfterFailedCommitDoesNotHang(t *testing.T) {
 
 	// The caller's cleanup Abort must not block on the already-consumed
 	// result channel (the upload goroutine sends exactly one value).
-	done := make(chan error, 1)
-	go func() { done <- w.Abort(ctx) }()
+	done := make(chan struct{}, 1)
+	go func() {
+		_ = w.Abort(ctx)
+		done <- struct{}{}
+	}()
 	// The only property that matters here: Abort returns instead of
 	// blocking on the already-consumed result channel. Its error value is
 	// irrelevant — the stream already failed.
