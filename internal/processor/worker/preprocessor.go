@@ -456,7 +456,10 @@ func isHexSignature(signature string) bool {
 		return false
 	}
 	for _, c := range signature {
-		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
+		isHex := '0' <= c && c <= '9' ||
+			'a' <= c && c <= 'f' ||
+			'A' <= c && c <= 'F'
+		if !isHex {
 			return false
 		}
 	}
