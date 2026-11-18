@@ -19,14 +19,29 @@ package retryclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-batch-gateway/internal/files_store/api"
 	ucom "github.com/llm-d/llm-d-batch-gateway/internal/util/com"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/retry"
 )
+
+// isPermanent reports whether err is a non-retryable error: a missing object
+// (os.ErrNotExist) or one of the storage sentinels (ErrFileExists,
+// ErrFileTooLarge, ErrTooManyLines) that a retry can never resolve. The wrapped
+// error is passed to retry.Permanent so retry.Do short-circuits on it; retry.Permanent
+// Unwraps, so callers' errors.Is checks against the bare sentinel still match.
+func isPermanent(err error) bool {
+	return err != nil &&
+		(errors.Is(err, os.ErrNotExist) ||
+			errors.Is(err, api.ErrFileExists) ||
+			errors.Is(err, api.ErrFileTooLarge) ||
+			errors.Is(err, api.ErrTooManyLines))
+}
 
 // Client wraps a BatchFilesClient and retries transient errors.
 type Client struct {
@@ -74,6 +89,13 @@ func (c *Client) Store(ctx context.Context, fileName, folderName string, fileSiz
 
 		var storeErr error
 		meta, storeErr = c.inner.Store(ctx, fileName, folderName, fileSizeLimit, lineNumLimit, rs)
+		// Don't retry permanent storage errors: a missing/already-existing object
+		// or a file that exceeds a size/line limit won't succeed on a second attempt
+		// (the same reader produces the same bytes), so re-seeking and re-uploading is
+		// wasted work. Keep the bare sentinel so callers' errors.Is checks match.
+		if isPermanent(storeErr) {
+			return retry.Permanent(storeErr)
+		}
 		return storeErr
 	})
 	if err != nil {
@@ -103,6 +125,11 @@ func (c *Client) Retrieve(ctx context.Context, fileName, folderName string) (io.
 
 		var retrieveErr error
 		rc, meta, retrieveErr = c.inner.Retrieve(ctx, fileName, folderName)
+		// A missing object (os.ErrNotExist) is permanent: a retry would just get
+		// another 404. Only transient errors (network blips, throttling) retry.
+		if isPermanent(retrieveErr) {
+			return retry.Permanent(retrieveErr)
+		}
 		return retrieveErr
 	})
 	if err != nil {
@@ -128,7 +155,13 @@ func (c *Client) Delete(ctx context.Context, fileName, folderName string) error 
 			logr.FromContextOrDiscard(ctx).Info("Retrying file delete",
 				"file", fileName, "attempt", attempt, "maxRetries", c.cfg.MaxRetries)
 		}
-		return c.inner.Delete(ctx, fileName, folderName)
+		err := c.inner.Delete(ctx, fileName, folderName)
+		// Deleting a missing object (fs/GCS) or a missing bucket (S3) returns
+		// os.ErrNotExist, which is permanent — a retry can't make the object appear.
+		if isPermanent(err) {
+			return retry.Permanent(err)
+		}
+		return err
 	})
 	if err != nil {
 		if attempts > c.cfg.MaxRetries {

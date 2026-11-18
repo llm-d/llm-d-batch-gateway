@@ -100,6 +100,9 @@ func TestNewConfig_Defaults(t *testing.T) {
 	if c.SendFairnessHeader {
 		t.Fatalf("SendFairnessHeader = true, want false by default")
 	}
+	if c.TenantMetadataKey != "" {
+		t.Fatalf("TenantMetadataKey = %q, want empty (off) by default", c.TenantMetadataKey)
+	}
 	if c.RouteKeyMethod != RouteKeyMethodBare {
 		t.Fatalf("RouteKeyMethod = %q, want empty (bare) by default", c.RouteKeyMethod)
 	}
@@ -177,6 +180,35 @@ func TestProcessorConfig_Validate_ExtraEndpoints(t *testing.T) {
 	c.ExtraEndpoints = []string{"/v1/classify?mode=test"}
 	if err := c.Validate(); err == nil {
 		t.Fatal("Validate() expected error for invalid extra endpoint")
+	}
+}
+
+func TestProcessorConfig_Validate_FileClientType(t *testing.T) {
+	tests := []struct {
+		ftype   string
+		wantErr bool
+	}{
+		{ftype: "fs"},
+		{ftype: "s3"},
+		{ftype: "gcs"},
+		{ftype: "mock"},
+		{ftype: "", wantErr: true},
+		{ftype: "xyz", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run("type="+tt.ftype, func(t *testing.T) {
+			c := NewConfig()
+			c.ModelGateways = validPerModelConfig()
+			c.FileClientCfg.Type = tt.ftype
+
+			err := c.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("Validate() error = nil, want error for file_client.type %q", tt.ftype)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() unexpected error for file_client.type %q: %v", tt.ftype, err)
+			}
+		})
 	}
 }
 
@@ -709,6 +741,7 @@ model_gateways:
     tls_insecure_skip_verify: true
 default_output_expiration_seconds: 86400
 send_fairness_header: true
+tenant_metadata_key: userid
 route_key_method: tenant
 `)
 
@@ -783,6 +816,9 @@ route_key_method: tenant
 	}
 	if !c.SendFairnessHeader {
 		t.Fatalf("SendFairnessHeader = false, want true")
+	}
+	if c.TenantMetadataKey != "userid" {
+		t.Fatalf("TenantMetadataKey = %q, want %q", c.TenantMetadataKey, "userid")
 	}
 	if c.RouteKeyMethod != RouteKeyMethodTenant {
 		t.Fatalf("RouteKeyMethod = %q, want %q", c.RouteKeyMethod, RouteKeyMethodTenant)
@@ -875,6 +911,32 @@ func TestValidate_RouteKeyMethod(t *testing.T) {
 	c.RouteKeyMethod = RouteKeyMethod("geography")
 	if err := c.Validate(); err == nil {
 		t.Fatal("Validate() expected error for unknown route_key_method, got nil")
+	}
+}
+
+func TestValidate_TenantMetadataKey(t *testing.T) {
+	tests := []struct {
+		key     string
+		wantErr bool
+	}{
+		{key: "", wantErr: false},
+		{key: "userid", wantErr: false},
+		{key: "tenant_id", wantErr: false},
+		// Trace context injection would overwrite the tenant under these keys.
+		{key: "traceparent", wantErr: true},
+		{key: "tracestate", wantErr: true},
+		{key: "TraceParent", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			c := NewConfig()
+			c.DispatchMode = DispatchModeSync
+			c.ModelGateways = validPerModelConfig()
+			c.TenantMetadataKey = tt.key
+			if err := c.Validate(); (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() with tenant_metadata_key %q: err = %v, wantErr %v", tt.key, err, tt.wantErr)
+			}
+		})
 	}
 }
 

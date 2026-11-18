@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/ptr"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/retry"
 	inference "github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
+	"go.opentelemetry.io/otel/propagation"
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -281,6 +282,16 @@ type ProcessorConfig struct {
 	// false (default) omits the fairness header.
 	SendFairnessHeader bool `yaml:"send_fairness_header"`
 
+	// TenantMetadataKey, when set, stores the job's tenant ID under this key
+	// in the metadata of each async inference request, so llm-d-async
+	// dispatch gates that key on request metadata can tell tenants apart
+	// (redis-quota; sql-quota is on llm-d-async main, not yet released). Set
+	// it to "userid" to match llm-d-async's default quota attribute; with that key,
+	// llm-d-async's default merge policy also stamps the tenant ID into its
+	// fairness header. Trace context keys (traceparent, tracestate) are
+	// rejected. Empty (default) omits it. Sync dispatch ignores it.
+	TenantMetadataKey string `yaml:"tenant_metadata_key"`
+
 	// EnablePprof enables pprof profiling endpoints on the observability server.
 	EnablePprof bool `yaml:"enable_pprof"`
 
@@ -502,6 +513,9 @@ func (c *ProcessorConfig) Validate() error {
 		return fmt.Errorf("e2e_latency_bucket must satisfy: start > 0, factor > 1, count > 0")
 	}
 
+	if err := c.FileClientCfg.ValidateType(); err != nil {
+		return err
+	}
 	if err := c.FileClientCfg.Retry.Validate(); err != nil {
 		return fmt.Errorf("file_client.retry: %w", err)
 	}
@@ -528,6 +542,14 @@ func (c *ProcessorConfig) Validate() error {
 	case RouteKeyMethodBare, RouteKeyMethodTenant:
 	default:
 		return fmt.Errorf("route_key_method must be empty or %q, got %q", RouteKeyMethodTenant, c.RouteKeyMethod)
+	}
+
+	// The async client injects W3C trace context into the same metadata map
+	// after the tenant, so a key the propagator writes would replace the tenant.
+	for _, field := range (propagation.TraceContext{}).Fields() {
+		if strings.EqualFold(c.TenantMetadataKey, field) {
+			return fmt.Errorf("tenant_metadata_key %q is reserved for trace context propagation", c.TenantMetadataKey)
+		}
 	}
 
 	if err := c.validateGateways(); err != nil {

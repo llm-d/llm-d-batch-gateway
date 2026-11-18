@@ -18,8 +18,11 @@ limitations under the License.
 package config
 
 import (
+	"fmt"
+
 	"github.com/llm-d/llm-d-batch-gateway/internal/database/postgresql"
 	fsclient "github.com/llm-d/llm-d-batch-gateway/internal/files_store/fs"
+	gcsclient "github.com/llm-d/llm-d-batch-gateway/internal/files_store/gcs"
 	s3client "github.com/llm-d/llm-d-batch-gateway/internal/files_store/s3"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/retry"
 )
@@ -34,6 +37,7 @@ const (
 const (
 	FileTypeFS   = "fs"
 	FileTypeS3   = "s3"
+	FileTypeGCS  = "gcs"
 	FileTypeMock = "mock"
 )
 
@@ -52,10 +56,30 @@ func (c DBClientConfig) DeepCopy() DBClientConfig {
 
 // FileClientConfig holds file storage client configuration shared by all components.
 type FileClientConfig struct {
-	Type     string          `yaml:"type"`
-	FSConfig fsclient.Config `yaml:"fs"`
-	S3Config s3client.Config `yaml:"s3"`
-	Retry    retry.Config    `yaml:"retry"`
+	Type      string           `yaml:"type"`
+	FSConfig  fsclient.Config  `yaml:"fs"`
+	S3Config  s3client.Config  `yaml:"s3"`
+	GCSConfig gcsclient.Config `yaml:"gcs"`
+	Retry     retry.Config     `yaml:"retry"`
+}
+
+// ValidateType validates the Type field. It accepts fs, s3, gcs, and mock.
+// Components that don't support mock (currently only gc) must reject it
+// themselves on top of this call, so the fs/s3/gcs set has a single source of
+// truth here and callers don't each maintain a copy of the switch. Returns nil
+// for a valid type; returns an error for the empty string or an unsupported
+// value, naming the accepted values so the message is actionable.
+func (c FileClientConfig) ValidateType() error {
+	switch c.Type {
+	case FileTypeFS, FileTypeS3, FileTypeGCS, FileTypeMock:
+		return nil
+	case "":
+		return fmt.Errorf("file_client.type is required (must be %q, %q, %q, or %q)",
+			FileTypeFS, FileTypeS3, FileTypeGCS, FileTypeMock)
+	default:
+		return fmt.Errorf("file_client.type must be %q, %q, %q, or %q, got %q",
+			FileTypeFS, FileTypeS3, FileTypeGCS, FileTypeMock, c.Type)
+	}
 }
 
 // OTelConfig holds OpenTelemetry-related settings shared by apiserver and processor.

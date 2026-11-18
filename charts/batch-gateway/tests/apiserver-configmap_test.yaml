@@ -97,6 +97,18 @@ tests:
           path: data["config.yaml"]
           pattern: 'max_line_count: 50000'
 
+  - it: should render gcs file_client config defaults
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'gcs:'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'auto_create_bucket: false'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'verify_bucket_on_start: true'
+
   - it: should render the global maximum input-file size
     set:
       global.maxInputFileSizeBytes: 524288000

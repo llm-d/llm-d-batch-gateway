@@ -21,6 +21,7 @@ type RequestItem struct {
 	Endpoint    string
 	Body        map[string]any
 	Headers     map[string]string
+	Metadata    map[string]string // async request metadata for dispatch gates; shared, not mutated
 	ParseError  *OutputError
 	SubmittedAt time.Time
 }

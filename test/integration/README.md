@@ -10,12 +10,16 @@ Integration tests validate feature-level behavior through the real HTTP stack �
 - **Cross-cutting behavior**: security headers, request ID propagation, 404 JSON format
 - **Inference client**: HTTP client integration with containerized mock server (Docker or Podman)
 - **S3 client**: file store operations against a real S3-compatible service (SeaweedFS in the dev deployment)
+- **GCS client**: file store operations against real GCS or a GCS emulator
+  - `make test-integration-gcs` auto-provisions a [fake-gcs-server](https://github.com/fsouza/fake-gcs-server) container in-process and points the SDK at it via `STORAGE_EMULATOR_HOST`; no GCP credentials needed.
+  - `make test-integration` runs the same tests against real GCS when `GCS_TEST_BUCKET`/`GCS_TEST_PROJECT` are set (ADC).
 
 ## Prerequisites
 
 - Go 1.26+
-- Docker or Podman (optional, for inference client tests)
+- Docker or Podman (optional, for inference client tests and the GCS emulator)
 - S3-compatible service (optional, for S3 tests — set `S3_TEST_ENDPOINT`)
+- GCS-compatible service (optional, for GCS tests — `make test-integration-gcs` provisions fake-gcs-server automatically; or set `GCS_TEST_BUCKET`/`GCS_TEST_PROJECT` to use real GCS via ADC, or `STORAGE_EMULATOR_HOST` to point the SDK at a manually-started emulator)
 
 ## Run the tests
 
