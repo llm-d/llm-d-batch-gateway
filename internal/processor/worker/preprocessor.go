@@ -25,7 +25,9 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +35,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/batchctx"
+	"github.com/llm-d/llm-d-batch-gateway/internal/processor/config"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/metrics"
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/openai"
 	batch_types "github.com/llm-d/llm-d-batch-gateway/internal/shared/types"
@@ -170,7 +173,7 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 			return nil, fmt.Errorf("write line %d to input file %q: %w", lineCount, localInputFilePath, err)
 		}
 
-		requestMeta, err := extractAndValidateLine(line, p.endpointAllowlist, jobInfo.BatchJob.Endpoint.String())
+		requestMeta, err := p.validateLineForDispatch(line, jobInfo.BatchJob.Endpoint.String(), requestDeadline(ctx))
 		if err != nil {
 			return nil, fmt.Errorf("validate request at line %d: %w", lineCount, err)
 		}
@@ -281,6 +284,9 @@ type requestMeta struct {
 	CustomID   string
 	ModelID    string
 	PrefixHash uint32
+	gcsURI     string
+	hasGCSURI  bool
+	hasFile    bool
 }
 
 // extractAndValidateLine parses and validates a request line and returns the
@@ -340,7 +346,143 @@ func extractAndValidateLine(line []byte, endpointAllowlist openai.EndpointAllowl
 		CustomID:   req.CustomID,
 		ModelID:    req.Body.Model,
 		PrefixHash: prefixHash,
+		gcsURI:     req.Body.GCSURI,
+		hasGCSURI:  req.Body.GCSURI != "",
+		hasFile:    req.Body.File != "",
 	}, nil
+}
+
+func requestDeadline(ctx context.Context) time.Time {
+	if deadline, ok := ctx.Deadline(); ok {
+		return deadline
+	}
+	return time.Now().Add(inference.DefaultAsyncRequestDeadline)
+}
+
+func (p *Processor) validateLineForDispatch(line []byte, batchEndpoint string, deadline time.Time) (requestMeta, error) {
+	meta, err := extractAndValidateLine(line, p.endpointAllowlist, batchEndpoint)
+	if err != nil {
+		return requestMeta{}, err
+	}
+	if meta.hasGCSURI {
+		if !isAudioEndpoint(batchEndpoint) {
+			return requestMeta{}, fmt.Errorf("gcs_uri is supported only on audio endpoints")
+		}
+		if p.cfg == nil || !p.cfg.IsAsync() {
+			return requestMeta{}, fmt.Errorf("gcs_uri requires dispatch_mode async")
+		}
+		if p.cfg.AsyncProviderFor(meta.ModelID) == "" {
+			return requestMeta{}, fmt.Errorf("model %q has no async provider metadata", meta.ModelID)
+		}
+		if err := validateGCSURI(meta.gcsURI, p.cfg.AsyncDispatchConfig.GCSSignedURLHosts, deadline); err != nil {
+			return requestMeta{}, err
+		}
+		return meta, nil
+	}
+	if isAudioEndpoint(batchEndpoint) && !meta.hasFile {
+		return requestMeta{}, fmt.Errorf("audio requests require body.gcs_uri or body.file")
+	}
+	return meta, nil
+}
+
+func isAudioEndpoint(endpoint string) bool {
+	return endpoint == openai.EndpointAudioTranscriptions.String() ||
+		endpoint == openai.EndpointAudioTranslations.String()
+}
+
+func validateGCSURI(signedURL string, hosts []string, deadline time.Time) error {
+	parsed, err := url.Parse(signedURL)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil ||
+		parsed.Path == "" || parsed.Path == "/" || parsed.RawQuery == "" || parsed.Fragment != "" {
+		return fmt.Errorf("gcs_uri must be an HTTPS URL for a GCS object")
+	}
+	if !hasGCSBucketAndObject(parsed.Path) {
+		return fmt.Errorf("gcs_uri must identify a GCS bucket and object")
+	}
+	if !allowedGCSHost(parsed.Host, hosts) {
+		return fmt.Errorf("gcs_uri host is not allowed")
+	}
+
+	query := parsed.Query()
+	if signature := query.Get("X-Goog-Signature"); signature != "" {
+		signatureLength := 0
+		switch query.Get("X-Goog-Algorithm") {
+		case "GOOG4-RSA-SHA256":
+			// A service-account RSA-SHA256 signature is 256 bytes, hex-encoded.
+			signatureLength = 512
+		case "GOOG4-HMAC-SHA256":
+			// An HMAC-SHA256 signature is 32 bytes, hex-encoded.
+			signatureLength = 64
+		}
+		if !isHexSignature(signature) || len(signature) != signatureLength {
+			return fmt.Errorf("gcs_uri has an invalid signature")
+		}
+		if query.Get("X-Goog-Credential") == "" || query.Get("X-Goog-SignedHeaders") == "" {
+			return fmt.Errorf("gcs_uri has an invalid signature")
+		}
+	} else if query.Get("Signature") == "" {
+		return fmt.Errorf("gcs_uri is missing a signature")
+	}
+
+	expiry, err := signedGCSURLExpiry(query)
+	if err != nil {
+		return fmt.Errorf("gcs_uri has an invalid expiry")
+	}
+	if !expiry.After(deadline) {
+		return fmt.Errorf("gcs_uri expires at or before the request deadline")
+	}
+	return nil
+}
+
+func hasGCSBucketAndObject(path string) bool {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	return len(segments) >= 2 && segments[0] != "" && segments[1] != ""
+}
+
+func allowedGCSHost(host string, hosts []string) bool {
+	if len(hosts) == 0 {
+		hosts = []string{config.DefaultGCSSignedURLHost}
+	}
+	for _, allowed := range hosts {
+		if strings.EqualFold(host, allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHexSignature(signature string) bool {
+	if signature == "" {
+		return false
+	}
+	for _, c := range signature {
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func signedGCSURLExpiry(query url.Values) (time.Time, error) {
+	if date := query.Get("X-Goog-Date"); date != "" {
+		start, err := time.Parse("20060102T150405Z", date)
+		if err != nil {
+			return time.Time{}, err
+		}
+		seconds, err := strconv.Atoi(query.Get("X-Goog-Expires"))
+		if err != nil || seconds <= 0 {
+			return time.Time{}, fmt.Errorf("invalid expiry duration")
+		}
+		return start.Add(time.Duration(seconds) * time.Second), nil
+	}
+	if expires := query.Get("Expires"); expires != "" {
+		seconds, err := strconv.ParseInt(expires, 10, 64)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return time.Unix(seconds, 0), nil
+	}
+	return time.Time{}, fmt.Errorf("missing expiry")
 }
 
 func writeModelMappings(jobRootDir string, modelToSafe map[string]string, lineCount, rejectedCount int64) error {

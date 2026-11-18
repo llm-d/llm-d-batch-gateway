@@ -246,6 +246,46 @@ checkpoint may therefore cause inference to run again. SQL does not preserve
 completed results across the crash window and should not be treated as
 Redis-equivalent recovery.
 
+### Signed GCS audio media
+
+For `/v1/audio/transcriptions` and `/v1/audio/translations`, `body.gcs_uri` may
+reference private GCS media with a signed HTTPS URL. The processor validates the
+URL host, signature, and expiry before dispatch, requires `dispatchMode: async`,
+and sends the model's `provider` value as async request metadata. The processor
+does not download the object; vLLM fetches the signed URL.
+For now, `http://`, `gs://`, and all other schemes are rejected.
+Both GCS V4 signing algorithms are accepted: `GOOG4-RSA-SHA256` and
+`GOOG4-HMAC-SHA256`.
+
+```yaml
+processor:
+  config:
+    asyncDispatch:
+      gcsSignedURLHosts:
+        - storage.googleapis.com
+      models:
+        whisper:
+          inferencePoolName: whisper-pool
+          provider: whisper
+```
+
+Configure the existing llm-d-async transform on the separately deployed chart:
+
+```yaml
+ap:
+  transformConfig:
+    requestTransforms:
+      - name: gcs-media
+        type: gcs_uri_multipart
+        parameters:
+          providers: ["whisper"]
+```
+
+The transform converts `gcs_uri` to the multipart `url` field and removes
+`gcs_uri` from the request sent to vLLM. Requests using the existing
+`body.file` field for S3 or data-URL media are unchanged. Treat signed URLs as
+secrets; do not copy complete URLs into logs.
+
 ## Usage
 
 ### Method 1: Using a Custom Values File

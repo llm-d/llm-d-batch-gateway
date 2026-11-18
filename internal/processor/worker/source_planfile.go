@@ -119,6 +119,19 @@ func tenantMetadata(cfg *config.ProcessorConfig, tenantID string) map[string]str
 	return map[string]string{cfg.TenantMetadataKey: tenantID}
 }
 
+func (s *PlanFileSource) requestMetadata(modelID string) map[string]string {
+	provider := s.cfg.AsyncProviderFor(modelID)
+	if provider == "" {
+		return s.metadata
+	}
+	metadata := maps.Clone(s.metadata)
+	if metadata == nil {
+		metadata = make(map[string]string, 1)
+	}
+	metadata[config.AsyncProviderMetadataKey] = provider
+	return metadata
+}
+
 // PreStoreRecovering stores every recovering entry in the job's pending
 // set. It must run before the job's recovery broadcasters start claiming
 // the previous submitter's route — i.e. before the dispatcher is built —
@@ -317,7 +330,7 @@ func (s *PlanFileSource) readEntry(entry planEntry, modelID string) (*pipeline.R
 		Endpoint:  req.URL,
 		Body:      req.Body,
 		Headers:   headers,
-		Metadata:  s.metadata,
+		Metadata:  s.requestMetadata(modelID),
 	}, nil
 }
 
