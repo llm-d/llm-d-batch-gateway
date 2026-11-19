@@ -113,6 +113,7 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 	modelToSafe := make(map[string]string) // to map the model ID to a safe file name
 
 	seenCustomIDs := make(map[string]struct{})
+	dispatchDeadline := requestDeadline(ctx, jobInfo)
 
 	// streaming loop
 	// Reject unregistered models at ingestion. Per-model sync gateways resolve
@@ -173,7 +174,7 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 			return nil, fmt.Errorf("write line %d to input file %q: %w", lineCount, localInputFilePath, err)
 		}
 
-		requestMeta, err := p.validateLineForDispatch(line, jobInfo.BatchJob.Endpoint.String(), requestDeadline(ctx))
+		requestMeta, err := p.validateLineForDispatch(line, jobInfo.BatchJob.Endpoint.String(), dispatchDeadline)
 		if err != nil {
 			return nil, fmt.Errorf("validate request at line %d: %w", lineCount, err)
 		}
@@ -352,9 +353,12 @@ func extractAndValidateLine(line []byte, endpointAllowlist openai.EndpointAllowl
 	}, nil
 }
 
-func requestDeadline(ctx context.Context) time.Time {
+func requestDeadline(ctx context.Context, jobInfo *batch_types.JobInfo) time.Time {
 	if deadline, ok := ctx.Deadline(); ok {
 		return deadline
+	}
+	if jobInfo != nil && jobInfo.BatchJob != nil && jobInfo.BatchJob.ExpiresAt != nil {
+		return time.Unix(*jobInfo.BatchJob.ExpiresAt, 0)
 	}
 	return time.Now().Add(inference.DefaultAsyncRequestDeadline)
 }
@@ -365,6 +369,9 @@ func (p *Processor) validateLineForDispatch(line []byte, batchEndpoint string, d
 		return requestMeta{}, err
 	}
 	if meta.hasGCSURI {
+		if meta.hasFile {
+			return requestMeta{}, fmt.Errorf("body.gcs_uri and body.file are mutually exclusive")
+		}
 		if !isAudioEndpoint(batchEndpoint) {
 			return requestMeta{}, fmt.Errorf("gcs_uri is supported only on audio endpoints")
 		}
@@ -405,6 +412,9 @@ func validateGCSURI(signedURL string, hosts []string, deadline time.Time) error 
 
 	query := parsed.Query()
 	if signature := query.Get("X-Goog-Signature"); signature != "" {
+		if query.Get("X-Goog-Date") == "" || query.Get("X-Goog-Expires") == "" {
+			return fmt.Errorf("gcs_uri is missing required V4 expiry fields")
+		}
 		signatureLength := 0
 		switch query.Get("X-Goog-Algorithm") {
 		case "GOOG4-RSA-SHA256":

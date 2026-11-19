@@ -1204,6 +1204,27 @@ func TestExtractAndValidateLine_StreamTrue_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestRequestDeadline(t *testing.T) {
+	batchExpiry := time.Now().Add(time.Hour).Truncate(time.Second)
+	expiresAt := batchExpiry.Unix()
+	jobInfo := &batch_types.JobInfo{
+		BatchJob: &openai.Batch{
+			BatchStatusInfo: openai.BatchStatusInfo{ExpiresAt: &expiresAt},
+		},
+	}
+
+	if got := requestDeadline(context.Background(), jobInfo); !got.Equal(batchExpiry) {
+		t.Fatalf("requestDeadline() = %v, want batch expiry %v", got, batchExpiry)
+	}
+
+	contextDeadline := time.Now().Add(30 * time.Minute).Truncate(time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), contextDeadline)
+	defer cancel()
+	if got := requestDeadline(ctx, jobInfo); !got.Equal(contextDeadline) {
+		t.Fatalf("requestDeadline() = %v, want context deadline %v", got, contextDeadline)
+	}
+}
+
 func v4GCSURI(expiresAt time.Time, signature string) string {
 	return v4GCSURIWithAlgorithm(expiresAt, "GOOG4-RSA-SHA256", signature)
 }
@@ -1244,6 +1265,21 @@ func v4GCSURIWithoutField(expiresAt time.Time, field string) string {
 	return parsed.String()
 }
 
+func v4GCSURIWithLegacyExpires(expiresAt time.Time, missingFields ...string) string {
+	uri := v4GCSURI(expiresAt, strings.Repeat("a", 512))
+	parsed, err := url.ParseRequestURI(uri)
+	if err != nil {
+		panic(err)
+	}
+	query := parsed.Query()
+	for _, field := range missingFields {
+		query.Del(field)
+	}
+	query.Set("Expires", strconv.FormatInt(expiresAt.Unix(), 10))
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
 func TestValidateGCSURI(t *testing.T) {
 	deadline := time.Now().Add(time.Hour)
 	hosts := []string{"storage.googleapis.com"}
@@ -1266,6 +1302,8 @@ func TestValidateGCSURI(t *testing.T) {
 		{name: "missing algorithm", uri: v4GCSURIWithoutField(deadline.Add(time.Hour), "X-Goog-Algorithm"), wantErr: "signature"},
 		{name: "missing credential", uri: v4GCSURIWithoutField(deadline.Add(time.Hour), "X-Goog-Credential"), wantErr: "signature"},
 		{name: "missing signed headers", uri: v4GCSURIWithoutField(deadline.Add(time.Hour), "X-Goog-SignedHeaders"), wantErr: "signature"},
+		{name: "missing V4 date with legacy Expires", uri: v4GCSURIWithLegacyExpires(deadline.Add(time.Hour), "X-Goog-Date"), wantErr: "V4 expiry"},
+		{name: "missing V4 duration with legacy Expires", uri: v4GCSURIWithLegacyExpires(deadline.Add(time.Hour), "X-Goog-Expires"), wantErr: "V4 expiry"},
 		{name: "unsupported host", uri: "https://example.com/bucket/audio.wav?X-Goog-Signature=" + strings.Repeat("a", 512), wantErr: "host"},
 		{name: "gs URI", uri: "gs://bucket/audio.wav", wantErr: "HTTPS"},
 		{name: "HTTP URI", uri: "http://storage.googleapis.com/bucket/audio.wav?X-Goog-Signature=" + strings.Repeat("a", 512), wantErr: "HTTPS"},
@@ -1346,6 +1384,18 @@ func TestValidateLineForDispatch_GCSURI(t *testing.T) {
 		_, err := p.validateLineForDispatch(line("/v1/audio/transcriptions", `{"model":"whisper","file":"data:audio/wav;base64,QUJD","language":"en"}`), "/v1/audio/transcriptions", deadline)
 		if err != nil {
 			t.Fatalf("validateLineForDispatch() error = %v, want nil", err)
+		}
+	})
+
+	t.Run("gcs_uri and file media rejected", func(t *testing.T) {
+		p := newProcessor(config.DispatchModeAsync)
+		_, err := p.validateLineForDispatch(
+			line("/v1/audio/transcriptions", `{"model":"whisper","gcs_uri":"`+validURI+`","file":"data:audio/wav;base64,QUJD","language":"en"}`),
+			"/v1/audio/transcriptions",
+			deadline,
+		)
+		if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Fatalf("validateLineForDispatch() error = %v, want mutually exclusive error", err)
 		}
 	})
 
