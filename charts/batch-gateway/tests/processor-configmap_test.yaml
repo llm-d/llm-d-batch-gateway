@@ -566,3 +566,25 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  - it: should render the PostgreSQL pool cap with the default of 0
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'db_client:\n\s+type: "postgresql"\n\s+postgresql:\n\s+pool:\n\s+max_connections: 0\n'
+
+  - it: should render a custom PostgreSQL pool cap
+    set:
+      global.dbClient.postgresql.pool.maxConnections: 5
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'db_client:\n\s+type: "postgresql"\n\s+postgresql:\n\s+pool:\n\s+max_connections: 5\n'
+
+  - it: should render a PostgreSQL pool cap of 0 when the values predate the setting
+    set:
+      global.dbClient.postgresql: null
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'db_client:\n\s+type: "postgresql"\n\s+postgresql:\n\s+pool:\n\s+max_connections: 0\n'
