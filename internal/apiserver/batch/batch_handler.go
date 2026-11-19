@@ -254,13 +254,23 @@ func (c *BatchAPIHandler) ListBatches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// order controls the sort direction (default: desc, matching OpenAI).
+	order := query.Get(common.QueryParamOrder)
+	if order == "" {
+		order = "desc"
+	} else if order != "asc" && order != "desc" {
+		apiErr := openai.NewAPIError(http.StatusBadRequest, "", "invalid order parameter: must be 'asc' or 'desc'", nil)
+		common.WriteAPIError(w, r, apiErr)
+		return
+	}
+
 	// Get tenant ID from context
 	tenantID := common.GetTenantIDFromContext(ctx)
 
 	// Request items
 	items, _, expectMore, err := c.clients.BatchDB.DBGet(ctx,
 		&api.BatchQuery{
-			BaseQuery: api.BaseQuery{TenantID: tenantID, AfterID: afterID},
+			BaseQuery: api.BaseQuery{TenantID: tenantID, AfterID: afterID, Descending: order == "desc"},
 		},
 		true, after, limit)
 	if err != nil {
