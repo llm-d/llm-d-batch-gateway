@@ -513,6 +513,9 @@ func (c *ProcessorConfig) Validate() error {
 		return fmt.Errorf("e2e_latency_bucket must satisfy: start > 0, factor > 1, count > 0")
 	}
 
+	if err := c.DBClientCfg.PostgreSQLCfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("db_client.postgresql.pool: %w", err)
+	}
 	if err := c.FileClientCfg.ValidateType(); err != nil {
 		return err
 	}
