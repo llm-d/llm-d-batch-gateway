@@ -41,6 +41,20 @@ global:
   dbClient:
     # Database backend type: "postgresql".
     type: "postgresql"
+    postgresql:
+      pool:
+        # Max connections of each PostgreSQL pool. 0 leaves the size parsed
+        # from the PostgreSQL URL: the pgx default, max(4, CPUs of the node,
+        # not the pod's CPU limit), unless the URL sets pool_max_conns. A
+        # positive value overrides the URL.
+        # Every pool is kept at 2 or more connections, the minimum a pool
+        # needs for LISTEN, so a limit of 1 from either source is raised to 2.
+        # Each pod opens several pools from the same URL: apiserver 4,
+        # processor 5, gc 4. Budget sum(pools × pool limit × replicas) against
+        # PostgreSQL max_connections; see "PostgreSQL connection pools" in the
+        # chart README. The processor's SQL async transport pool is sized
+        # separately by processor.config.asyncDispatch.maxConnections.
+        maxConnections: 0
 
   # OpenTelemetry configuration
   otel:
