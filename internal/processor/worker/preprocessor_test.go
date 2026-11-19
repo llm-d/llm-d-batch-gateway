@@ -1265,6 +1265,23 @@ func v4GCSURIWithoutField(expiresAt time.Time, field string) string {
 	return parsed.String()
 }
 
+func v4GCSURIWithPath(expiresAt time.Time, path string) string {
+	uri := v4GCSURI(expiresAt, strings.Repeat("a", 512))
+	return strings.Replace(uri, "/bucket/audio.wav", path, 1)
+}
+
+func v4GCSURIWithExpires(expiresAt time.Time, expires string) string {
+	uri := v4GCSURI(expiresAt, strings.Repeat("a", 512))
+	parsed, err := url.ParseRequestURI(uri)
+	if err != nil {
+		panic(err)
+	}
+	query := parsed.Query()
+	query.Set("X-Goog-Expires", expires)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
 func v4GCSURIWithLegacyExpires(expiresAt time.Time, missingFields ...string) string {
 	uri := v4GCSURI(expiresAt, strings.Repeat("a", 512))
 	parsed, err := url.ParseRequestURI(uri)
@@ -1300,6 +1317,9 @@ func TestValidateGCSURI(t *testing.T) {
 		{name: "HMAC signature with RSA length", uri: v4GCSURIWithAlgorithm(deadline.Add(time.Hour), "GOOG4-HMAC-SHA256", strings.Repeat("a", 512)), wantErr: "signature"},
 		{name: "bucket only", uri: "https://storage.googleapis.com/bucket?" + v4SignatureQuery(deadline.Add(time.Hour)), wantErr: "bucket and object"},
 		{name: "bucket with trailing slash", uri: "https://storage.googleapis.com/bucket/?" + v4SignatureQuery(deadline.Add(time.Hour)), wantErr: "bucket and object"},
+		{name: "empty bucket", uri: v4GCSURIWithPath(deadline.Add(time.Hour), "//audio.wav"), wantErr: "bucket and object"},
+		{name: "object name with leading slash", uri: v4GCSURIWithPath(deadline.Add(time.Hour), "/bucket//audio.wav")},
+		{name: "object named slash", uri: v4GCSURIWithPath(deadline.Add(time.Hour), "/bucket//")},
 		{name: "missing algorithm", uri: v4GCSURIWithoutField(deadline.Add(time.Hour), "X-Goog-Algorithm"), wantErr: "signature"},
 		{name: "missing credential", uri: v4GCSURIWithoutField(deadline.Add(time.Hour), "X-Goog-Credential"), wantErr: "signature"},
 		{name: "missing signed headers", uri: v4GCSURIWithoutField(deadline.Add(time.Hour), "X-Goog-SignedHeaders"), wantErr: "signature"},
@@ -1310,6 +1330,10 @@ func TestValidateGCSURI(t *testing.T) {
 		{name: "HTTP URI", uri: "http://storage.googleapis.com/bucket/audio.wav?X-Goog-Signature=" + strings.Repeat("a", 512), wantErr: "HTTPS"},
 		{name: "unsupported scheme", uri: "ftp://storage.googleapis.com/bucket/audio.wav", wantErr: "HTTPS"},
 		{name: "missing expiry", uri: v4GCSURIWithoutField(deadline.Add(time.Hour), "X-Goog-Expires"), wantErr: "expiry"},
+		{name: "maximum V4 lifetime of seven days", uri: v4GCSURIWithExpires(deadline.Add(time.Hour), "604800")},
+		{name: "lifetime over seven days", uri: v4GCSURIWithExpires(deadline.Add(time.Hour), "604801"), wantErr: "invalid expiry"},
+		{name: "lifetime that would overflow a duration", uri: v4GCSURIWithExpires(deadline.Add(time.Hour), "9223372036854775807"), wantErr: "invalid expiry"},
+		{name: "lifetime beyond int range", uri: v4GCSURIWithExpires(deadline.Add(time.Hour), "99999999999999999999"), wantErr: "invalid expiry"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1454,6 +1478,49 @@ func TestValidateLineForDispatch_GCSURI(t *testing.T) {
 		)
 		if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 			t.Fatalf("validateLineForDispatch() error = %v, want mutually exclusive error", err)
+		}
+	})
+
+	// text, srt and vtt responses are not JSON, so the result pipeline cannot
+	// store them. They must be rejected up front for every kind of media.
+	t.Run("response_format", func(t *testing.T) {
+		media := map[string]string{
+			"gcs_uri": `"gcs_uri":"` + validURI + `"`,
+			"file":    `"file":"data:audio/wav;base64,QUJD"`,
+		}
+		tests := []struct {
+			name     string
+			endpoint string
+			media    string
+			format   string
+			wantErr  bool
+		}{
+			{name: "gcs_uri json", endpoint: "/v1/audio/transcriptions", media: "gcs_uri", format: "json"},
+			{name: "gcs_uri verbose_json", endpoint: "/v1/audio/transcriptions", media: "gcs_uri", format: "verbose_json"},
+			{name: "gcs_uri text", endpoint: "/v1/audio/transcriptions", media: "gcs_uri", format: "text", wantErr: true},
+			{name: "gcs_uri srt", endpoint: "/v1/audio/transcriptions", media: "gcs_uri", format: "srt", wantErr: true},
+			{name: "gcs_uri vtt", endpoint: "/v1/audio/transcriptions", media: "gcs_uri", format: "vtt", wantErr: true},
+			{name: "gcs_uri text on translations", endpoint: "/v1/audio/translations", media: "gcs_uri", format: "text", wantErr: true},
+			{name: "file json", endpoint: "/v1/audio/transcriptions", media: "file", format: "json"},
+			{name: "file text", endpoint: "/v1/audio/transcriptions", media: "file", format: "text", wantErr: true},
+			{name: "file srt", endpoint: "/v1/audio/transcriptions", media: "file", format: "srt", wantErr: true},
+			{name: "file vtt on translations", endpoint: "/v1/audio/translations", media: "file", format: "vtt", wantErr: true},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				p := newProcessor(config.DispatchModeAsync)
+				body := `{"model":"whisper",` + media[tt.media] + `,"response_format":"` + tt.format + `"}`
+				_, err := p.validateLineForDispatch(line(tt.endpoint, body), tt.endpoint, deadline)
+				if !tt.wantErr {
+					if err != nil {
+						t.Fatalf("validateLineForDispatch() error = %v, want nil", err)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), "response_format") {
+					t.Fatalf("validateLineForDispatch() error = %v, want response_format error", err)
+				}
+			})
 		}
 	})
 

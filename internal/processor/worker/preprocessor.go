@@ -386,6 +386,12 @@ func (p *Processor) validateLineForDispatch(line []byte, batchEndpoint string, d
 	_, hasFileKey := body["file"]
 	file, _ := body["file"].(string)
 
+	if isAudioEndpoint(batchEndpoint) {
+		if format, ok := body["response_format"].(string); ok && isPlainTextAudioFormat(format) {
+			return requestMeta{}, fmt.Errorf("response_format %q is not supported: batch results must be JSON, use json or verbose_json", format)
+		}
+	}
+
 	if hasGCSURI {
 		if hasFileKey {
 			return requestMeta{}, fmt.Errorf("body.gcs_uri and body.file are mutually exclusive")
@@ -427,6 +433,17 @@ func forwardedBody(line []byte) (map[string]any, error) {
 func isAudioEndpoint(endpoint string) bool {
 	return endpoint == openai.EndpointAudioTranscriptions.String() ||
 		endpoint == openai.EndpointAudioTranslations.String()
+}
+
+// isPlainTextAudioFormat reports whether an audio response_format returns plain
+// text instead of JSON. The result pipeline only stores JSON bodies, so these
+// responses would be lost.
+func isPlainTextAudioFormat(format string) bool {
+	switch format {
+	case "text", "srt", "vtt":
+		return true
+	}
+	return false
 }
 
 func validateGCSURI(signedURL string, hosts []string, deadline time.Time) error {
@@ -477,9 +494,11 @@ func validateGCSURI(signedURL string, hosts []string, deadline time.Time) error 
 	return nil
 }
 
+// hasGCSBucketAndObject checks that the path is "/<bucket>/<object>". It splits
+// only once after the bucket, because an object name can start with "/".
 func hasGCSBucketAndObject(path string) bool {
-	segments := strings.Split(strings.Trim(path, "/"), "/")
-	return len(segments) >= 2 && segments[0] != "" && segments[1] != ""
+	bucket, object, found := strings.Cut(strings.TrimPrefix(path, "/"), "/")
+	return found && bucket != "" && object != ""
 }
 
 func allowedGCSHost(host string, hosts []string) bool {
@@ -509,6 +528,10 @@ func isHexSignature(signature string) bool {
 	return true
 }
 
+// maxGCSV4ExpiresSeconds is the longest X-Goog-Expires value GCS accepts for a
+// V4 signed URL (seven days).
+const maxGCSV4ExpiresSeconds = 604800
+
 // signedGCSURLExpiry returns the expiry time of a V4 signed URL: X-Goog-Date
 // plus X-Goog-Expires seconds. The caller checks both fields are present.
 func signedGCSURLExpiry(query url.Values) (time.Time, error) {
@@ -516,8 +539,10 @@ func signedGCSURLExpiry(query url.Values) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
+	// The upper bound is checked before the multiplication below, so a huge
+	// value cannot overflow time.Duration.
 	seconds, err := strconv.Atoi(query.Get("X-Goog-Expires"))
-	if err != nil || seconds <= 0 {
+	if err != nil || seconds <= 0 || seconds > maxGCSV4ExpiresSeconds {
 		return time.Time{}, fmt.Errorf("invalid expiry duration")
 	}
 	return start.Add(time.Duration(seconds) * time.Second), nil

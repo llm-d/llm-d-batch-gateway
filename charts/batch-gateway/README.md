@@ -256,6 +256,8 @@ does not download the object; vLLM fetches the signed URL.
 For now, `http://`, `gs://`, and all other schemes are rejected.
 Both GCS V4 signing algorithms are accepted: `GOOG4-RSA-SHA256` and
 `GOOG4-HMAC-SHA256`.
+Batch results must be JSON. Audio requests with `response_format` set to
+`text`, `srt`, or `vtt` are rejected; use `json` or `verbose_json`.
 
 ```yaml
 processor:
