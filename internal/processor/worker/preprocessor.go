@@ -217,6 +217,13 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 			}
 		}
 
+		// This runs after the registration check on purpose. An unknown model
+		// has no provider, and must get its own model_not_found result instead
+		// of failing the whole batch.
+		if requestMeta.usesGCSURI && p.cfg.AsyncProviderFor(requestMeta.ModelID) == "" {
+			return nil, fmt.Errorf("validate request at line %d: model %q has no async provider metadata", lineCount, requestMeta.ModelID)
+		}
+
 		manifest.add(manifestEntry{
 			Ordinal:   lineCount - 1,
 			CustomID:  requestMeta.CustomID,
@@ -282,12 +289,11 @@ func readNormalizedLine(r *bufio.Reader) ([]byte, bool, error) {
 }
 
 type requestMeta struct {
-	CustomID   string
-	ModelID    string
-	PrefixHash uint32
-	gcsURI     string
-	hasGCSURI  bool
-	hasFile    bool
+	CustomID     string
+	ModelID      string
+	PrefixHash   uint32
+	mayHaveMedia bool
+	usesGCSURI   bool
 }
 
 // extractAndValidateLine parses and validates a request line and returns the
@@ -344,12 +350,10 @@ func extractAndValidateLine(line []byte, endpointAllowlist openai.EndpointAllowl
 	}
 
 	return requestMeta{
-		CustomID:   req.CustomID,
-		ModelID:    req.Body.Model,
-		PrefixHash: prefixHash,
-		gcsURI:     req.Body.GCSURI,
-		hasGCSURI:  req.Body.GCSURI != "",
-		hasFile:    req.Body.File != "",
+		CustomID:     req.CustomID,
+		ModelID:      req.Body.Model,
+		PrefixHash:   prefixHash,
+		mayHaveMedia: len(req.Body.GCSURI) > 0 || len(req.Body.File) > 0,
 	}, nil
 }
 
@@ -368,8 +372,22 @@ func (p *Processor) validateLineForDispatch(line []byte, batchEndpoint string, d
 	if err != nil {
 		return requestMeta{}, err
 	}
-	if meta.hasGCSURI {
-		if meta.hasFile {
+
+	// Check the entries that will be forwarded, not the ones the generic parse
+	// matched. A nil map is fine: every lookup below then finds nothing.
+	var body map[string]any
+	if meta.mayHaveMedia {
+		body, err = forwardedBody(line)
+		if err != nil {
+			return requestMeta{}, err
+		}
+	}
+	gcsURI, hasGCSURI := body["gcs_uri"]
+	_, hasFileKey := body["file"]
+	file, _ := body["file"].(string)
+
+	if hasGCSURI {
+		if hasFileKey {
 			return requestMeta{}, fmt.Errorf("body.gcs_uri and body.file are mutually exclusive")
 		}
 		if !isAudioEndpoint(batchEndpoint) {
@@ -378,18 +396,32 @@ func (p *Processor) validateLineForDispatch(line []byte, batchEndpoint string, d
 		if p.cfg == nil || !p.cfg.IsAsync() {
 			return requestMeta{}, fmt.Errorf("gcs_uri requires dispatch_mode async")
 		}
-		if p.cfg.AsyncProviderFor(meta.ModelID) == "" {
-			return requestMeta{}, fmt.Errorf("model %q has no async provider metadata", meta.ModelID)
+		signedURL, ok := gcsURI.(string)
+		if !ok {
+			return requestMeta{}, fmt.Errorf("gcs_uri must be a string")
 		}
-		if err := validateGCSURI(meta.gcsURI, p.cfg.AsyncDispatchConfig.GCSSignedURLHosts, deadline); err != nil {
+		if err := validateGCSURI(signedURL, p.cfg.AsyncDispatchConfig.GCSSignedURLHosts, deadline); err != nil {
 			return requestMeta{}, err
 		}
+		meta.usesGCSURI = true
 		return meta, nil
 	}
-	if isAudioEndpoint(batchEndpoint) && !meta.hasFile {
+	if isAudioEndpoint(batchEndpoint) && file == "" {
 		return requestMeta{}, fmt.Errorf("audio requests require body.gcs_uri or body.file")
 	}
 	return meta, nil
+}
+
+// forwardedBody decodes the request body the way PlanFileSource.readEntry does.
+// Keys are kept exactly as written, so "gcs_uri" and "GCS_URI" are two entries.
+// The struct parse in extractAndValidateLine cannot be used here: it matches
+// keys in any letter case and would validate a different entry than the one sent.
+func forwardedBody(line []byte) (map[string]any, error) {
+	var req batch_types.Request
+	if err := json.Unmarshal(bytes.TrimSuffix(line, []byte{'\n'}), &req); err != nil {
+		return nil, err
+	}
+	return req.Body, nil
 }
 
 func isAudioEndpoint(endpoint string) bool {
@@ -410,28 +442,29 @@ func validateGCSURI(signedURL string, hosts []string, deadline time.Time) error 
 		return fmt.Errorf("gcs_uri host is not allowed")
 	}
 
+	// Only V4 signed URLs are accepted. The legacy "Signature" form is rejected.
 	query := parsed.Query()
-	if signature := query.Get("X-Goog-Signature"); signature != "" {
-		if query.Get("X-Goog-Date") == "" || query.Get("X-Goog-Expires") == "" {
-			return fmt.Errorf("gcs_uri is missing required V4 expiry fields")
-		}
-		signatureLength := 0
-		switch query.Get("X-Goog-Algorithm") {
-		case "GOOG4-RSA-SHA256":
-			// A service-account RSA-SHA256 signature is 256 bytes, hex-encoded.
-			signatureLength = 512
-		case "GOOG4-HMAC-SHA256":
-			// An HMAC-SHA256 signature is 32 bytes, hex-encoded.
-			signatureLength = 64
-		}
-		if !isHexSignature(signature) || len(signature) != signatureLength {
-			return fmt.Errorf("gcs_uri has an invalid signature")
-		}
-		if query.Get("X-Goog-Credential") == "" || query.Get("X-Goog-SignedHeaders") == "" {
-			return fmt.Errorf("gcs_uri has an invalid signature")
-		}
-	} else if query.Get("Signature") == "" {
+	signature := query.Get("X-Goog-Signature")
+	if signature == "" {
 		return fmt.Errorf("gcs_uri is missing a signature")
+	}
+	if query.Get("X-Goog-Date") == "" || query.Get("X-Goog-Expires") == "" {
+		return fmt.Errorf("gcs_uri is missing required V4 expiry fields")
+	}
+	signatureLength := 0
+	switch query.Get("X-Goog-Algorithm") {
+	case "GOOG4-RSA-SHA256":
+		// A service-account RSA-SHA256 signature is 256 bytes, hex-encoded.
+		signatureLength = 512
+	case "GOOG4-HMAC-SHA256":
+		// An HMAC-SHA256 signature is 32 bytes, hex-encoded.
+		signatureLength = 64
+	}
+	if !isHexSignature(signature) || len(signature) != signatureLength {
+		return fmt.Errorf("gcs_uri has an invalid signature")
+	}
+	if query.Get("X-Goog-Credential") == "" || query.Get("X-Goog-SignedHeaders") == "" {
+		return fmt.Errorf("gcs_uri has an invalid signature")
 	}
 
 	expiry, err := signedGCSURLExpiry(query)
@@ -476,26 +509,18 @@ func isHexSignature(signature string) bool {
 	return true
 }
 
+// signedGCSURLExpiry returns the expiry time of a V4 signed URL: X-Goog-Date
+// plus X-Goog-Expires seconds. The caller checks both fields are present.
 func signedGCSURLExpiry(query url.Values) (time.Time, error) {
-	if date := query.Get("X-Goog-Date"); date != "" {
-		start, err := time.Parse("20060102T150405Z", date)
-		if err != nil {
-			return time.Time{}, err
-		}
-		seconds, err := strconv.Atoi(query.Get("X-Goog-Expires"))
-		if err != nil || seconds <= 0 {
-			return time.Time{}, fmt.Errorf("invalid expiry duration")
-		}
-		return start.Add(time.Duration(seconds) * time.Second), nil
+	start, err := time.Parse("20060102T150405Z", query.Get("X-Goog-Date"))
+	if err != nil {
+		return time.Time{}, err
 	}
-	if expires := query.Get("Expires"); expires != "" {
-		seconds, err := strconv.ParseInt(expires, 10, 64)
-		if err != nil {
-			return time.Time{}, err
-		}
-		return time.Unix(seconds, 0), nil
+	seconds, err := strconv.Atoi(query.Get("X-Goog-Expires"))
+	if err != nil || seconds <= 0 {
+		return time.Time{}, fmt.Errorf("invalid expiry duration")
 	}
-	return time.Time{}, fmt.Errorf("missing expiry")
+	return start.Add(time.Duration(seconds) * time.Second), nil
 }
 
 func writeModelMappings(jobRootDir string, modelToSafe map[string]string, lineCount, rejectedCount int64) error {
