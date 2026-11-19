@@ -1294,6 +1294,7 @@ func TestValidateGCSURI(t *testing.T) {
 		{name: "expired", uri: v4GCSURI(deadline.Add(-time.Minute), strings.Repeat("a", 512)), wantErr: "expires"},
 		{name: "expires at deadline", uri: v4GCSURI(deadline, strings.Repeat("a", 512)), wantErr: "expires"},
 		{name: "missing signature", uri: "https://storage.googleapis.com/bucket/audio.wav?X-Goog-Date=20260101T000000Z&X-Goog-Expires=60", wantErr: "signature"},
+		{name: "legacy signature", uri: "https://storage.googleapis.com/bucket/audio.wav?Signature=anything&Expires=4102444800", wantErr: "signature"},
 		{name: "invalid signature", uri: v4GCSURI(deadline.Add(time.Hour), "not-hex"), wantErr: "signature"},
 		{name: "short signature", uri: v4GCSURI(deadline.Add(time.Hour), strings.Repeat("a", 64)), wantErr: "signature"},
 		{name: "HMAC signature with RSA length", uri: v4GCSURIWithAlgorithm(deadline.Add(time.Hour), "GOOG4-HMAC-SHA256", strings.Repeat("a", 512)), wantErr: "signature"},
@@ -1404,6 +1405,65 @@ func TestValidateLineForDispatch_GCSURI(t *testing.T) {
 		_, err := p.validateLineForDispatch(line("/v1/chat/completions", `{"model":"whisper","gcs_uri":"`+validURI+`"}`), "/v1/chat/completions", deadline)
 		if err == nil || !strings.Contains(err.Error(), "audio") {
 			t.Fatalf("validateLineForDispatch() error = %v, want audio endpoint error", err)
+		}
+	})
+
+	// The generic parse matches keys in any letter case, but the body is
+	// forwarded with exact keys. The exact "gcs_uri" entry must be the one checked.
+	t.Run("differently cased key cannot hide an unvalidated gcs_uri", func(t *testing.T) {
+		unapproved := "https://example.com/bucket/audio.wav?X-Goog-Signature=" + strings.Repeat("a", 512)
+		for _, shadow := range []string{`"` + validURI + `"`, `null`} {
+			p := newProcessor(config.DispatchModeAsync)
+			_, err := p.validateLineForDispatch(
+				line("/v1/audio/transcriptions", `{"model":"whisper","gcs_uri":"`+unapproved+`","GCS_URI":`+shadow+`}`),
+				"/v1/audio/transcriptions",
+				deadline,
+			)
+			if err == nil || !strings.Contains(err.Error(), "host") {
+				t.Fatalf("validateLineForDispatch() with GCS_URI=%s error = %v, want host error", shadow, err)
+			}
+		}
+	})
+
+	t.Run("differently cased key alone is not a gcs_uri", func(t *testing.T) {
+		p := newProcessor(config.DispatchModeAsync)
+		_, err := p.validateLineForDispatch(
+			line("/v1/audio/transcriptions", `{"model":"whisper","GCS_URI":"`+validURI+`"}`),
+			"/v1/audio/transcriptions",
+			deadline,
+		)
+		if err == nil || !strings.Contains(err.Error(), "body.gcs_uri or body.file") {
+			t.Fatalf("validateLineForDispatch() error = %v, want missing media error", err)
+		}
+	})
+
+	t.Run("non-string gcs_uri rejected", func(t *testing.T) {
+		p := newProcessor(config.DispatchModeAsync)
+		_, err := p.validateLineForDispatch(line("/v1/audio/transcriptions", `{"model":"whisper","gcs_uri":5}`), "/v1/audio/transcriptions", deadline)
+		if err == nil || !strings.Contains(err.Error(), "must be a string") {
+			t.Fatalf("validateLineForDispatch() error = %v, want string type error", err)
+		}
+	})
+
+	t.Run("gcs_uri with non-string file rejected", func(t *testing.T) {
+		p := newProcessor(config.DispatchModeAsync)
+		_, err := p.validateLineForDispatch(
+			line("/v1/audio/transcriptions", `{"model":"whisper","gcs_uri":"`+validURI+`","file":{"id":"f"}}`),
+			"/v1/audio/transcriptions",
+			deadline,
+		)
+		if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Fatalf("validateLineForDispatch() error = %v, want mutually exclusive error", err)
+		}
+	})
+
+	// The media fields were not part of other endpoints before, so any JSON
+	// type must still be accepted there.
+	t.Run("non-string file on other endpoints accepted", func(t *testing.T) {
+		p := newProcessor(config.DispatchModeAsync)
+		_, err := p.validateLineForDispatch(line("/v1/chat/completions", `{"model":"whisper","file":{"id":"f"}}`), "/v1/chat/completions", deadline)
+		if err != nil {
+			t.Fatalf("validateLineForDispatch() error = %v, want nil", err)
 		}
 	})
 }
@@ -2005,6 +2065,114 @@ func TestPreProcess_UnregisteredModel_AsyncMode_Rejected(t *testing.T) {
 	}
 	if _, ok := mm.ModelToSafe["model-a"]; !ok {
 		t.Fatal("model-a missing from model map")
+	}
+}
+
+// TestPreProcess_AudioGCSURI_ModelRegistration checks how gcs_uri audio requests
+// interact with model registration. An unknown model has no provider, but it
+// must still be rejected per request (model_not_found) and not fail the batch.
+// A registered model without a provider is a config error and fails the batch.
+func TestPreProcess_AudioGCSURI_ModelRegistration(t *testing.T) {
+	signedURL := v4GCSURI(time.Now().Add(100*time.Hour), strings.Repeat("a", 512))
+	audioLine := func(customID, model string) string {
+		return `{"custom_id":"` + customID + `","method":"POST","url":"/v1/audio/transcriptions","body":{"model":"` +
+			model + `","gcs_uri":"` + signedURL + `"}}` + "\n"
+	}
+
+	tests := []struct {
+		name         string
+		provider     string
+		lines        []string
+		wantErr      string
+		wantRejected []bool
+	}{
+		{
+			name:         "unknown model is rejected per request",
+			provider:     "whisper",
+			lines:        []string{audioLine("req-1", "whisper"), audioLine("req-2", "unknown")},
+			wantRejected: []bool{false, true},
+		},
+		{
+			name:     "registered model without provider fails the batch",
+			provider: "",
+			lines:    []string{audioLine("req-1", "whisper")},
+			wantErr:  "no async provider metadata",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := testLoggerCtx(t)
+
+			cfg := config.NewConfig()
+			cfg.WorkDir = t.TempDir()
+			cfg.DispatchMode = config.DispatchModeAsync
+			cfg.AsyncDispatchConfig.Models = map[string]config.AsyncModelConfig{
+				"whisper": {InferencePoolName: "whisper-pool", Provider: tt.provider},
+			}
+
+			filesClient := mockfiles.NewMockBatchFilesClient(t.TempDir())
+			fileDBClient := newMockFileDBClient()
+
+			tenantID := "tenant__tenantA"
+			folder, _ := ucom.GetFolderNameByTenantID(tenantID)
+			filename := "input.jsonl"
+			inputFileID := "file-audio-gcs"
+			if _, err := filesClient.Store(ctx, ucom.FileStorageName(inputFileID, filename), folder, 0, 0,
+				strings.NewReader(strings.Join(tt.lines, ""))); err != nil {
+				t.Fatalf("files.Store: %v", err)
+			}
+			if err := fileDBClient.DBStore(ctx, &db.FileItem{
+				BaseIndexes:  db.BaseIndexes{ID: inputFileID, TenantID: tenantID},
+				BaseContents: db.BaseContents{Spec: mustJSON(t, &openai.FileObject{Filename: filename})},
+			}); err != nil {
+				t.Fatalf("DBStore file item: %v", err)
+			}
+
+			clients := &clientset.Clientset{
+				BatchDB: newMockBatchDBClient(),
+				FileDB:  fileDBClient,
+				File:    filesClient,
+				AsyncInference: inference.NewTestAsyncResolver(map[string]func() inference.AsyncInferenceClient{
+					"whisper": func() inference.AsyncInferenceClient { return &fakeAsyncInferenceClient{} },
+				}),
+				Resumable: mockdb.NewMockResumableStore(),
+			}
+			p := mustNewProcessor(t, cfg, clients)
+
+			jobInfo := &batch_types.JobInfo{
+				JobID: "job-audio-gcs",
+				BatchJob: &openai.Batch{
+					ID:              "job-audio-gcs",
+					BatchSpec:       openai.BatchSpec{InputFileID: inputFileID, Endpoint: openai.EndpointAudioTranscriptions},
+					BatchStatusInfo: openai.BatchStatusInfo{Status: openai.BatchStatusInProgress},
+				},
+				TenantID: tenantID,
+			}
+
+			manifest, err := p.preProcessJob(ctx, jobInfo)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("preProcessJob() error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("preProcessJob() error = %v, want nil", err)
+			}
+			if len(manifest.Entries) != len(tt.wantRejected) {
+				t.Fatalf("manifest entries = %d, want %d", len(manifest.Entries), len(tt.wantRejected))
+			}
+			for i, want := range tt.wantRejected {
+				entry := manifest.Entries[i]
+				if entry.Rejected != want {
+					t.Fatalf("entry %d rejected = %v, want %v", i, entry.Rejected, want)
+				}
+				if want && entry.ErrorCode != inference.ErrCodeModelNotFound {
+					t.Fatalf("entry %d error code = %s, want %s", i, entry.ErrorCode, inference.ErrCodeModelNotFound)
+				}
+			}
+		})
 	}
 }
 
