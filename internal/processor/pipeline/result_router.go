@@ -12,6 +12,7 @@ import (
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/shared/syncutil"
 	batch_types "github.com/llm-d/llm-d-batch-gateway/internal/shared/types"
+	"github.com/llm-d/llm-d-batch-gateway/internal/util/logging"
 	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 )
 
@@ -128,6 +129,14 @@ func (b *ResultBroadcaster) Run(ctx context.Context) {
 			if err != nil {
 				if ctx.Err() != nil {
 					return
+				}
+				if errors.Is(err, context.DeadlineExceeded) {
+					// The client bounds each poll with a timeout, and an empty
+					// queue is how that timeout elapses: an idle poll, not a
+					// failure. Backing off here would leave nobody receiving,
+					// so results arriving meanwhile would wait out the sleep.
+					b.logger.V(logging.TRACE).Info("No result within the poll timeout")
+					continue
 				}
 				b.logger.Error(err, "GetResult failed, retrying", "backoff", backoff)
 				select {
