@@ -99,6 +99,36 @@ func (r *rowSyncedResumable) FinalizeResumableBatch(ctx context.Context, fin *db
 	return nil
 }
 
+// ActivateResumableBatch mirrors the activation CTE's row write: the batch
+// row flips to in_progress with in_progress_at stamped.
+func (r *rowSyncedResumable) ActivateResumableBatch(ctx context.Context, activation *db.ResumableActivation) error {
+	if err := r.MockResumableStore.ActivateResumableBatch(ctx, activation); err != nil {
+		return err
+	}
+	items, _, _, err := r.rows.DBGet(ctx, &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{activation.BatchID}}}, true, 0, 1)
+	if err != nil || len(items) != 1 {
+		return fmt.Errorf("mirror activation of %s into row mock: err=%v len=%d", activation.BatchID, err, len(items))
+	}
+	var status openai.BatchStatusInfo
+	if err := json.Unmarshal(items[0].Status, &status); err != nil {
+		return fmt.Errorf("mirror activation of %s into row mock: %w", activation.BatchID, err)
+	}
+	now := time.Now().Unix()
+	status.Status = openai.BatchStatusInProgress
+	status.InProgressAt = &now
+	statusJSON, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("mirror activation of %s into row mock: %w", activation.BatchID, err)
+	}
+	item := *items[0]
+	item.Status = statusJSON
+	item.Resumable = true
+	if err := r.rows.DBStore(ctx, &item); err != nil {
+		return fmt.Errorf("mirror activation of %s into row mock: %w", activation.BatchID, err)
+	}
+	return nil
+}
+
 // durableInputLine builds one input line for the given model and custom ID.
 func durableInputLine(model, customID string) string {
 	return fmt.Sprintf(`{"custom_id":%q,"method":"POST","url":"/v1/chat/completions","body":{"model":%q,"messages":[{"role":"user","content":"hi"}]}}`+"\n", customID, model)
@@ -1392,46 +1422,151 @@ func TestFinalizeResumableJob_FencedOutZombieCannotComplete(t *testing.T) {
 	}
 }
 
-// TestFinalizeResumableJob_CancelDuringFinalization verifies that a user
-// cancel landing after artifact assembly but before the terminal write is
-// honoured: the fenced write targets cancelled, and both checkpointed results
-// land in the output artifact.
-func TestFinalizeResumableJob_CancelDuringFinalization(t *testing.T) {
-	const jobID = "job-resumable-cancel-fin"
+// persistCancelling performs the API server's markCancelling write: a CAS on
+// the persisted status, fenced on the current epoch and resumable flag, that
+// leaves the epoch as is. It returns the cancelling_at it recorded.
+func persistCancelling(t *testing.T, dbClient db.BatchProgressDBClient, jobID string) int64 {
+	t.Helper()
+	items, _, _, err := dbClient.DBGet(context.Background(), &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{jobID}}}, true, 0, 1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("DBGet %s: err=%v len=%d", jobID, err, len(items))
+	}
+	var current openai.BatchStatusInfo
+	if err := json.Unmarshal(items[0].Status, &current); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	cancellingAt := time.Now().UTC().Unix()
+	current.Status = openai.BatchStatusCancelling
+	current.CancellingAt = &cancellingAt
+	resumable := true
+	if err := dbClient.DBUpdate(context.Background(), &db.BatchItem{
+		BaseIndexes:       db.BaseIndexes{ID: jobID},
+		BaseContents:      db.BaseContents{Status: mustJSON(t, current)},
+		Epoch:             items[0].Epoch,
+		ExpectedResumable: &resumable,
+	}, items[0].Status); err != nil {
+		t.Fatalf("persist cancelling: %v", err)
+	}
+	return cancellingAt
+}
+
+// cancelBeforeFinalizingDB persists a cancel right before the first
+// finalizing write reaches the row — after the finalizer re-read it.
+type cancelBeforeFinalizingDB struct {
+	db.BatchProgressDBClient
+	t            *testing.T
+	cancellingAt int64
+}
+
+func (c *cancelBeforeFinalizingDB) DBUpdate(ctx context.Context, item *db.BatchItem, expectedStatus []byte) error {
+	var st openai.BatchStatusInfo
+	if c.cancellingAt == 0 && json.Unmarshal(item.Status, &st) == nil && st.Status == openai.BatchStatusFinalizing {
+		c.cancellingAt = persistCancelling(c.t, c.BatchProgressDBClient, item.ID)
+	}
+	return c.BatchProgressDBClient.DBUpdate(ctx, item, expectedStatus)
+}
+
+// TestFinalizeResumableJob_PersistedCancelWinsOverFinalizing verifies that a
+// cancel the API server persisted is not overwritten by the in_progress →
+// finalizing write. The cancel's NOTIFY has not reached the processor (its
+// context is not cancelled), so only the row carries the cancel. The
+// finalizer must route to the cancellation path and terminalize the batch as
+// cancelled, keeping the API server's cancelling_at.
+func TestFinalizeResumableJob_PersistedCancelWinsOverFinalizing(t *testing.T) {
+	tests := []struct {
+		name string
+		// raceCAS persists the cancel between the finalizer's re-read and its
+		// CAS write instead of before finalization starts.
+		raceCAS bool
+	}{
+		{name: "cancel persisted before finalization"},
+		{name: "cancel persisted between re-read and CAS", raceCAS: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const jobID = "job-resumable-cancel-race"
+
+			env := setupDurableJob(t, jobID, []string{"test-model", "test-model"})
+			stageFinalizingClaim(t, env, jobID)
+
+			var cancellingAt int64
+			updaterDB := env.dbClient
+			racer := &cancelBeforeFinalizingDB{BatchProgressDBClient: env.dbClient, t: t}
+			if tt.raceCAS {
+				updaterDB = racer
+			} else {
+				cancellingAt = persistCancelling(t, env.dbClient, jobID)
+			}
+
+			err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(updaterDB), env.jobItem, env.jobInfo)
+			if !errors.Is(err, batchctx.ErrCancelled) {
+				t.Fatalf("error = %v, want batchctx.ErrCancelled", err)
+			}
+			if tt.raceCAS {
+				if racer.cancellingAt == 0 {
+					t.Fatal("the finalizing write never reached the row; the race was not exercised")
+				}
+				cancellingAt = racer.cancellingAt
+			}
+
+			status := durableJobStatus(t, env)
+			if status.Status != openai.BatchStatusCancelled {
+				t.Fatalf("status = %s, want cancelled", status.Status)
+			}
+			if status.CancellingAt == nil || *status.CancellingAt != cancellingAt {
+				t.Fatalf("cancelling_at = %v, want %d", status.CancellingAt, cancellingAt)
+			}
+			if status.FinalizingAt != nil {
+				t.Fatalf("finalizing_at = %d, want nil: the cancelling row was overwritten with finalizing", *status.FinalizingAt)
+			}
+			wantCounts := openai.BatchRequestCounts{Total: 2, Completed: 2, Failed: 0}
+			if status.RequestCounts != wantCounts {
+				t.Fatalf("counts = %+v, want %+v", status.RequestCounts, wantCounts)
+			}
+		})
+	}
+}
+
+// finalizingCASLossDB refuses every finalizing write with db.ErrConflict
+// without touching the row, as if each write lost the status CAS.
+type finalizingCASLossDB struct {
+	db.BatchProgressDBClient
+	attempts int
+}
+
+func (c *finalizingCASLossDB) DBUpdate(ctx context.Context, item *db.BatchItem, expectedStatus []byte) error {
+	var st openai.BatchStatusInfo
+	if json.Unmarshal(item.Status, &st) == nil && st.Status == openai.BatchStatusFinalizing {
+		c.attempts++
+		return db.ErrConflict
+	}
+	return c.BatchProgressDBClient.DBUpdate(ctx, item, expectedStatus)
+}
+
+// TestMarkResumableFinalizing_CASLossesAreNotOwnershipLoss verifies that a
+// finalizing write that keeps losing the status CAS while the epoch still
+// matches gives up after maxFinalizingAttempts with a plain error, so runJob
+// leaves the batch to the reconciler instead of treating it as lost
+// ownership.
+func TestMarkResumableFinalizing_CASLossesAreNotOwnershipLoss(t *testing.T) {
+	const jobID = "job-resumable-cas-loss"
 
 	env := setupDurableJob(t, jobID, []string{"test-model", "test-model"})
 	stageFinalizingClaim(t, env, jobID)
 
-	ctx, cancel := context.WithCancelCause(context.Background())
-	cancel(batchctx.ErrCancelled)
-
-	err := env.p.finalizeResumableJob(ctx, NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo)
-	if !errors.Is(err, batchctx.ErrCancelled) {
-		t.Fatalf("error = %v, want batchctx.ErrCancelled", err)
+	loser := &finalizingCASLossDB{BatchProgressDBClient: env.dbClient}
+	cancelPersisted, err := markResumableFinalizing(testLoggerCtx(t), NewStatusUpdater(loser), env.jobItem)
+	if err == nil {
+		t.Fatal("error = nil, want an error after the CAS losses")
 	}
-
-	status := durableJobStatus(t, env)
-	if status.Status != openai.BatchStatusCancelled {
-		t.Fatalf("status = %s, want cancelled", status.Status)
+	if errors.Is(err, db.ErrConflict) {
+		t.Fatalf("error = %v, want a plain error, not db.ErrConflict", err)
 	}
-	wantCounts := openai.BatchRequestCounts{Total: 2, Completed: 2, Failed: 0}
-	if status.RequestCounts != wantCounts {
-		t.Fatalf("counts = %+v, want %+v", status.RequestCounts, wantCounts)
+	if cancelPersisted {
+		t.Fatal("cancelPersisted = true, want false")
 	}
-	if status.ErrorFileID != nil {
-		t.Fatalf("error_file_id = %v, want nil", status.ErrorFileID)
-	}
-
-	outLines := readArtifactLines(t, env,
-		ucom.FileStorageName(stableFileID(jobID, metrics.FileTypeOutput), jobOutputStorageName(jobID)))
-	wantIDs := []string{stableBatchRequestID(jobID, "req-1"), stableBatchRequestID(jobID, "req-2")}
-	if len(outLines) != len(wantIDs) {
-		t.Fatalf("output artifact lines = %d, want %d", len(outLines), len(wantIDs))
-	}
-	for i, want := range wantIDs {
-		if outLines[i].ID != want {
-			t.Fatalf("output line %d id = %s, want %s", i, outLines[i].ID, want)
-		}
+	if loser.attempts != maxFinalizingAttempts {
+		t.Fatalf("finalizing writes = %d, want %d", loser.attempts, maxFinalizingAttempts)
 	}
 }
 

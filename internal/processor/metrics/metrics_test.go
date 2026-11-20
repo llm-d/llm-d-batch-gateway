@@ -306,7 +306,6 @@ func TestCancellationMetric(t *testing.T) {
 		RecordCancellation(CancelPhaseQueued)
 		RecordCancellation(CancelPhaseInProgress)
 		RecordCancellation(CancelPhaseInProgress)
-		RecordCancellation(CancelPhaseFinalizing)
 
 		f := collectFamilies(t, reg)
 		if v := counterWithLabels(f["batch_cancellation_total"], map[string]string{"phase": CancelPhaseQueued}); v != 1 {
@@ -314,9 +313,6 @@ func TestCancellationMetric(t *testing.T) {
 		}
 		if v := counterWithLabels(f["batch_cancellation_total"], map[string]string{"phase": CancelPhaseInProgress}); v != 2 {
 			t.Fatalf("cancellation{in_progress}=%v, want 2", v)
-		}
-		if v := counterWithLabels(f["batch_cancellation_total"], map[string]string{"phase": CancelPhaseFinalizing}); v != 1 {
-			t.Fatalf("cancellation{finalizing}=%v, want 1", v)
 		}
 		assertLabelNames(t, f["batch_cancellation_total"], []string{"phase"})
 	})

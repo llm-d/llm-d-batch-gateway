@@ -441,7 +441,6 @@ func RecordCancellation(phase string) {
 const (
 	CancelPhaseQueued     = "queued"
 	CancelPhaseInProgress = "in_progress"
-	CancelPhaseFinalizing = "finalizing"
 )
 
 // SetAIMDConcurrencyLimit sets the current effective AIMD concurrency limit for an endpoint.
