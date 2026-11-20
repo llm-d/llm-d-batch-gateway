@@ -321,7 +321,7 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 	}
 
 	// finalization: final counts and artifacts are derived from the entry set.
-	finErr := p.finalizeResumableJob(abortCtx, params.updater, params.jobItem, params.jobInfo)
+	finErr := p.finalizeResumableJob(abortCtx, params.updater, params.jobItem, params.jobInfo, requestCounts)
 	if err := finErr; err != nil {
 		if errors.Is(err, db.ErrConflict) {
 			// A fenced finalization write means another incarnation owns the
