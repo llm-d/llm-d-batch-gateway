@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package metrics provides Prometheus instrumentation for the GC reconciler.
+// Package metrics provides Prometheus instrumentation for the batch garbage collector.
 package metrics
 
 import (
@@ -32,9 +32,11 @@ var (
 	casConflictsTotal     prometheus.Counter
 	staleCleanupTotal     prometheus.Counter
 	errorsTotal           prometheus.Counter
+	eventsPurgedTotal     prometheus.Counter
+	eventPurgeFailures    prometheus.Counter
 )
 
-// InitMetrics creates and registers all reconciler Prometheus metrics.
+// InitMetrics creates and registers all batch-gc Prometheus metrics.
 // It is safe to call multiple times; only the first call has effect.
 func InitMetrics() error {
 	initOnce.Do(func() {
@@ -81,12 +83,28 @@ func initMetrics() error {
 		},
 	)
 
+	eventPurgeFailures = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "batch_gc_event_purge_failures_total",
+			Help: "Failed event purge attempts",
+		},
+	)
+
+	eventsPurgedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "batch_gc_events_purged_total",
+			Help: "Expired events removed from the batch events table",
+		},
+	)
+
 	for _, c := range []prometheus.Collector{
 		orphansRecoveredTotal,
 		cycleDuration,
 		casConflictsTotal,
 		staleCleanupTotal,
 		errorsTotal,
+		eventsPurgedTotal,
+		eventPurgeFailures,
 	} {
 		if err := prometheus.Register(c); err != nil {
 			return err
@@ -134,5 +152,19 @@ func RecordStaleCleanup(count int) {
 func RecordErrors(count int) {
 	if count > 0 {
 		errorsTotal.Add(float64(count))
+	}
+}
+
+// RecordEventsPurged adds the given count to the events purged counter.
+func RecordEventsPurged(count int64) {
+	if count > 0 {
+		eventsPurgedTotal.Add(float64(count))
+	}
+}
+
+// RecordEventPurgeFailures adds the given count to the event purge failures counter.
+func RecordEventPurgeFailures(count int) {
+	if count > 0 {
+		eventPurgeFailures.Add(float64(count))
 	}
 }

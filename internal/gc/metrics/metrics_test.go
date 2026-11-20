@@ -91,6 +91,8 @@ func TestInitMetrics(t *testing.T) {
 			RecordCASConflicts(4)
 			RecordStaleCleanup(2)
 			RecordErrors(1)
+			RecordEventsPurged(7)
+			RecordEventPurgeFailures(2)
 
 			f := collectFamilies(t, reg)
 
@@ -124,6 +126,12 @@ func TestInitMetrics(t *testing.T) {
 			if v := counterValue(f["batch_reconciler_errors_total"]); v != 1 {
 				t.Fatalf("errors=%v, want 1", v)
 			}
+			if v := counterValue(f["batch_gc_events_purged_total"]); v != 7 {
+				t.Fatalf("events_purged=%v, want 7", v)
+			}
+			if v := counterValue(f["batch_gc_event_purge_failures_total"]); v != 2 {
+				t.Fatalf("event_purge_failures=%v, want 2", v)
+			}
 		})
 	})
 
@@ -137,6 +145,8 @@ func TestInitMetrics(t *testing.T) {
 			RecordCASConflicts(0)
 			RecordStaleCleanup(0)
 			RecordErrors(0)
+			RecordEventsPurged(0)
+			RecordEventPurgeFailures(0)
 
 			f := collectFamilies(t, reg)
 
