@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -86,7 +87,7 @@ func TestResultCheckpointer_Drain(t *testing.T) {
 			}
 			return true, nil
 		}
-		c := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+		c := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 		results := []ResultItem{successResult("req-1"), successResult("req-2"), {
 			RequestID: "req-3",
@@ -122,7 +123,7 @@ func TestResultCheckpointer_Drain(t *testing.T) {
 		pending := NewPendingRequests(0)
 		tracker := NewProgressTracker(1, nil, "test-job", 0, logr.Discard())
 		sink := &fakeSink{}
-		c := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+		c := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 		pending.Store(RequestItem{RequestID: "req-1", CustomID: "c-1", ModelID: "m1"})
 		ch := make(chan ResultItem, 1)
@@ -164,7 +165,7 @@ func TestResultCheckpointer_Drain(t *testing.T) {
 		tracker := NewProgressTracker(1, nil, "test-job", 0, logr.Discard())
 		sink := &fakeSink{}
 		sink.fn = func(*ResultItem) (bool, error) { return false, errors.New("s3 down") }
-		c := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+		c := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 		var hookCalls int
 		c.onPersistenceFailure = func() { hookCalls++ }
@@ -200,7 +201,7 @@ func TestResultCheckpointer_Drain(t *testing.T) {
 			}
 			return true, nil
 		}
-		c := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+		c := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 		for _, id := range []string{"req-1", "req-2"} {
 			pending.Store(RequestItem{RequestID: id, CustomID: "c-" + id})
@@ -226,7 +227,7 @@ func TestResultCheckpointer_Drain(t *testing.T) {
 		tracker := NewProgressTracker(1, nil, "test-job", 0, logr.Discard())
 		sink := &fakeSink{}
 		sink.fn = func(*ResultItem) (bool, error) { return false, nil }
-		c := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+		c := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 		pending.Store(RequestItem{RequestID: "req-1", CustomID: "c-1"})
 		ch := make(chan ResultItem, 1)
@@ -251,7 +252,7 @@ func TestResultCheckpointer_Drain(t *testing.T) {
 		sink.fn = func(*ResultItem) (bool, error) {
 			return false, fmt.Errorf("checkpoint entry: %w", db.ErrConflict)
 		}
-		c := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+		c := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 		var hookCalls int
 		c.onPersistenceFailure = func() { hookCalls++ }
@@ -347,7 +348,7 @@ func (t *ackTracker) snapshot() []string {
 // checkpoint, and never for a result another job owns.
 func TestResultCheckpointer_AckAfterCheckpoint(t *testing.T) {
 	newCheckpointer := func(sink *fakeSink, pending *PendingRequests) *ResultCheckpointer {
-		return NewResultCheckpointer(sink, pending, NewProgressTracker(4, nil, "test-job", 0, logr.Discard()), logr.Discard())
+		return NewResultCheckpointer(sink, pending, NewProgressTracker(4, nil, "test-job", 0, logr.Discard()), 1, logr.Discard())
 	}
 
 	t.Run("acks a committed checkpoint and a dropped duplicate, after the checkpoint", func(t *testing.T) {
@@ -487,6 +488,107 @@ func TestResultCheckpointer_AckAfterCheckpoint(t *testing.T) {
 		}
 		if got := sink.len(); got != 1 {
 			t.Fatalf("committed checkpoints = %d, want 1", got)
+		}
+	})
+}
+
+// TestResultCheckpointer_Concurrency covers the parallel drain: distinct
+// requests are checkpointed concurrently up to the configured bound, while
+// deliveries of one request stay serial.
+func TestResultCheckpointer_Concurrency(t *testing.T) {
+	t.Run("checkpoints distinct requests in parallel up to the bound", func(t *testing.T) {
+		const bound, total = 4, 12
+		pending := NewPendingRequests(0)
+		var mu sync.Mutex
+		running, peak := 0, 0
+		atBound := make(chan struct{})
+		sink := &fakeSink{}
+		sink.fn = func(*ResultItem) (bool, error) {
+			mu.Lock()
+			running++
+			if running > peak {
+				peak = running
+			}
+			if running == bound {
+				select {
+				case <-atBound:
+				default:
+					close(atBound)
+				}
+			}
+			mu.Unlock()
+			// Hold until the bound is reached: a serial drain never gets there.
+			select {
+			case <-atBound:
+			case <-time.After(5 * time.Second):
+			}
+			mu.Lock()
+			running--
+			mu.Unlock()
+			return true, nil
+		}
+		c := NewResultCheckpointer(sink, pending, NewProgressTracker(total, nil, "test-job", 0, logr.Discard()), bound, logr.Discard())
+
+		ch := make(chan ResultItem, total)
+		for i := range total {
+			id := fmt.Sprintf("req-%d", i)
+			pending.Store(RequestItem{RequestID: id, CustomID: "c-" + id})
+			ch <- successResult(id)
+		}
+		close(ch)
+
+		if err := c.Drain(context.Background(), ch); err != nil {
+			t.Fatalf("Drain: %v", err)
+		}
+		if peak != bound {
+			t.Fatalf("peak concurrent checkpoints = %d, want %d", peak, bound)
+		}
+		if got := len(sink.records); got != total {
+			t.Fatalf("checkpointed %d results, want %d", got, total)
+		}
+		if n := pending.pendingCount(); n != 0 {
+			t.Fatalf("%d requests still pending after drain", n)
+		}
+	})
+
+	t.Run("checkpoints duplicate deliveries of one request serially", func(t *testing.T) {
+		pending := NewPendingRequests(0)
+		var mu sync.Mutex
+		running, overlapped, calls := 0, false, 0
+		sink := &fakeSink{}
+		sink.fn = func(*ResultItem) (bool, error) {
+			mu.Lock()
+			calls++
+			running++
+			if running > 1 {
+				overlapped = true
+			}
+			mu.Unlock()
+			time.Sleep(20 * time.Millisecond)
+			mu.Lock()
+			running--
+			mu.Unlock()
+			return true, nil
+		}
+		c := NewResultCheckpointer(sink, pending, NewProgressTracker(1, nil, "test-job", 0, logr.Discard()), 8, logr.Discard())
+
+		pending.Store(RequestItem{RequestID: "req-1", CustomID: "c-1"})
+		ch := make(chan ResultItem, 3)
+		for range 3 {
+			ch <- successResult("req-1")
+		}
+		close(ch)
+
+		if err := c.Drain(context.Background(), ch); err != nil {
+			t.Fatalf("Drain: %v", err)
+		}
+		if overlapped {
+			t.Fatal("deliveries of the same request were checkpointed concurrently")
+		}
+		// The first delivery resolves the request; the later ones no longer
+		// match a pending entry and are dropped without a checkpoint.
+		if calls != 1 {
+			t.Fatalf("sink called %d times, want 1", calls)
 		}
 	})
 }

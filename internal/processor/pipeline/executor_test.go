@@ -59,7 +59,7 @@ func TestJobExecutorEndToEnd(t *testing.T) {
 	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
@@ -122,7 +122,7 @@ func TestJobExecutorWithErrors(t *testing.T) {
 	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
@@ -172,7 +172,7 @@ func TestJobExecutorCancellation(t *testing.T) {
 	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(10, nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     source,
@@ -223,7 +223,7 @@ func TestJobExecutorMultipleModels(t *testing.T) {
 	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
@@ -285,7 +285,7 @@ func TestJobExecutorMultipleModels_ModelNotFound(t *testing.T) {
 	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
@@ -353,7 +353,7 @@ func TestJobExecutorSeparatesSuccessAndErrors(t *testing.T) {
 	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
@@ -433,7 +433,7 @@ func TestJobExecutorHTTPErrorGoesToOutputFile(t *testing.T) {
 	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
@@ -526,7 +526,7 @@ func TestJobExecutorCancellation_AllRequestsAccountedFor(t *testing.T) {
 	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(total), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     source,
@@ -565,7 +565,7 @@ func TestJobExecutorCancelAfterComplete(t *testing.T) {
 	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     source,
@@ -677,7 +677,7 @@ func TestDirectDispatcher_MetricsNotDoubleCounted(t *testing.T) {
 	sink := &fakeSink{}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
@@ -761,7 +761,7 @@ func TestJobExecutor_PersistenceFailureCancelsDispatch(t *testing.T) {
 	}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(total), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	source := &throttledSource{items: items, delay: 10 * time.Millisecond}
 
@@ -839,7 +839,7 @@ func TestJobExecutor_PersistenceFailureReturnedNotCanceled(t *testing.T) {
 	}
 	pending := NewPendingRequests(0)
 	tracker := NewProgressTracker(int64(total), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	source := &throttledSource{items: items, delay: 10 * time.Millisecond}
 
