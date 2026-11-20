@@ -68,6 +68,13 @@ jobs:
           TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/batch_gateway_test?sslmode=disable
         run: make test-postgres
 
+      - name: Run script tests against PostgreSQL
+        env:
+          TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/batch_gateway_test?sslmode=disable
+        run: |
+          python3 -m pip install --quiet "psycopg[binary]>=3.1" "redis>=5"
+          python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
       - name: Lint Helm chart
         run: |
           helm lint charts/batch-gateway
