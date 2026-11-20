@@ -83,8 +83,8 @@ func New(ctx context.Context, config *common.ServerConfig) (*Server, error) {
 
 	// API mux: business endpoints with per-route middleware.
 	// Request flow:
-	//   Matched:   Client → ServeMux → Recovery → RequestMiddleware (+ OTel) → SecurityHeaders → Handler
-	//   Unmatched: Client → ServeMux → Recovery → RequestMiddleware → SecurityHeaders → NotFoundHandler
+	//   Matched:   Client → ServeMux → Recovery → RequestMiddleware (+ OTel) → SecurityHeaders → RequireTenant → Handler
+	//   Unmatched: Client → ServeMux → Recovery → RequestMiddleware → SecurityHeaders → RequireTenant → NotFoundHandler
 	apiMux := http.NewServeMux()
 	fileHandler := file.NewFileAPIHandler(config, clients)
 	batchHandler, err := batch.NewBatchAPIHandler(config, clients)
@@ -94,7 +94,11 @@ func New(ctx context.Context, config *common.ServerConfig) (*Server, error) {
 	apiMiddlewares := []common.RouteMiddleware{
 		middleware.Recovery,                     // outermost: catches panics from all inner layers
 		middleware.NewRequestMiddleware(config), // request ID, tenant, logging, metrics, OTel tracing
-		middleware.SecurityHeaders,              // innermost: security response headers
+		middleware.SecurityHeaders,              // security response headers, CORS preflight
+		middleware.RequireTenant,                // innermost: rejects requests without a tenant
+	}
+	if config.AllowAnonymousTenant {
+		logger.Info("anonymous tenant allowed: requests without the tenant header are served as the default tenant")
 	}
 	for _, h := range []common.ApiHandler{fileHandler, batchHandler} {
 		common.RegisterHandler(apiMux, h, apiMiddlewares...)

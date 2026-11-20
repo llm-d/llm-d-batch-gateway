@@ -142,6 +142,10 @@ type ServerConfig struct {
 	// EnablePprof enables pprof profiling endpoints on the observability server.
 	EnablePprof bool `yaml:"enable_pprof"`
 
+	// AllowAnonymousTenant serves requests that carry no tenant header as
+	// DefaultTenantID. When false, such requests are rejected with 401.
+	AllowAnonymousTenant bool `yaml:"allow_anonymous_tenant"`
+
 	// OTelCfg holds OpenTelemetry-related settings.
 	OTelCfg sharedcfg.OTelConfig `yaml:"otel"`
 }

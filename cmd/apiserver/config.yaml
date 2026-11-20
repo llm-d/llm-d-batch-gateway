@@ -16,6 +16,10 @@ port: "8000"
 input_headers:
   tenant: "X-MaaS-Username"
 
+# Serve requests that carry no tenant header as the "default" tenant.
+# Local development only: leave unset behind an auth proxy, so such requests get 401.
+allow_anonymous_tenant: true
+
 # HTTP server timeout configurations (in seconds)
 # These values should accommodate large file uploads and batch operations
 # Set to 0 or omit to use defaults
