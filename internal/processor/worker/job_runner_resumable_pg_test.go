@@ -404,6 +404,6 @@ func TestRunJob_Resumable_FreshActivationKeepsInProgressAt(t *testing.T) {
 		t.Fatalf("in_progress_at = %v, want the activation timestamp", status.InProgressAt)
 	}
 	if status.CompletedAt != nil && *status.CompletedAt < *status.InProgressAt {
-		t.Fatalf("completed_at (%d) < in_progress_at (%d): the activation must not stamp into the future", status.CompletedAt, status.InProgressAt)
+		t.Fatalf("completed_at (%d) < in_progress_at (%d): the activation must not stamp into the future", *status.CompletedAt, *status.InProgressAt)
 	}
 }
