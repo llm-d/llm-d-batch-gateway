@@ -380,6 +380,100 @@ func TestBroadcaster_RetriesTransientError(t *testing.T) {
 	})
 }
 
+// TestBroadcaster_IdlePollIsNotAFailure covers a poll that times out on an
+// empty queue: the client bounds every poll with a timeout, so on an idle
+// queue each poll ends with context.DeadlineExceeded. The broadcaster must
+// poll again at once. Treated as a failure, each idle poll adds a backoff
+// sleep during which nothing receives and an arriving result waits.
+func TestBroadcaster_IdlePollIsNotAFailure(t *testing.T) {
+	const (
+		pollTimeout = 5 * time.Second
+		idlePolls   = 3
+	)
+	// poll stands in for a client call: the first idlePolls calls find the
+	// queue empty and run into the poll timeout, the next one has a result.
+	newPoll := func(wrap func(error) error) func(ctx context.Context) (*inference.GenerateResponse, error) {
+		var calls atomic.Int32
+		return func(ctx context.Context) (*inference.GenerateResponse, error) {
+			if calls.Add(1) <= idlePolls {
+				select {
+				case <-time.After(pollTimeout):
+					return nil, wrap(context.DeadlineExceeded)
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			if calls.Load() == idlePolls+1 {
+				return durableResponse("req-1"), nil
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+	}
+
+	tests := []struct {
+		name   string
+		client func() inference.AsyncInferenceClient
+	}{
+		{
+			name: "durable receive",
+			client: func() inference.AsyncInferenceClient {
+				poll := newPoll(func(err error) error { return err })
+				return &fakeDurableAsyncClient{
+					receive: func(ctx context.Context) (*inference.GenerateResponse, inference.ResultAck, error) {
+						resp, err := poll(ctx)
+						return resp, func(context.Context) error { return nil }, err
+					},
+				}
+			},
+		},
+		{
+			name: "destructive GetResult with a wrapped timeout",
+			client: func() inference.AsyncInferenceClient {
+				return &fakeAsyncClientWithErrors{
+					getResult: newPoll(func(err error) error { return fmt.Errorf("failed to get result: %w", err) }),
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				broadcaster := NewResultBroadcaster(tt.client(), logr.Discard())
+				resultCh := make(chan ResultItem, 1)
+				broadcaster.Subscribe(resultCh, nil)
+
+				ctx, cancel := context.WithCancel(t.Context())
+				go broadcaster.Run(ctx)
+
+				// The idle polls take idlePolls*pollTimeout. Any backoff
+				// between them would push the result past this point.
+				time.Sleep(idlePolls*pollTimeout + time.Millisecond)
+				synctest.Wait()
+
+				select {
+				case result := <-resultCh:
+					if result.RequestID != "req-1" {
+						t.Fatalf("RequestID = %q, want %q", result.RequestID, "req-1")
+					}
+				default:
+					t.Fatal("result not delivered right after the idle polls: the broadcaster backed off on a poll timeout")
+				}
+
+				cancel()
+				for {
+					synctest.Wait()
+					select {
+					case <-resultCh:
+					default:
+						return
+					}
+				}
+			})
+		})
+	}
+}
+
 type fakeAsyncClientWithErrors struct {
 	getResult func(ctx context.Context) (*inference.GenerateResponse, error)
 }
