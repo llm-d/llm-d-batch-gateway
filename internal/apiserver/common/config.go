@@ -195,6 +195,9 @@ func (c *ServerConfig) Validate() error {
 		}
 	}
 
+	if err := c.DBClientCfg.PostgreSQLCfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("db_client.postgresql.pool: %w", err)
+	}
 	if err := c.FileClientCfg.ValidateType(); err != nil {
 		return err
 	}
