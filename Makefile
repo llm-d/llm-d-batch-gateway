@@ -252,7 +252,7 @@ install-pre-commit-tools:
 ## install-tools: Install all development tools (includes pre-commit tools + golangci-lint)
 install-tools: install-pre-commit-tools
 	@echo "Installing additional development tools..."
-	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 	@echo "All tools installed"
 
 ## test-helm: Run Helm chart template tests (requires helm-unittest plugin)

@@ -427,7 +427,9 @@ func TestCollector_RunLoop_DeletesExpiredJobsAcrossCycles(t *testing.T) {
 	}
 
 	cancel()
-	<-done
+	if err := <-done; err != nil && err != context.Canceled {
+		t.Errorf("RunLoop returned error: %v", err)
+	}
 }
 
 func TestCollector_RunLoop_RunsImmediatelyOnStartup(t *testing.T) {
@@ -459,7 +461,9 @@ func TestCollector_RunLoop_RunsImmediatelyOnStartup(t *testing.T) {
 	}
 
 	cancel()
-	<-done
+	if err := <-done; err != nil && err != context.Canceled {
+		t.Errorf("RunLoop returned error: %v", err)
+	}
 }
 
 // -- File GC tests --
@@ -672,7 +676,9 @@ func TestCollector_RunLoop_DeletesExpiredFilesAcrossCycles(t *testing.T) {
 	}
 
 	cancel()
-	<-done
+	if err := <-done; err != nil && err != context.Canceled {
+		t.Errorf("RunLoop returned error: %v", err)
+	}
 }
 
 func TestCollector_Run_FileWithInvalidSpec(t *testing.T) {
