@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -54,7 +55,10 @@ func (c *asyncSharedClient) Submit(ctx context.Context, req *GenerateRequest) *C
 		deadline = dl
 	}
 
-	metadata := make(map[string]string)
+	metadata := maps.Clone(req.Metadata)
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
 	otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(metadata))
 	model := ""
 	if value, ok := req.Params["model"]; ok {

@@ -99,10 +99,11 @@ func TestAsyncEndToEnd(t *testing.T) {
 		broadcaster.Run(broadcasterCtx)
 	}()
 
+	tenant := map[string]string{"userid": "tenant-a"}
 	items := []RequestItem{
-		{RequestID: "req-1", CustomID: "c-1", ModelID: "m1", Endpoint: "/v1/chat/completions"},
-		{RequestID: "req-2", CustomID: "c-2", ModelID: "m1", Endpoint: "/v1/chat/completions"},
-		{RequestID: "req-3", CustomID: "c-3", ModelID: "m1", Endpoint: "/v1/chat/completions"},
+		{RequestID: "req-1", CustomID: "c-1", ModelID: "m1", Endpoint: "/v1/chat/completions", Metadata: tenant},
+		{RequestID: "req-2", CustomID: "c-2", ModelID: "m1", Endpoint: "/v1/chat/completions", Metadata: tenant},
+		{RequestID: "req-3", CustomID: "c-3", ModelID: "m1", Endpoint: "/v1/chat/completions", Metadata: tenant},
 	}
 
 	pending := NewPendingRequests(0)
@@ -156,10 +157,17 @@ func TestAsyncEndToEnd(t *testing.T) {
 		t.Errorf("Failed = %d, want 0", counts.Failed)
 	}
 	client.mu.Lock()
-	submitted := len(client.submitted)
+	submittedReqs := append([]*inference.GenerateRequest(nil), client.submitted...)
 	client.mu.Unlock()
-	if submitted != len(items) {
-		t.Errorf("submitted requests = %d, want %d before results", submitted, len(items))
+	if len(submittedReqs) != len(items) {
+		t.Errorf("submitted requests = %d, want %d before results", len(submittedReqs), len(items))
+	}
+	// The tenant metadata must survive the dispatcher hop, or dispatch gates
+	// that key on it (redis-quota, sql-quota) can't tell tenants apart.
+	for _, req := range submittedReqs {
+		if got := req.Metadata["userid"]; got != "tenant-a" {
+			t.Errorf("submitted %s metadata userid = %q, want %q", req.RequestID, got, "tenant-a")
+		}
 	}
 
 	outputData := sinkOutputBytes(t, sink)

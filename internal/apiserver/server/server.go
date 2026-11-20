@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -183,6 +184,11 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		for _, opt := range tlsOpts {
 			opt(httpserver.TLSConfig)
+		}
+		if httpserver.TLSConfig != nil && !slices.Contains(httpserver.TLSConfig.NextProtos, "h2") {
+			protocols := new(http.Protocols)
+			protocols.SetHTTP1(true)
+			httpserver.Protocols = protocols
 		}
 	} else if s.config.SSLCertFile != "" || s.config.SSLKeyFile != "" {
 		err := fmt.Errorf("both tls-cert-file and tls-private-key-file must be provided to enable TLS")

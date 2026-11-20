@@ -1,6 +1,8 @@
 processor:
   config:
     dispatchMode: async
+    # Carry the job tenant to Async gates; the quota fixture below keys on it.
+    tenantMetadataKey: userid
     modelGateways: null
     globalInferenceGateway: null
     asyncDispatch:
@@ -14,3 +16,5 @@ processor:
           inferencePoolName: "sim-pool-gate"
         sim-model-inject:
           inferencePoolName: "sim-pool-inject"
+        sim-model-quota:
+          inferencePoolName: "sim-pool-quota"

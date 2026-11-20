@@ -342,6 +342,8 @@ func TestAsyncResolverSQLPostgres_RoundTrip(t *testing.T) {
 	dispatcherID := "sql-roundtrip-dispatcher-" + suffix
 	requestID := "sql-roundtrip-request-" + suffix
 
+	migrateAsyncSQLSchema(t, sqlURL)
+
 	resolver, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
 		Transport:         AsyncTransportSQL,
 		SQLURL:            sqlURL,

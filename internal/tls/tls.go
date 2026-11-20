@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -122,6 +123,16 @@ func Resolve(logger logr.Logger, tlsMinVersion, tlsCipherSuites, tlsNextProtos s
 	}
 
 	nextProtos := parseNextProtos(tlsNextProtos)
+	if minVersion < tls.VersionTLS13 && len(ciphers) > 0 &&
+		!slices.Contains(ciphers, tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256) &&
+		!slices.Contains(ciphers, tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256) {
+		nextProtos = slices.DeleteFunc(nextProtos, func(proto string) bool {
+			return proto == "h2"
+		})
+		if len(nextProtos) == 0 {
+			nextProtos = []string{"http/1.1"}
+		}
+	}
 
 	logger.Info("TLS configuration resolved",
 		"minVersion", versionName(minVersion),

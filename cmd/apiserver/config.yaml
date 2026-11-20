@@ -46,7 +46,7 @@ observability_shutdown_timeout_seconds: 60
 
 # File client configuration
 file_client:
-  # Implementation type: "fs" (default), "mock", "s3" (AWS S3)
+  # Implementation type: "fs" (default), "mock", "s3" (AWS S3), or "gcs" (Google Cloud Storage)
   type: "fs"
   fs:
     base_path: "/tmp/batch-gateway"
@@ -59,6 +59,15 @@ file_client:
   #   access_key_id: ""        # Optional: defaults to AWS environment/IAM credentials
   #   prefix: ""               # Optional: prefix for S3 object keys
   #   use_path_style: false    # Optional: use path-style addressing
+
+  # GCS client configuration (required when type is "gcs").
+  # Uses Application Default Credentials (e.g. GKE Workload Identity); no secret key.
+  # gcs:
+  #   bucket: "llm-d-batch-gateway"  # Required: single bucket for all tenants
+  #   prefix: ""                    # Optional: prefix for GCS object names
+  #   project_id: ""                # Required only when auto_create_bucket is true
+  #   auto_create_bucket: false
+  #   verify_bucket_on_start: true  # HeadBucket at startup; required when auto_create_bucket is true
 
 # Database client configuration
 # db_client:
