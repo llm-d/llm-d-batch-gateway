@@ -86,7 +86,8 @@ func (p *PendingRequests) Enrich(result *ResultItem) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if result.Error != nil {
-		if _, ok := p.m[result.RequestID]; ok {
+		if msg, ok := p.m[result.RequestID]; ok {
+			fillMissingResultMetadata(result, msg)
 			return true
 		}
 		return result.CustomID != ""
@@ -118,7 +119,8 @@ func (p *PendingRequests) Resolve(result *ResultItem) bool {
 	accepted := false
 	switch {
 	case result.Error != nil:
-		if _, ok := p.m[result.RequestID]; ok {
+		if msg, ok := p.m[result.RequestID]; ok {
+			fillMissingResultMetadata(result, msg)
 			delete(p.m, result.RequestID)
 			accepted = true
 		} else {
@@ -143,6 +145,18 @@ func (p *PendingRequests) Resolve(result *ResultItem) bool {
 		p.signalDone()
 	}
 	return accepted
+}
+
+func fillMissingResultMetadata(result *ResultItem, request RequestItem) {
+	if result.CustomID == "" {
+		result.CustomID = request.CustomID
+	}
+	if result.ModelID == "" {
+		result.ModelID = request.ModelID
+	}
+	if result.SubmittedAt.IsZero() {
+		result.SubmittedAt = request.SubmittedAt
+	}
 }
 
 // Wait blocks until all pending entries are resolved or ctx is cancelled.
