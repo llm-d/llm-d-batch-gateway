@@ -20,6 +20,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -196,6 +197,30 @@ func withFileIDs(outputFileID, errorFileID string) func(*openai.BatchStatusInfo)
 	}
 }
 
+// withInputLineError returns a modifier that reports cause in the errors list
+// when it is an input line that failed validation. Any other cause, or nil,
+// leaves the list unset.
+func withInputLineError(cause error) func(*openai.BatchStatusInfo) {
+	return func(info *openai.BatchStatusInfo) {
+		var lineErr *inputLineError
+		if !errors.As(cause, &lineErr) {
+			return
+		}
+		batchErr := openai.BatchError{
+			Code:    "invalid_request",
+			Message: lineErr.Error(),
+			Line:    &lineErr.line,
+		}
+		if lineErr.param != "" {
+			batchErr.Param = &lineErr.param
+		}
+		info.Errors = &openai.BatchErrors{
+			Object: "list",
+			Data:   []openai.BatchError{batchErr},
+		}
+	}
+}
+
 // UpdateCompletedStatus transitions the job to completed status and records file IDs.
 // Per the OpenAI batch spec, both IDs are optional: outputFileID is empty when all requests
 // failed, and errorFileID is empty when no requests failed.
@@ -213,19 +238,20 @@ func (s *StatusUpdater) UpdateCompletedStatus(
 
 // UpdateFailedStatus transitions the job to failed status and records partial file IDs when available.
 // counts may be nil when the job failed before execution (ingestion).
+// modifiers set further fields, such as the errors list.
 func (s *StatusUpdater) UpdateFailedStatus(
 	ctx context.Context,
 	dbJob *db.BatchItem,
 	counts *openai.BatchRequestCounts,
 	outputFileID string,
 	errorFileID string,
+	modifiers ...func(*openai.BatchStatusInfo),
 ) error {
 	if dbJob == nil {
 		return fmt.Errorf("dbJob is nil")
 	}
-	return s.updatePersistentStatus(ctx, dbJob, openai.BatchStatusFailed, counts, nil, dbJob.Status,
-		withFileIDs(outputFileID, errorFileID),
-	)
+	modifiers = append([]func(*openai.BatchStatusInfo){withFileIDs(outputFileID, errorFileID)}, modifiers...)
+	return s.updatePersistentStatus(ctx, dbJob, openai.BatchStatusFailed, counts, nil, dbJob.Status, modifiers...)
 }
 
 // UpdateCancelledStatus transitions the job to cancelled status and records partial file IDs.

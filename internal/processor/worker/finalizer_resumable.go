@@ -140,6 +140,7 @@ func (p *Processor) finalizeResumableAs(
 	status openai.BatchStatus,
 	notExecutedCode batch_types.BatchErrorCode,
 	expected openai.BatchStatus,
+	modifiers ...func(*openai.BatchStatusInfo),
 ) error {
 	logger := logr.FromContextOrDiscard(ctx)
 	logger.V(logging.INFO).Info("Terminalizing resumable job without resuming execution", "status", status)
@@ -160,7 +161,7 @@ func (p *Processor) finalizeResumableAs(
 		return fmt.Errorf("assemble resumable artifacts: %w", err)
 	}
 
-	if err := p.finalizeResumableStatus(ioCtx, updater, dbJob, expected, status, counts, outputFileID, errorFileID); err != nil {
+	if err := p.finalizeResumableStatus(ioCtx, updater, dbJob, expected, status, counts, outputFileID, errorFileID, modifiers...); err != nil {
 		return fmt.Errorf("update job status to %s: %w", status, err)
 	}
 
@@ -183,8 +184,9 @@ func (p *Processor) finalizeResumableTerminal(
 	status openai.BatchStatus,
 	notExecutedCode batch_types.BatchErrorCode,
 	expected openai.BatchStatus,
+	modifiers ...func(*openai.BatchStatusInfo),
 ) error {
-	err := p.finalizeResumableAs(ctx, params.updater, params.jobItem, params.jobInfo, status, notExecutedCode, expected)
+	err := p.finalizeResumableAs(ctx, params.updater, params.jobItem, params.jobInfo, status, notExecutedCode, expected, modifiers...)
 
 	// Cleanup after the terminal write: if it failed, the local files survive
 	// for the reconciler requeue to retry the finalization.
@@ -225,8 +227,10 @@ func (p *Processor) finalizeResumableStatus(
 	expected, terminal openai.BatchStatus,
 	counts *openai.BatchRequestCounts,
 	outputFileID, errorFileID string,
+	modifiers ...func(*openai.BatchStatusInfo),
 ) error {
-	doc, err := updater.BuildStatus(dbJob, terminal, counts, nil, withFileIDs(outputFileID, errorFileID))
+	modifiers = append([]func(*openai.BatchStatusInfo){withFileIDs(outputFileID, errorFileID)}, modifiers...)
+	doc, err := updater.BuildStatus(dbJob, terminal, counts, nil, modifiers...)
 	if err != nil {
 		return err
 	}

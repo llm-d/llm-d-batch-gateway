@@ -1439,6 +1439,7 @@ func TestPreProcess_StreamTrue_FailsJob(t *testing.T) {
 	if !strings.Contains(err.Error(), "streaming is not supported") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	assertInputLineError(t, err, 2, "body.stream")
 }
 
 func TestPreProcess_DuplicateCustomID_FailsJob(t *testing.T) {
@@ -1510,6 +1511,7 @@ func TestPreProcess_DuplicateCustomID_FailsJob(t *testing.T) {
 	if !strings.Contains(err.Error(), "req-1") {
 		t.Fatalf("error should mention the duplicated custom_id value: %v", err)
 	}
+	assertInputLineError(t, err, 3, "custom_id")
 }
 
 func TestPreProcess_UniqueCustomIDs_Succeeds(t *testing.T) {
@@ -1929,3 +1931,54 @@ func TestPreProcess_AllRequestsUnregistered_ExecuteJobCounts(t *testing.T) {
 // TestPreProcess_ModelNotFound_ThenEarlySLO_PreservesErrorFile verifies that
 // when ingestion writes model_not_found entries and execution hits early SLO
 // expiration, the error file is preserved (not truncated by execution).
+
+// assertInputLineError checks that err carries the input line number and the
+// field at fault.
+func assertInputLineError(t *testing.T, err error, wantLine int64, wantParam string) {
+	t.Helper()
+	var lineErr *inputLineError
+	if !errors.As(err, &lineErr) {
+		t.Fatalf("expected an inputLineError, got %T: %v", err, err)
+	}
+	if lineErr.line != wantLine {
+		t.Errorf("line = %d, want %d", lineErr.line, wantLine)
+	}
+	if lineErr.param != wantParam {
+		t.Errorf("param = %q, want %q", lineErr.param, wantParam)
+	}
+}
+
+func TestExtractAndValidateLine_ErrorParam(t *testing.T) {
+	tests := []struct {
+		name      string
+		line      string
+		wantParam string
+	}{
+		{name: "invalid JSON", line: `{"custom_id":`, wantParam: ""},
+		{name: "missing custom_id", line: `{"method":"POST","url":"/v1/chat/completions","body":{"model":"m1"}}`, wantParam: "custom_id"},
+		{name: "missing method", line: `{"custom_id":"r1","url":"/v1/chat/completions","body":{"model":"m1"}}`, wantParam: "method"},
+		{name: "method other than POST", line: `{"custom_id":"r1","method":"GET","url":"/v1/chat/completions","body":{"model":"m1"}}`, wantParam: "method"},
+		{name: "missing url", line: `{"custom_id":"r1","method":"POST","body":{"model":"m1"}}`, wantParam: "url"},
+		{name: "absolute url", line: `{"custom_id":"r1","method":"POST","url":"https://example.com/v1/chat/completions","body":{"model":"m1"}}`, wantParam: "url"},
+		{name: "unknown endpoint", line: `{"custom_id":"r1","method":"POST","url":"/v1/unknown","body":{"model":"m1"}}`, wantParam: "url"},
+		{name: "endpoint differs from the batch", line: `{"custom_id":"r1","method":"POST","url":"/v1/embeddings","body":{"model":"m1"}}`, wantParam: "url"},
+		{name: "empty model", line: `{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":""}}`, wantParam: "body.model"},
+		{name: "stream true", line: `{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":"m1","stream":true}}`, wantParam: "body.stream"},
+		{name: "invalid system message content", line: `{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":"m1","messages":[{"role":"system","content":42}]}}`, wantParam: "body.messages"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := extractAndValidateLine([]byte(tt.line+"\n"), openai.EndpointAllowlist{}, "/v1/chat/completions")
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			var lineErr *inputLineError
+			if !errors.As(err, &lineErr) {
+				t.Fatalf("expected an inputLineError, got %T: %v", err, err)
+			}
+			if lineErr.param != tt.wantParam {
+				t.Errorf("param = %q, want %q", lineErr.param, tt.wantParam)
+			}
+		})
+	}
+}

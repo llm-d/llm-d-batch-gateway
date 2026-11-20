@@ -152,7 +152,7 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 				}
 			} else if enqErr := p.poller.enqueueOne(bgCtx, params.task); enqErr != nil {
 				logger.Error(enqErr, "Failed to re-enqueue the job to the queue")
-				if failErr := p.handleFailed(bgCtx, params.updater, params.jobItem, nil, params.jobInfo); failErr != nil {
+				if failErr := p.handleFailed(bgCtx, params.updater, params.jobItem, nil, params.jobInfo, nil); failErr != nil {
 					logger.Error(failErr, "Failed to mark job as failed after re-enqueue failure")
 				}
 			} else {
@@ -253,7 +253,7 @@ func (p *Processor) runJob(ctx context.Context, params *jobExecutionParams) {
 				p.getJobStatus(params.jobItem)); finErr != nil {
 				logger.Error(finErr, "Failed to finalize failed resumable pickup")
 			}
-		} else if failErr := p.handleFailed(ctx, params.updater, params.jobItem, nil, params.jobInfo); failErr != nil {
+		} else if failErr := p.handleFailed(ctx, params.updater, params.jobItem, nil, params.jobInfo, nil); failErr != nil {
 			logger.Error(failErr, "Failed to handle failed event")
 		}
 		return
@@ -412,7 +412,7 @@ func (p *Processor) handlePanicRecovery(
 	bgCtx, bgCancel := context.WithTimeout(context.Background(), panicRecoveryTimeout)
 	defer bgCancel()
 	bgCtx = logr.NewContext(bgCtx, logger)
-	if err := p.handleFailed(bgCtx, params.updater, params.jobItem, requestCounts, params.jobInfo); err != nil {
+	if err := p.handleFailed(bgCtx, params.updater, params.jobItem, requestCounts, params.jobInfo, nil); err != nil {
 		logger.Error(err, "Failed to mark job as failed after panic — job will remain in_progress until startup recovery runs",
 			"jobID", params.jobItem.ID, "tenantID", params.jobItem.TenantID)
 	}
@@ -452,7 +452,7 @@ func (p *Processor) handleJobError(ctx context.Context, params *jobExecutionPara
 			// as the legacy pipeline.
 			logger.V(logging.INFO).Info("SIGTERM received, leaving resumable job for the reconciler")
 		default:
-			if finErr := p.finalizeResumableTerminal(ctx, params, openai.BatchStatusFailed, batch_types.ErrCodeBatchFailed, openai.BatchStatusInProgress); finErr != nil {
+			if finErr := p.finalizeResumableTerminal(ctx, params, openai.BatchStatusFailed, batch_types.ErrCodeBatchFailed, openai.BatchStatusInProgress, withInputLineError(err)); finErr != nil {
 				logger.Error(finErr, "Failed to finalize failed resumable job")
 			}
 		}
@@ -493,7 +493,7 @@ func (p *Processor) handleJobError(ctx context.Context, params *jobExecutionPara
 		logger.V(logging.INFO).Info("SIGTERM received, leaving job for orphan reconciler")
 
 	default:
-		if failErr := p.handleFailed(ctx, params.updater, params.jobItem, params.requestCounts, params.jobInfo); failErr != nil {
+		if failErr := p.handleFailed(ctx, params.updater, params.jobItem, params.requestCounts, params.jobInfo, err); failErr != nil {
 			logger.Error(failErr, "Failed to handle failed event")
 		}
 	}
@@ -550,6 +550,9 @@ func (p *Processor) handleExpired(
 
 // handleFailed finalizes a failed job by transitioning it to failed status.
 //
+// cause is the error that failed the job, or nil. An input line that failed
+// validation is reported in the batch's errors list; any other cause leaves it unset.
+//
 // Records E2E latency as failed when jobInfo is available (nil-safe).
 // Uses a detached context so that a concurrent SIGTERM cannot abort the DB write.
 // If the caller already has a tighter deadline (e.g. panic recovery), that deadline is respected.
@@ -559,6 +562,7 @@ func (p *Processor) handleFailed(
 	jobItem *db.BatchItem,
 	requestCounts *openai.BatchRequestCounts,
 	jobInfo *batch_types.JobInfo,
+	cause error,
 ) error {
 	timeout := finalizationTimeout
 	if d, ok := ctx.Deadline(); ok {
@@ -574,7 +578,7 @@ func (p *Processor) handleFailed(
 
 	logger := logr.FromContextOrDiscard(ctx)
 
-	if err := updater.UpdateFailedStatus(ioCtx, jobItem, requestCounts, "", ""); err != nil {
+	if err := updater.UpdateFailedStatus(ioCtx, jobItem, requestCounts, "", "", withInputLineError(cause)); err != nil {
 		logger.Error(err, "Failed to update status to failed")
 		return err
 	}
