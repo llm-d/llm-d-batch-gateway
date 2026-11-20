@@ -28,6 +28,9 @@ DISPATCHER_SOURCE="${DISPATCHER_SOURCE:-}"
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     # Standalone execution is an explicit request to enable async dispatch.
     ENABLE_DISPATCHER=true
+    if [[ "${ENABLE_DISPATCHER_MEDIA}" == "true" ]]; then
+        die "The media fixtures need the full deploy: ENABLE_DISPATCHER=true ENABLE_DISPATCHER_MEDIA=true make dev-deploy"
+    fi
     check_prerequisites
 
     if ! kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"; then
@@ -132,6 +135,19 @@ helm upgrade --install "${DISPATCHER_PROM_RELEASE}" "${DISPATCHER_CHART}" \
     --set-string "ap.imagePullPolicy=${DISPATCHER_IMAGE_PULL_POLICY}" \
     --timeout=120s
 
+DISPATCHER_MEDIA_RELEASE="${DISPATCHER_MEDIA_RELEASE:-dispatcher-media}"
+if [[ "${ENABLE_DISPATCHER_MEDIA}" == "true" ]]; then
+    step "Deploying async-processor with the s3_multipart transform (release: ${DISPATCHER_MEDIA_RELEASE})..."
+    helm upgrade --install "${DISPATCHER_MEDIA_RELEASE}" "${DISPATCHER_CHART}" \
+        "${HELM_VERSION_FLAG[@]}" \
+        --namespace "${NAMESPACE}" \
+        --values "${REPO_ROOT}/test/e2e/dispatcher/helm-values-media.yaml" \
+        --set-string "ap.image.repository=${DISPATCHER_IMAGE_REPO}" \
+        --set-string "ap.image.tag=${DISPATCHER_IMAGE_TAG}" \
+        --set-string "ap.imagePullPolicy=${DISPATCHER_IMAGE_PULL_POLICY}" \
+        --timeout=120s
+fi
+
 log "Dispatchers deployed."
 
 # ── Verify dispatchers ───────────────────────────────────────────────────────
@@ -142,6 +158,10 @@ kubectl wait --for=condition=available deployment/"${DISPATCHER_SCRAPE_RELEASE}-
     --namespace "${NAMESPACE}" --timeout=60s
 kubectl wait --for=condition=available deployment/"${DISPATCHER_PROM_RELEASE}-llm-d-async" \
     --namespace "${NAMESPACE}" --timeout=60s
+if [[ "${ENABLE_DISPATCHER_MEDIA}" == "true" ]]; then
+    kubectl wait --for=condition=available deployment/"${DISPATCHER_MEDIA_RELEASE}-llm-d-async" \
+        --namespace "${NAMESPACE}" --timeout=60s
+fi
 
 verify_dispatcher_runtime_image() {
     local release="$1"
@@ -172,6 +192,9 @@ verify_dispatcher_runtime_image() {
 verify_dispatcher_runtime_image "${DISPATCHER_RELEASE}"
 verify_dispatcher_runtime_image "${DISPATCHER_SCRAPE_RELEASE}"
 verify_dispatcher_runtime_image "${DISPATCHER_PROM_RELEASE}"
+if [[ "${ENABLE_DISPATCHER_MEDIA}" == "true" ]]; then
+    verify_dispatcher_runtime_image "${DISPATCHER_MEDIA_RELEASE}"
+fi
 
 # ── Add vllm-sim to Prometheus scrape targets ────────────────────────────────
 step "Adding vllm-sim to Prometheus scrape config..."

@@ -183,6 +183,40 @@ func TestProcessorConfig_Validate_ExtraEndpoints(t *testing.T) {
 	}
 }
 
+func TestProcessorConfig_Validate_MediaEndpointsNeedAsync(t *testing.T) {
+	media := []string{"/v1/audio/transcriptions", "/v1/audio/translations", "/v1/images/edits"}
+	tests := []struct {
+		name    string
+		async   bool
+		extra   []string
+		wantErr bool
+	}{
+		{name: "async with media endpoints", async: true, extra: media},
+		{name: "sync without media endpoints", extra: []string{"/v1/classify"}},
+		{name: "sync with transcriptions", extra: []string{"/v1/classify", media[0]}, wantErr: true},
+		{name: "sync with image edits", extra: []string{media[2]}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewConfig()
+			c.ExtraEndpoints = tt.extra
+			if tt.async {
+				c.DispatchMode = DispatchModeAsync
+				c.AsyncDispatchConfig.Models = map[string]AsyncModelConfig{"whisper": {InferencePoolName: "pool-a"}}
+			} else {
+				c.ModelGateways = validPerModelConfig()
+			}
+			err := c.Validate()
+			if tt.wantErr && (err == nil || !strings.Contains(err.Error(), "requires dispatch_mode")) {
+				t.Fatalf("Validate() error = %v, want a dispatch_mode error", err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestProcessorConfig_Validate_FileClientType(t *testing.T) {
 	tests := []struct {
 		ftype   string

@@ -35,6 +35,7 @@ cleanup_kubernetes_resources() {
     helm uninstall "${DISPATCHER_RELEASE:-dispatcher}" -n "${NAMESPACE}" 2>/dev/null || warn "Failed to uninstall dispatcher (may not exist)"
     helm uninstall "${DISPATCHER_SCRAPE_RELEASE:-dispatcher-scrape}" -n "${NAMESPACE}" 2>/dev/null || warn "Failed to uninstall dispatcher-scrape (may not exist)"
     helm uninstall "${DISPATCHER_PROM_RELEASE:-dispatcher-prom}" -n "${NAMESPACE}" 2>/dev/null || warn "Failed to uninstall dispatcher-prom (may not exist)"
+    helm uninstall "${DISPATCHER_MEDIA_RELEASE:-dispatcher-media}" -n "${NAMESPACE}" 2>/dev/null || warn "Failed to uninstall dispatcher-media (may not exist)"
     helm uninstall "${HELM_RELEASE}" -n "${NAMESPACE}" 2>/dev/null || warn "Failed to uninstall ${HELM_RELEASE} (may not exist)"
     helm uninstall "${REDIS_RELEASE}" -n "${NAMESPACE}" 2>/dev/null || warn "Failed to uninstall ${REDIS_RELEASE} (may not exist)"
     helm uninstall "${POSTGRESQL_RELEASE}" -n "${NAMESPACE}" 2>/dev/null || warn "Failed to uninstall ${POSTGRESQL_RELEASE} (may not exist)"
@@ -58,6 +59,7 @@ cleanup_kubernetes_resources() {
     kubectl delete clusterrole,clusterrolebinding "${PROMETHEUS_NAME}" --ignore-not-found=true
     kubectl delete deployment,svc "${VLLM_SIM_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
     kubectl delete deployment,svc "${VLLM_SIM_B_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
+    kubectl delete deployment,svc media-echo -n "${NAMESPACE}" --ignore-not-found=true
     kubectl delete deployment,svc "${SEAWEEDFS_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
 
     # Delete e2e helper pods (created by test runs, safe to ignore if absent)

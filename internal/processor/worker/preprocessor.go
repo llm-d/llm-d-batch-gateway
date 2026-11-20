@@ -81,6 +81,11 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 		return nil, fmt.Errorf("create job root directory %q: %w", jobRootDir, err)
 	}
 
+	media, err := p.mediaRulesFor(jobInfo.TenantID)
+	if err != nil {
+		return nil, err
+	}
+
 	// input file stream open
 	reader, metadata, err := p.openInputFileStream(ctx, inputFileID)
 	if err != nil {
@@ -170,7 +175,7 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 			return nil, fmt.Errorf("write line %d to input file %q: %w", lineCount, localInputFilePath, err)
 		}
 
-		requestMeta, err := extractAndValidateLine(line, p.endpointAllowlist, jobInfo.BatchJob.Endpoint.String())
+		requestMeta, err := extractAndValidateLine(line, p.endpointAllowlist, jobInfo.BatchJob.Endpoint.String(), media)
 		if err != nil {
 			return nil, fmt.Errorf("validate request at line %d: %w", lineCount, err)
 		}
@@ -284,8 +289,8 @@ type requestMeta struct {
 }
 
 // extractAndValidateLine parses and validates a request line and returns the
-// metadata needed during ingestion.
-func extractAndValidateLine(line []byte, endpointAllowlist openai.EndpointAllowlist, batchEndpoint string) (requestMeta, error) {
+// metadata needed during ingestion. media checks the bodies of media endpoints.
+func extractAndValidateLine(line []byte, endpointAllowlist openai.EndpointAllowlist, batchEndpoint string, media mediaRules) (requestMeta, error) {
 	var req planRequestLine
 	trimmedLine := bytes.TrimSuffix(line, []byte{'\n'})
 	if err := json.Unmarshal(trimmedLine, &req); err != nil {
@@ -317,6 +322,9 @@ func extractAndValidateLine(line []byte, endpointAllowlist openai.EndpointAllowl
 	}
 	if req.Body.Stream != nil && *req.Body.Stream {
 		return requestMeta{}, fmt.Errorf("streaming is not supported in batch requests (model: %s)", req.Body.Model)
+	}
+	if err := media.check(trimmedLine, req.URL); err != nil {
+		return requestMeta{}, err
 	}
 
 	prefixHash := NoPrefixHash

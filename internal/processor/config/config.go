@@ -194,6 +194,7 @@ type ResumableConfig struct {
 
 type ProcessorConfig struct {
 	// ExtraEndpoints adds deployment-specific inference paths to the default OpenAI endpoint allowlist.
+	// The multipart media endpoints (openai.IsMultipartMediaEndpoint) require dispatch_mode async.
 	ExtraEndpoints []string `yaml:"extra_endpoints"`
 
 	// TaskWaitTime is the timeout parameter used when dequeueing from the priority queue
@@ -557,6 +558,15 @@ func (c *ProcessorConfig) Validate() error {
 
 	if err := c.validateGateways(); err != nil {
 		return err
+	}
+	// Media endpoints reach multipart-only backends; only async dispatch, through
+	// llm-d-async's s3_multipart transform, can send them multipart bodies.
+	if !c.IsAsync() {
+		for _, e := range c.ExtraEndpoints {
+			if openai.IsMultipartMediaEndpoint(openai.Endpoint(e)) {
+				return fmt.Errorf("extra_endpoints: %s requires dispatch_mode %q", e, DispatchModeAsync)
+			}
+		}
 	}
 
 	return nil
