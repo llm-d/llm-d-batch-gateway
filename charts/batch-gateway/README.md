@@ -382,6 +382,28 @@ spec:
       port: 8000
 ```
 
+### Restricting access with a NetworkPolicy
+
+The API server trusts the tenant header set by the auth proxy, so nothing else should reach its API port. Enable the NetworkPolicy and list the gateway's namespace:
+
+```yaml
+apiserver:
+  networkPolicy:
+    enabled: true
+    api:
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway-system
+    observability:
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+```
+
+`api.from` is required when the policy is enabled. An empty `observability.from` allows no peer on the observability port; kubelet probes keep working. The policy has an effect only with a network plugin that enforces `NetworkPolicy`.
+
 ## Health Checks
 
 ### API Server
