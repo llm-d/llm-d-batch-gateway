@@ -1193,7 +1193,7 @@ func TestRunPollingLoop_GuardReEnqueueFails_FallsBackToHandleFailed(t *testing.T
 
 func TestExtractAndValidateLine_StreamTrue_ReturnsError(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":"gpt-4","stream":true,"messages":[{"role":"user","content":"hi"}]}}` + "\n")
-	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err == nil {
 		t.Fatal("expected error for stream: true, got nil")
 	}
@@ -1204,7 +1204,7 @@ func TestExtractAndValidateLine_StreamTrue_ReturnsError(t *testing.T) {
 
 func TestExtractAndValidateLine_StreamFalse_OK(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":"gpt-4","stream":false,"messages":[{"role":"user","content":"hi"}]}}` + "\n")
-	meta, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	meta, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err != nil {
 		t.Fatalf("unexpected error for stream: false: %v", err)
 	}
@@ -1218,7 +1218,7 @@ func TestExtractAndValidateLine_StreamFalse_OK(t *testing.T) {
 
 func TestExtractAndValidateLine_StreamOmitted_OK(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}}` + "\n")
-	meta, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	meta, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err != nil {
 		t.Fatalf("unexpected error when stream is omitted: %v", err)
 	}
@@ -1229,7 +1229,7 @@ func TestExtractAndValidateLine_StreamOmitted_OK(t *testing.T) {
 
 func TestExtractAndValidateLine_EmptyCustomID_ReturnsError(t *testing.T) {
 	line := []byte(`{"custom_id":"","method":"POST","url":"/v1/chat/completions","body":{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}}` + "\n")
-	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err == nil {
 		t.Fatal("expected error for empty custom_id, got nil")
 	}
@@ -1240,7 +1240,7 @@ func TestExtractAndValidateLine_EmptyCustomID_ReturnsError(t *testing.T) {
 
 func TestExtractAndValidateLine_MissingCustomID_ReturnsError(t *testing.T) {
 	line := []byte(`{"method":"POST","url":"/v1/chat/completions","body":{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}}` + "\n")
-	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err == nil {
 		t.Fatal("expected error for missing custom_id, got nil")
 	}
@@ -1251,7 +1251,7 @@ func TestExtractAndValidateLine_MissingCustomID_ReturnsError(t *testing.T) {
 
 func TestExtractAndValidateLine_MissingMethod_ReturnsError(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","url":"/v1/chat/completions","body":{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}}` + "\n")
-	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err == nil {
 		t.Fatal("expected error for missing method, got nil")
 	}
@@ -1262,7 +1262,7 @@ func TestExtractAndValidateLine_MissingMethod_ReturnsError(t *testing.T) {
 
 func TestExtractAndValidateLine_InvalidMethod_ReturnsError(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","method":"DELETE","url":"/v1/chat/completions","body":{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}}` + "\n")
-	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err == nil {
 		t.Fatal("expected error for invalid method, got nil")
 	}
@@ -1273,7 +1273,7 @@ func TestExtractAndValidateLine_InvalidMethod_ReturnsError(t *testing.T) {
 
 func TestExtractAndValidateLine_MissingURL_ReturnsError(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","method":"POST","body":{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}}` + "\n")
-	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err == nil {
 		t.Fatal("expected error for missing url, got nil")
 	}
@@ -1284,7 +1284,7 @@ func TestExtractAndValidateLine_MissingURL_ReturnsError(t *testing.T) {
 
 func TestExtractAndValidateLine_AbsoluteURL_ReturnsError(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","method":"POST","url":"http://evil.com","body":{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}}` + "\n")
-	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err == nil {
 		t.Fatal("expected error for absolute url, got nil")
 	}
@@ -1295,7 +1295,7 @@ func TestExtractAndValidateLine_AbsoluteURL_ReturnsError(t *testing.T) {
 
 func TestExtractAndValidateLine_DoubleSlashURL_ReturnsError(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","method":"POST","url":"//evil.com","body":{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}}` + "\n")
-	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err == nil {
 		t.Fatal("expected error for protocol-relative url, got nil")
 	}
@@ -1306,7 +1306,7 @@ func TestExtractAndValidateLine_DoubleSlashURL_ReturnsError(t *testing.T) {
 
 func TestExtractAndValidateLine_NotAllowedEndpoint_ReturnsError(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","method":"POST","url":"/not-allowed","body":{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}}` + "\n")
-	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err == nil {
 		t.Fatal("expected error for invalid endpoint, got nil")
 	}
@@ -1317,7 +1317,7 @@ func TestExtractAndValidateLine_NotAllowedEndpoint_ReturnsError(t *testing.T) {
 
 func TestExtractAndValidateLine_BatchEndpointMismatch(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","method":"POST","url":"/v1/embeddings","body":{"model":"embedding-model"}}` + "\n")
-	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err == nil {
 		t.Fatal("expected error when request endpoint differs from batch endpoint")
 	}
@@ -1328,7 +1328,7 @@ func TestExtractAndValidateLine_BatchEndpointMismatch(t *testing.T) {
 
 func TestExtractAndValidateLine_EmptyBatchEndpoint(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":"gpt-4"}}` + "\n")
-	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "")
+	_, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "", false)
 	if err == nil {
 		t.Fatal("expected error when stored batch endpoint is empty")
 	}
@@ -1339,7 +1339,7 @@ func TestExtractAndValidateLine_EmptyBatchEndpoint(t *testing.T) {
 
 func TestExtractAndValidateLine_BatchEndpointMatch(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","method":"POST","url":"/v1/embeddings","body":{"model":"embedding-model"}}` + "\n")
-	if _, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/embeddings"); err != nil {
+	if _, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/embeddings", false); err != nil {
 		t.Fatalf("unexpected error when endpoints match: %v", err)
 	}
 }
@@ -1350,7 +1350,7 @@ func TestExtractAndValidateLine_ConfiguredEndpoint_OK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEndpointAllowlist() unexpected error: %v", err)
 	}
-	meta, err := extractAndValidateLine(line, allowlist, "/v1/classify")
+	meta, err := extractAndValidateLine(line, allowlist, "/v1/classify", false)
 	if err != nil {
 		t.Fatalf("unexpected error for configured endpoint: %v", err)
 	}
@@ -1361,7 +1361,7 @@ func TestExtractAndValidateLine_ConfiguredEndpoint_OK(t *testing.T) {
 
 func TestExtractAndValidateLine_AllowedEndpoint_OK(t *testing.T) {
 	line := []byte(`{"custom_id":"r1","method":"POST","url":"/v1/chat/completions","body":{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}}` + "\n")
-	meta, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions")
+	meta, err := extractAndValidateLine(line, openai.EndpointAllowlist{}, "/v1/chat/completions", false)
 	if err != nil {
 		t.Fatalf("unexpected error for allowed endpoint: %v", err)
 	}
