@@ -47,3 +47,12 @@ file_client:
   #   access_key_id: ""
   #   prefix: ""
   #   use_path_style: false
+
+  # GCS (uncomment to use instead of fs). Uses Application Default Credentials
+  # (e.g. GKE Workload Identity); no secret key required.
+  # gcs:
+  #   bucket: "llm-d-batch-gateway"  # Required: single bucket for all tenants
+  #   prefix: ""
+  #   project_id: ""                # Required only when auto_create_bucket is true
+  #   auto_create_bucket: false
+  #   verify_bucket_on_start: true  # HeadBucket at startup; required when auto_create_bucket is true

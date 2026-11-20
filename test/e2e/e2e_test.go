@@ -79,9 +79,13 @@ var (
 		fmt.Sprintf(`{"custom_id":"req-2","method":"POST","url":"/v1/chat/completions","body":{"model":"%s","max_tokens":5,"messages":[{"role":"user","content":"World"}]}}`, testModel),
 	}, "\n")
 
-	// testHTTPClient is used for direct HTTP calls; skips TLS verification for self-signed certs.
+	// testHTTPClient is used for HTTP calls to the API server; skips TLS verification for
+	// self-signed certs and honors the standard proxy environment variables (HTTPS_PROXY,
+	// NO_PROXY). A custom http.Transport leaves Proxy nil, which disables proxy support,
+	// so the client would bypass a proxy that the test runner needs to reach the ingress.
 	testHTTPClient = &http.Client{
 		Transport: &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // dev/test only
 		},
 		Timeout: 10 * time.Second,

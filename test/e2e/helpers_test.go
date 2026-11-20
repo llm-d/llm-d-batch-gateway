@@ -18,8 +18,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -903,6 +905,14 @@ func assertSliceEqual(t *testing.T, want, got []string) {
 	}
 }
 
+// isUnreachable reports whether err is a failure to open a connection: a
+// refused connection, a DNS failure or a dial timeout. Errors from a server
+// that was reached, such as an authentication failure, return false.
+func isUnreachable(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
+}
+
 func waitForReady(t *testing.T, url string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -1164,13 +1174,29 @@ func waitForProcessorReady(t *testing.T, timeout time.Duration) {
 	podLabel := fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/component=processor", testHelmRelease)
 	waitCtx, waitCancel := context.WithDeadline(context.Background(), deadline)
 	defer waitCancel()
-	if out, err := exec.CommandContext(waitCtx, "kubectl", "wait", "pod",
-		"-l", podLabel,
-		"-n", testNamespace,
-		"--for=condition=Ready",
-		fmt.Sprintf("--timeout=%ds", int(time.Until(deadline).Seconds())),
-	).CombinedOutput(); err != nil {
-		t.Fatalf("processor pod not ready after %v: %v\n%s", timeout, err, out)
+	// Wait for the processor pod to be Running and Ready before attempting
+	// a port-forward. The replacement pod may not exist yet when this runs:
+	// kubectl delete returns after the old pod is fully removed, and until the
+	// StatefulSet controller creates the replacement, kubectl wait matches no
+	// resources and fails immediately instead of waiting. Retry while the
+	// selector matches nothing, bounded by the overall deadline.
+	for {
+		out, err := exec.CommandContext(waitCtx, "kubectl", "wait", "pod",
+			"-l", podLabel,
+			"-n", testNamespace,
+			"--for=condition=Ready",
+			fmt.Sprintf("--timeout=%ds", int(time.Until(deadline).Seconds())),
+		).CombinedOutput()
+		if err == nil {
+			break
+		}
+		if !strings.Contains(string(out), "no matching resources found") {
+			t.Fatalf("processor pod not ready after %v: %v\n%s", timeout, err, out)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("processor pod not ready after %v: %v\n%s", timeout, err, out)
+		}
+		time.Sleep(time.Second)
 	}
 
 	for {

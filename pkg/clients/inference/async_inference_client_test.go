@@ -33,7 +33,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-func TestAsyncSharedClient_SubmitPropagatesTraceContext(t *testing.T) {
+func TestAsyncSharedClient_SubmitMetadata(t *testing.T) {
 	exporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
 	otel.SetTracerProvider(tp)
@@ -64,10 +64,12 @@ func TestAsyncSharedClient_SubmitPropagatesTraceContext(t *testing.T) {
 	ctx, parentSpan := otel.Tracer("test").Start(context.Background(), "process-batch")
 	parentTraceID := parentSpan.SpanContext().TraceID().String()
 
+	callerMetadata := map[string]string{"userid": "tenant-a"}
 	if submitErr := client.Submit(ctx, &GenerateRequest{
 		RequestID: "otel-req-1",
 		Endpoint:  "/v1/completions",
 		Params:    map[string]any{"model": "test-model", "prompt": "hello"},
+		Metadata:  callerMetadata,
 	}); submitErr != nil {
 		t.Fatalf("Submit error: %s", submitErr.Message)
 	}
@@ -106,6 +108,16 @@ func TestAsyncSharedClient_SubmitPropagatesTraceContext(t *testing.T) {
 
 	if !strings.Contains(traceparent, parentTraceID) {
 		t.Errorf("traceparent %q does not contain parent trace ID %q", traceparent, parentTraceID)
+	}
+
+	// Caller metadata (the tenant) travels alongside the trace context.
+	if got := metadata["userid"]; got != "tenant-a" {
+		t.Errorf("metadata userid = %q, want %q", got, "tenant-a")
+	}
+	// The caller's map is shared by every request of a batch; Submit must
+	// not write the trace context into it.
+	if len(callerMetadata) != 1 {
+		t.Errorf("caller metadata mutated: %v", callerMetadata)
 	}
 }
 

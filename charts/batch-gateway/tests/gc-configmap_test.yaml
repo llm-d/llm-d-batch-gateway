@@ -67,9 +67,58 @@ tests:
           path: data["config.yaml"]
           pattern: 'base_path: "/tmp/batch-gateway"'
 
+  - it: should render gcs file_client config when type is gcs
+    set:
+      global.fileClient.type: "gcs"
+      global.fileClient.gcs.bucket: "my-batch-bucket"
+      global.fileClient.gcs.prefix: "bg"
+      global.fileClient.gcs.projectId: "my-project"
+      global.fileClient.gcs.autoCreateBucket: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'type: "gcs"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'bucket: "my-batch-bucket"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'prefix: "bg"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'project_id: "my-project"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'auto_create_bucket: true'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'verify_bucket_on_start: true'
+
   - it: should not render ConfigMap when gc is disabled
     set:
       gc.enabled: false
     asserts:
       - hasDocuments:
           count: 0
+
+  - it: should render the PostgreSQL pool cap with the default of 0
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'db_client:\n\s+type: "postgresql"\n\s+postgresql:\n\s+pool:\n\s+max_connections: 0\n'
+
+  - it: should render a custom PostgreSQL pool cap
+    set:
+      global.dbClient.postgresql.pool.maxConnections: 5
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'db_client:\n\s+type: "postgresql"\n\s+postgresql:\n\s+pool:\n\s+max_connections: 5\n'
+
+  - it: should render a PostgreSQL pool cap of 0 when the values predate the setting
+    set:
+      global.dbClient.postgresql: null
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'db_client:\n\s+type: "postgresql"\n\s+postgresql:\n\s+pool:\n\s+max_connections: 0\n'

@@ -111,6 +111,18 @@ tests:
           path: data["config.yaml"]
           pattern: 'max_line_count: 50000'
 
+  - it: should render gcs file_client config defaults
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'gcs:'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'auto_create_bucket: false'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'verify_bucket_on_start: true'
+
   - it: should render the global maximum input-file size
     set:
       global.maxInputFileSizeBytes: 524288000
@@ -165,3 +177,25 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  - it: should render the PostgreSQL pool cap with the default of 0
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'db_client:\n\s+type: "postgresql"\n\s+postgresql:\n\s+pool:\n\s+max_connections: 0\n'
+
+  - it: should render a custom PostgreSQL pool cap
+    set:
+      global.dbClient.postgresql.pool.maxConnections: 5
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'db_client:\n\s+type: "postgresql"\n\s+postgresql:\n\s+pool:\n\s+max_connections: 5\n'
+
+  - it: should render a PostgreSQL pool cap of 0 when the values predate the setting
+    set:
+      global.dbClient.postgresql: null
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'db_client:\n\s+type: "postgresql"\n\s+postgresql:\n\s+pool:\n\s+max_connections: 0\n'
