@@ -120,6 +120,9 @@ func TestNewConfig_Defaults(t *testing.T) {
 	if c.Resumable.LeaseDuration != 5*time.Minute {
 		t.Fatalf("Resumable.LeaseDuration = %v, want %v", c.Resumable.LeaseDuration, 5*time.Minute)
 	}
+	if c.Resumable.CheckpointConcurrency != 64 {
+		t.Fatalf("Resumable.CheckpointConcurrency = %d, want 64", c.Resumable.CheckpointConcurrency)
+	}
 	if c.Resumable.FinalizeConcurrency != 16 {
 		t.Fatalf("Resumable.FinalizeConcurrency = %d, want 16", c.Resumable.FinalizeConcurrency)
 	}
@@ -139,6 +142,7 @@ func TestProcessorConfig_Validate_Resumable(t *testing.T) {
 		{name: "negative lease duration", mutate: func(r *ResumableConfig) { r.LeaseDuration = -time.Second }, wantErr: true},
 		{name: "sub-second lease duration", mutate: func(r *ResumableConfig) { r.LeaseDuration = 500 * time.Millisecond }, wantErr: true},
 		{name: "non-whole-second lease duration", mutate: func(r *ResumableConfig) { r.LeaseDuration = 1500 * time.Millisecond }, wantErr: true},
+		{name: "zero checkpoint concurrency", mutate: func(r *ResumableConfig) { r.CheckpointConcurrency = 0 }, wantErr: true},
 		{name: "zero finalize concurrency", mutate: func(r *ResumableConfig) { r.FinalizeConcurrency = 0 }, wantErr: true},
 		{name: "zero finalize timeout", mutate: func(r *ResumableConfig) { r.FinalizeTimeout = 0 }, wantErr: true},
 		{name: "tuned values are valid", mutate: func(r *ResumableConfig) {

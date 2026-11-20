@@ -81,6 +81,7 @@ data:
 
     resumable:
       lease_duration: {{ .Values.processor.config.resumable.leaseDuration | quote }}
+      checkpoint_concurrency: {{ .Values.processor.config.resumable.checkpointConcurrency }}
       finalize_concurrency: {{ .Values.processor.config.resumable.finalizeConcurrency }}
       finalize_timeout: {{ .Values.processor.config.resumable.finalizeTimeout | quote }}
 

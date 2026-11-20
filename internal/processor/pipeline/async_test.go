@@ -109,7 +109,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	pending := NewPendingRequests(0)
 	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	dispatcher := NewAsyncDispatcher(resolver,
 		broadcasters,
@@ -417,7 +417,7 @@ func TestAsyncDispatcher_ParseError(t *testing.T) {
 	pending := NewPendingRequests(0)
 	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	dispatcher := NewPreDispatcher(NewAsyncDispatcher(resolver,
 		broadcasters,
@@ -490,7 +490,7 @@ func TestAsyncDispatcher_ModelNotFound(t *testing.T) {
 	pending := NewPendingRequests(0)
 	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	dispatcher := NewAsyncDispatcher(resolver,
 		broadcasters,
@@ -621,7 +621,7 @@ func TestAsyncCancellation(t *testing.T) {
 			pending := NewPendingRequests(0)
 			sink := &fakeSink{}
 			tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
-			checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+			checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 			dispatcher := NewAsyncDispatcher(resolver, broadcasters, pending, logr.Discard())
 			deliveryDone := make(chan struct{})
 			executor := NewJobExecutor(JobExecutorConfig{
@@ -784,7 +784,7 @@ func TestAsyncDispatcher_BeforeSubmit(t *testing.T) {
 		pending := NewPendingRequests(0)
 		sink := &fakeSink{}
 		tracker := NewProgressTracker(3, nil, "test-job", 0, logr.Discard())
-		checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+		checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 		dispatcher := NewPreDispatcher(NewAsyncDispatcher(resolver, broadcasters, pending, logr.Discard())).
 			WithBeforeSubmit(func(msg *RequestItem) (bool, error) {
@@ -838,7 +838,7 @@ func TestAsyncDispatcher_BeforeSubmit(t *testing.T) {
 		pending := NewPendingRequests(0)
 		sink := &fakeSink{}
 		tracker := NewProgressTracker(3, nil, "test-job", 0, logr.Discard())
-		checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+		checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 		dispatcher := NewPreDispatcher(NewAsyncDispatcher(resolver, broadcasters, pending, logr.Discard())).
 			WithBeforeSubmit(func(msg *RequestItem) (bool, error) {
@@ -898,7 +898,7 @@ func TestAsyncDispatcher_BeforeSubmit(t *testing.T) {
 		pending := NewPendingRequests(0)
 		sink := &fakeSink{}
 		tracker := NewProgressTracker(3, nil, "test-job", 0, logr.Discard())
-		checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+		checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 		dispatcher := NewPreDispatcher(NewAsyncDispatcher(resolver, broadcasters, pending, logr.Discard())).
 			WithBeforeSubmit(func(msg *RequestItem) (bool, error) {

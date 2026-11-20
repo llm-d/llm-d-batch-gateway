@@ -423,6 +423,9 @@ processor:
       # Ownership lease an activated batch holds in Postgres; the owner
       # renews it at half this interval.
       leaseDuration: "5m"
+      # Bounds the parallel result checkpoints (one object-store PUT plus
+      # entry commits each) within one batch.
+      checkpointConcurrency: 64
       # Bounds the parallel result-object fetches during finalization.
       finalizeConcurrency: 16
       # Budget for one resumable finalization attempt.

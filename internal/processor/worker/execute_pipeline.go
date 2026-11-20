@@ -214,7 +214,7 @@ func (p *Processor) executeJob(ctx context.Context, params *jobExecutionParams) 
 		Source:     source,
 		Dispatcher: dispatcher,
 		Tracker:    tracker,
-		Collector:  pipeline.NewResultCheckpointer(params.resultSink, pending, tracker, logger),
+		Collector:  pipeline.NewResultCheckpointer(params.resultSink, pending, tracker, p.cfg.Resumable.CheckpointConcurrency, logger),
 		Logger:     logger,
 	}
 

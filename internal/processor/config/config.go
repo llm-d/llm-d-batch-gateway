@@ -176,6 +176,10 @@ type ResumableConfig struct {
 	// Postgres; the owner renews it at half this interval.
 	LeaseDuration time.Duration `yaml:"lease_duration"`
 
+	// CheckpointConcurrency bounds the parallel result checkpoints (one
+	// object-store PUT plus entry commits each) within one batch.
+	CheckpointConcurrency int `yaml:"checkpoint_concurrency"`
+
 	// FinalizeConcurrency bounds the parallel result-object fetches during
 	// resumable finalization.
 	FinalizeConcurrency int `yaml:"finalize_concurrency"`
@@ -464,10 +468,11 @@ func NewConfig() *ProcessorConfig {
 			PollInterval:      time.Second,
 		},
 		Resumable: ResumableConfig{
-			LeaseDuration:       5 * time.Minute,
-			FinalizeConcurrency: 16,
-			FinalizeTimeout:     30 * time.Minute,
-			RecoveryWindow:      5 * time.Minute,
+			LeaseDuration:         5 * time.Minute,
+			CheckpointConcurrency: 64,
+			FinalizeConcurrency:   16,
+			FinalizeTimeout:       30 * time.Minute,
+			RecoveryWindow:        5 * time.Minute,
 		},
 	}
 }
@@ -530,6 +535,9 @@ func (c *ProcessorConfig) Validate() error {
 	// duration truncates to an already-expired lease.
 	if c.Resumable.LeaseDuration < time.Second || c.Resumable.LeaseDuration%time.Second != 0 {
 		return fmt.Errorf("resumable.lease_duration must be a whole number of seconds >= 1s, got %s", c.Resumable.LeaseDuration)
+	}
+	if c.Resumable.CheckpointConcurrency <= 0 {
+		return fmt.Errorf("resumable.checkpoint_concurrency must be > 0")
 	}
 	if c.Resumable.FinalizeConcurrency <= 0 {
 		return fmt.Errorf("resumable.finalize_concurrency must be > 0")
