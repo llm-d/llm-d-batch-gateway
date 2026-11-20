@@ -412,6 +412,9 @@ processor:
       # SQL transport only: max PostgreSQL connections per processor replica.
       # Budget processor replicas × maxConnections against max_connections.
       maxConnections: 8
+      # Hostnames allowed in signed body.gcs_uri HTTPS URLs.
+      gcsSignedURLHosts:
+        - "storage.googleapis.com"
       models: {}
 
     # Resumable pipeline tunables — every batch runs resumably, so there is
@@ -483,6 +486,7 @@ processor:
     #   models:
     #     "llama-3":
     #       inferencePoolName: "pool-a"
+    #       provider: "whisper"               # optional: metadata.provider for llm-d-async transforms
     #       inferenceObjective: "batch-sheddable-a"  # optional: Router InferenceObjective CRD name
     #       requestQueueName: "llm-d-async:requests:pool-a"  # optional: explicit request queue
     #       resultQueueName: "llm-d-async:results:pool-a"    # optional: explicit result queue base

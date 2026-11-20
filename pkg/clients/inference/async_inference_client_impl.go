@@ -22,8 +22,6 @@ import (
 	"github.com/llm-d/llm-d-async/producer"
 )
 
-const defaultDeadline = 5 * time.Minute
-
 // asyncPool holds the shared resources for one inference pool.
 type asyncPool struct {
 	producer    producer.Producer
