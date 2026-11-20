@@ -1,0 +1,30 @@
+{{- if and .Values.apiserver.enabled .Values.apiserver.networkPolicy.enabled -}}
+{{- if not .Values.apiserver.networkPolicy.api.from -}}
+{{- fail "apiserver.networkPolicy.api.from must not be empty when networkPolicy is enabled" -}}
+{{- end -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "batch-gateway.apiserver.fullname" . }}
+  labels:
+    {{- include "batch-gateway.apiserver.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "batch-gateway.apiserver.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- toYaml .Values.apiserver.networkPolicy.api.from | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiserver.config.port | int }}
+    {{- with .Values.apiserver.networkPolicy.observability.from }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ $.Values.apiserver.config.observabilityPort | int }}
+    {{- end }}
+{{- end }}

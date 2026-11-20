@@ -1,0 +1,18 @@
+# Exercises: the API server NetworkPolicy with a peer for each port.
+global:
+  fileClient:
+    fs:
+      pvcName: "batch-data"
+apiserver:
+  networkPolicy:
+    enabled: true
+    api:
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway-system
+    observability:
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring

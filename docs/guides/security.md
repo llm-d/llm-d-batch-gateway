@@ -24,6 +24,21 @@ See [Kuadrant Integration](kuadrant-integration.md) for full setup instructions.
 
 > **Security prerequisite**: The API server has no built-in authentication. Tenant identity is derived entirely from headers injected by the upstream auth proxy (e.g. Envoy, Kuadrant/Authorino). Direct access to the API server bypasses all tenant isolation. Deployments **must** ensure the API server is not reachable without passing through the auth proxy.
 
+To enforce that in the cluster, enable the chart's `NetworkPolicy` and list the gateway as the only peer of the API port:
+
+```yaml
+apiserver:
+  networkPolicy:
+    enabled: true
+    api:
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway-system
+```
+
+It needs a network plugin that enforces `NetworkPolicy`. See [Networking](networking.md#13-networkpolicy) for the observability port and the details.
+
 All data access is scoped to the authenticated tenant:
 
 - Every database query filters by tenant ID.

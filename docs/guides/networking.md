@@ -70,6 +70,37 @@ Base URL: `http://<host>:8081` — always plain HTTP.
 | `GET /ready` | Readiness check |
 | `GET /metrics` | Prometheus metrics |
 
+### 1.3 NetworkPolicy
+
+The API server trusts the tenant header that the auth proxy injects, so only the proxy should reach the API port. The chart can create a `NetworkPolicy` for the API server pods that allows ingress to each port only from the peers you list. It is off by default, because the chart cannot know where the gateway runs.
+
+```yaml
+apiserver:
+  networkPolicy:
+    enabled: true
+    api:
+      # Who may reach the API port (default 8000): the gateway or auth proxy.
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway-system
+    observability:
+      # Who may reach the observability port (default 8081): Prometheus.
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+```
+
+Each `from` is a list of [NetworkPolicyPeer](https://kubernetes.io/docs/reference/kubernetes-api/policy-resources/network-policy-v1/#NetworkPolicyPeer) entries, so `namespaceSelector`, `podSelector` and `ipBlock` all work.
+
+- `api.from` is required. The chart fails to render when the policy is enabled without it.
+- An empty `observability.from` allows no peer on the observability port. Liveness and readiness probes come from the kubelet on the pod's node, which network plugins allow regardless of the policy.
+- Traffic that enters through a `NodePort` or `LoadBalancer` Service is not from a pod, so namespace and pod selectors do not match it. Allow it with an `ipBlock` peer if you expose the API server that way.
+- The policy covers ingress only. Egress from the API server is not restricted.
+- The cluster's network plugin has to enforce `NetworkPolicy`. Without one that does, the object is created and has no effect.
+- Other pods in the release namespace are not allowed unless a peer selects them. That includes the processor, which does not call the API server.
+
 ## 2. Processor
 
 The Processor is a background worker and only serves observability endpoints. It does not support TLS.
