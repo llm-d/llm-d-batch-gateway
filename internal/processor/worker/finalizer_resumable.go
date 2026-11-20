@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"os"
 
 	"github.com/go-logr/logr"
 	"golang.org/x/sync/errgroup"
@@ -246,6 +247,12 @@ func (p *Processor) finalizeResumableStatus(
 	// batch. Best-effort — the GC's prefix purge backstops a process that
 	// dies between the terminal write and this call.
 	p.purgeResultObjects(ctx, dbJob.ID, dbJob.TenantID)
+
+	// Clean up losing artifacts from earlier epochs (issue #744): a crashed
+	// incarnation committed an artifact at its epoch-scoped key before its
+	// terminal write failed. The winning IDs are in the terminal doc; delete
+	// every prior epoch's keys and file records (best-effort, logged on error).
+	p.cleanupLosingArtifacts(ctx, dbJob.ID, dbJob.Epoch, dbJob.TenantID)
 	return nil
 }
 
@@ -263,13 +270,50 @@ func (p *Processor) purgeResultObjects(ctx context.Context, jobID, tenantID stri
 	}
 }
 
+// cleanupLosingArtifacts deletes artifacts from earlier finalization attempts
+// that lost the fenced terminal race. The winning file IDs are recorded in
+// the terminal status doc. Earlier epochs' keys are deterministic, so we
+// delete each by its derived storage name and its file-record row.
+//
+// Best-effort — there is no prefix-purge backstop: artifact keys live outside
+// results/<batchID>/, so job GC never sees them. File-expiry GC reclaims them
+// only when output expiration is set. A crash here orphans the prior epoch's
+// artifact and its file record until then (issue #744).
+func (p *Processor) cleanupLosingArtifacts(ctx context.Context, jobID string, winEpoch int64, tenantID string) {
+	logger := logr.FromContextOrDiscard(ctx)
+	folder, err := ucom.GetFolderNameByTenantID(tenantID)
+	if err != nil {
+		logger.Error(err, "Failed to resolve folder for losing-artifact cleanup")
+		return
+	}
+	for e := int64(1); e < winEpoch; e++ {
+		losingArtifacts := []struct {
+			fileID      string
+			storageName string
+		}{
+			{fileID: stableFileID(jobID, e, metrics.FileTypeOutput), storageName: jobOutputStorageName(jobID)},
+			{fileID: stableFileID(jobID, e, metrics.FileTypeError), storageName: jobErrorStorageName(jobID)},
+		}
+		for _, a := range losingArtifacts {
+			loserKey := ucom.FileStorageName(a.fileID, a.storageName)
+			if err := p.files.storage.Delete(ctx, loserKey, folder); err != nil && !errors.Is(err, os.ErrNotExist) {
+				logger.Error(err, "Losing artifact cleanup: object delete failed", "key", loserKey, "epoch", e)
+				continue
+			}
+			if _, err := p.files.db.DBDelete(ctx, []string{a.fileID}); err != nil {
+				logger.Error(err, "Losing artifact cleanup: record delete failed", "fileID", a.fileID, "epoch", e)
+			}
+		}
+	}
+}
+
 // assembleResumableArtifacts streams every entry's result object, in input
 // order, into the batch's output and error artifacts and returns the final
 // request counts and file IDs. Each page's objects are prefetched and
 // verified (size and SHA-256) with bounded concurrency — resumable.
 // finalize_concurrency parallel fetches — and then written in ordinal order.
-// Artifact file IDs are derived from the batch, so a re-finalization
-// targets the same keys.
+// Artifact file IDs are derived from the batch and epoch, so each
+// re-finalization under a new lease targets a unique key.
 //
 // notExecutedCode renders non-terminal entries as synthetic not-executed
 // error lines, for terminalizing a batch that must not resume execution; an
@@ -286,17 +330,22 @@ func (p *Processor) assembleResumableArtifacts(
 		return nil, "", "", fmt.Errorf("resolve artifact folder: %w", err)
 	}
 
+	// Epoch-scoped artifact keys: each finalization attempt under a distinct
+	// lease targets a unique key, so a crashed incarnation's committed
+	// artifact cannot block the next attempt's different (more complete)
+	// bytes (issue #744).
+	epoch := dbJob.Epoch
 	output := &artifactWriter{
 		storage: p.files.storage,
 		folder:  folder,
-		key:     ucom.FileStorageName(stableFileID(jobID, metrics.FileTypeOutput), jobOutputStorageName(jobID)),
-		fileID:  stableFileID(jobID, metrics.FileTypeOutput),
+		key:     ucom.FileStorageName(stableFileID(jobID, epoch, metrics.FileTypeOutput), jobOutputStorageName(jobID)),
+		fileID:  stableFileID(jobID, epoch, metrics.FileTypeOutput),
 	}
 	errorW := &artifactWriter{
 		storage: p.files.storage,
 		folder:  folder,
-		key:     ucom.FileStorageName(stableFileID(jobID, metrics.FileTypeError), jobErrorStorageName(jobID)),
-		fileID:  stableFileID(jobID, metrics.FileTypeError),
+		key:     ucom.FileStorageName(stableFileID(jobID, epoch, metrics.FileTypeError), jobErrorStorageName(jobID)),
+		fileID:  stableFileID(jobID, epoch, metrics.FileTypeError),
 	}
 	// Abort is a no-op for a writer that never opened.
 	defer func() {
@@ -391,11 +440,11 @@ func (p *Processor) assembleResumableArtifacts(
 // artifactWriter lazily opens and finally commits one finalization artifact.
 // An artifact with no entries is never created; its file ID stays empty.
 //
-// A re-finalization of a batch whose earlier incarnation committed the
-// artifact (crash between artifact commit and terminal write) re-derives the
-// same key, so OpenStream refuses with ErrFileExists: the writer then runs in
-// existing mode — no bytes are written, but what this incarnation would write
-// is hashed and counted, then verified against the stored object at commit.
+// A same-epoch re-finalization re-derives the same key, so OpenStream refuses
+// with ErrFileExists: the writer then runs in existing mode — no bytes are
+// written, but what this incarnation would write is hashed and counted, then
+// verified against the stored object at commit. A re-finalization after a
+// requeue targets a fresh epoch-scoped key, so no collision occurs.
 type artifactWriter struct {
 	storage  filesapi.BatchFilesClient
 	folder   string
@@ -556,9 +605,13 @@ func (w *artifactWriter) abort(ctx context.Context) error {
 	return err
 }
 
-// stableFileID derives an artifact file ID from the batch and file type, so
-// re-finalization writes the same artifact keys.
-func stableFileID(batchID string, fileType metrics.FileType) string {
-	u := uuid.NewSHA1(uuid.NameSpaceOID, []byte(batchID+"\x00"+string(fileType)))
+// stableFileID derives an artifact file ID from the batch, epoch, and file
+// type, so each finalization attempt under a distinct lease (epoch) targets a
+// unique artifact key. A crashed incarnation that committed an artifact but
+// failed the fenced terminal write leaves an orphan at its epoch-scoped key;
+// the next attempt (epoch+1) writes a fresh key, and cleanupLosingArtifacts
+// deletes the orphan after the winning terminal write succeeds (issue #744).
+func stableFileID(batchID string, epoch int64, fileType metrics.FileType) string {
+	u := uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("%s\x00%d\x00%s", batchID, epoch, fileType)))
 	return "file_" + u.String()
 }
