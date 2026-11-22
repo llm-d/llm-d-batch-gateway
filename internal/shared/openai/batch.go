@@ -369,8 +369,12 @@ func (r *CreateBatchRequest) ValidateWithEndpointAllowlist(allowlist EndpointAll
 		return errors.New("completion_window is required")
 	}
 
-	if _, err := time.ParseDuration(r.CompletionWindow); err != nil {
+	window, err := time.ParseDuration(r.CompletionWindow)
+	if err != nil {
 		return errors.New("completion_window must be a valid duration (e.g., 24h)")
+	}
+	if window <= 0 {
+		return errors.New("completion_window must be a positive duration (e.g., 24h)")
 	}
 
 	if r.Endpoint == "" {
