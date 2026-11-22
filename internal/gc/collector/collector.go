@@ -78,7 +78,6 @@ func (c *GarbageCollector) collectBatchJobs(ctx context.Context, result *Result)
 	logger := logr.FromContextOrDiscard(ctx)
 	query := &db.BatchQuery{BaseQuery: db.BaseQuery{Expired: true}}
 
-	cursor := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -86,7 +85,7 @@ func (c *GarbageCollector) collectBatchJobs(ctx context.Context, result *Result)
 		default:
 		}
 
-		batches, nextCursor, expectMore, err := c.batchDBClient.DBGet(ctx, query, false, cursor, pageSize)
+		batches, _, expectMore, err := c.batchDBClient.DBGet(ctx, query, false, 0, pageSize)
 		if err != nil {
 			return fmt.Errorf("failed to query expired batch jobs: %w", err)
 		}
@@ -111,10 +110,12 @@ func (c *GarbageCollector) collectBatchJobs(ctx context.Context, result *Result)
 		}
 		_ = grp.Wait()
 
-		if !expectMore {
+		if !expectMore || len(batches) == 0 {
 			break
 		}
-		cursor = nextCursor
+		// Page by ID, not by offset: the rows just deleted would shift an
+		// offset past the next page's first rows.
+		query.AfterID = batches[len(batches)-1].ID
 	}
 
 	return nil
@@ -129,7 +130,6 @@ func (c *GarbageCollector) collectFiles(ctx context.Context, result *Result) err
 		BaseQuery: db.BaseQuery{Expired: true},
 	}
 
-	cursor := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -137,7 +137,7 @@ func (c *GarbageCollector) collectFiles(ctx context.Context, result *Result) err
 		default:
 		}
 
-		files, nextCursor, expectMore, err := c.fileDBClient.DBGet(ctx, query, true, cursor, pageSize)
+		files, _, expectMore, err := c.fileDBClient.DBGet(ctx, query, true, 0, pageSize)
 		if err != nil {
 			return fmt.Errorf("failed to query expired files: %w", err)
 		}
@@ -162,10 +162,11 @@ func (c *GarbageCollector) collectFiles(ctx context.Context, result *Result) err
 		}
 		_ = grp.Wait()
 
-		if !expectMore {
+		if !expectMore || len(files) == 0 {
 			break
 		}
-		cursor = nextCursor
+		// Page by ID, not by offset (see collectBatchJobs).
+		query.AfterID = files[len(files)-1].ID
 	}
 
 	return nil

@@ -871,29 +871,89 @@ func TestCollector_Run_PaginationExactlyPageSize(t *testing.T) {
 }
 
 func TestCollector_Run_PaginationMultiplePages(t *testing.T) {
-	ctx := context.Background()
-	batchDB := newTestBatchDBClient()
-	fileDB := newTestFileDBClient()
-	filesRoot := t.TempDir()
-	filesClient := newTestFilesClient(filesRoot)
+	tests := []struct {
+		name  string
+		total int
+	}{
+		{name: "one page and a partial page", total: pageSize + 50},
+		{name: "several full pages and a partial page", total: 3*pageSize + 7},
+	}
 
-	total := pageSize + 50
+	for _, tt := range tests {
+		t.Run(tt.name+"/jobs", func(t *testing.T) {
+			ctx := context.Background()
+			batchDB := newTestBatchDBClient()
+			fileDB := newTestFileDBClient()
+			filesClient := newTestFilesClient(t.TempDir())
+
+			expiredTime := time.Now().Add(-1 * time.Hour).Unix()
+			for i := 0; i < tt.total; i++ {
+				_ = batchDB.DBStore(ctx, createTestJob(fmt.Sprintf("job-%04d", i), expiredTime))
+			}
+
+			gc := NewGarbageCollector(batchDB, fileDB, filesClient, false, defaultInterval, defaultMaxConcurrency, nil)
+			result := gc.run(ctx)
+
+			// Every expired job is deleted in a single cycle: deleting a page
+			// must not make the next page skip rows.
+			if result.BatchesDeleted != tt.total {
+				t.Errorf("Expected %d batches deleted, got %d", tt.total, result.BatchesDeleted)
+			}
+			if remaining := dbGetAllBatch(ctx, batchDB); len(remaining) != 0 {
+				t.Errorf("Expected no batches left after one cycle, got %d", len(remaining))
+			}
+		})
+
+		t.Run(tt.name+"/files", func(t *testing.T) {
+			ctx := context.Background()
+			batchDB := newTestBatchDBClient()
+			fileDB := newTestFileDBClient()
+			filesRoot := t.TempDir()
+			filesClient := newTestFilesClient(filesRoot)
+
+			expiredTime := time.Now().Add(-1 * time.Hour).Unix()
+			for i := 0; i < tt.total; i++ {
+				_ = fileDB.DBStore(ctx, createTestFileWithTenant(t, filesRoot, fmt.Sprintf("file-%04d", i), "tenant-a", expiredTime))
+			}
+
+			gc := NewGarbageCollector(batchDB, fileDB, filesClient, false, defaultInterval, defaultMaxConcurrency, nil)
+			result := gc.run(ctx)
+
+			if result.FilesDeleted != tt.total {
+				t.Errorf("Expected %d files deleted, got %d", tt.total, result.FilesDeleted)
+			}
+			if remaining := dbGetAllFiles(ctx, fileDB); len(remaining) != 0 {
+				t.Errorf("Expected no files left after one cycle, got %d", len(remaining))
+			}
+		})
+	}
+}
+
+// Rows that stay behind (here, every delete fails) must not stall or loop the
+// cycle: the cursor still moves past them, and each row is attempted once.
+func TestCollector_Run_PaginationVisitsUndeletedRowsOnce(t *testing.T) {
+	ctx := context.Background()
+	batchDB := &errorBatchDBClient{
+		BatchDBClient: newTestBatchDBClient(),
+		deleteErr:     fmt.Errorf("write conflict"),
+	}
+	fileDB := newTestFileDBClient()
+	filesClient := newTestFilesClient(t.TempDir())
+
+	total := 2*pageSize + 10
 	expiredTime := time.Now().Add(-1 * time.Hour).Unix()
 	for i := 0; i < total; i++ {
-		_ = batchDB.DBStore(ctx, createTestJob(fmt.Sprintf("job-%d", i), expiredTime))
+		_ = batchDB.DBStore(ctx, createTestJob(fmt.Sprintf("job-%04d", i), expiredTime))
 	}
 
 	gc := NewGarbageCollector(batchDB, fileDB, filesClient, false, defaultInterval, defaultMaxConcurrency, nil)
 	result := gc.run(ctx)
 
-	// Due to OFFSET-based pagination with concurrent deletes, some items may be
-	// skipped and caught on the next cycle. We verify at least one full page was
-	// processed and no more than the total.
-	if result.BatchesDeleted == 0 {
-		t.Error("Expected some batches deleted, got 0")
+	if result.BatchesFailed != total {
+		t.Errorf("Expected %d failed batch deletions, got %d", total, result.BatchesFailed)
 	}
-	if result.BatchesDeleted > total {
-		t.Errorf("Deleted more than total: %d > %d", result.BatchesDeleted, total)
+	if result.BatchesDeleted != 0 {
+		t.Errorf("Expected 0 batches deleted, got %d", result.BatchesDeleted)
 	}
 }
 
