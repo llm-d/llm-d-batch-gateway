@@ -234,10 +234,11 @@ apiserver:
       tenant: "X-MaaS-Username"
       # Header in which the auth proxy sends the apiserver-proxy-token value.
       proxy_token: "X-Gateway-Token"
-    # Serve requests that carry no tenant header as the "default" tenant instead
-    # of rejecting them with 401, and skip the proxy token check. For local
-    # development without an auth proxy. When false, global.secretName must hold
-    # an apiserver-proxy-token key, and requests without that token get 401.
+    # When `allowAnonymousTenant: false`, requests must include a non-empty
+    # tenant header and a valid proxy token, otherwise the API server returns 401.
+    # When `allowAnonymousTenant: true`, a missing tenant header maps to the
+    # "default" tenant and proxy token verification is disabled. Use true only
+    # in non-production without an auth proxy.
     allowAnonymousTenant: false
     readHeaderTimeoutSeconds: 10
     readTimeoutSeconds: 900

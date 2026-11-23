@@ -45,7 +45,7 @@ func NewProxyTokenMiddleware(config *common.ServerConfig) common.RouteMiddleware
 
 			if !config.AllowAnonymousTenant {
 				if len(want) == 0 || subtle.ConstantTimeCompare([]byte(got), want) != 1 {
-					oaiErr := openai.NewAPIError(http.StatusUnauthorized, "", "Missing or invalid proxy token", nil)
+					oaiErr := openai.NewAPIError(http.StatusUnauthorized, "", "Missing or mismatched proxy token", nil)
 					common.WriteAPIError(w, r, oaiErr)
 					return
 				}

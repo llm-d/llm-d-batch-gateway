@@ -154,7 +154,7 @@ type ServerConfig struct {
 	AllowAnonymousTenant bool `yaml:"allow_anonymous_tenant"`
 
 	// ProxyToken is the shared token the auth proxy must send in the proxy token
-	// header. Load reads it from the mounted app secret; it is never read from YAML.
+	// header. Load reads it from the mounted app secret.
 	ProxyToken string `yaml:"-"`
 
 	// OTelCfg holds OpenTelemetry-related settings.
@@ -204,7 +204,7 @@ func (c *ServerConfig) Validate() error {
 	}
 
 	if !c.AllowAnonymousTenant && c.ProxyToken == "" {
-		return fmt.Errorf("the %q key of the app secret is required unless allow_anonymous_tenant is true", ucom.SecretKeyProxyToken)
+		return fmt.Errorf("the %q key of the app secret is required unless allow_anonymous_tenant is true (Helm: apiserver.config.allowAnonymousTenant)", ucom.SecretKeyProxyToken)
 	}
 	if strings.EqualFold(c.GetTenantHeader(), c.GetProxyTokenHeader()) {
 		return fmt.Errorf("input_headers.tenant and input_headers.proxy_token must name different headers")
