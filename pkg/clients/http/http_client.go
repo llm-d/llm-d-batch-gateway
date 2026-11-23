@@ -334,10 +334,17 @@ func MapStatusCodeToCategory(statusCode int) ErrorCategory {
 
 // newRetryAfterFunc returns a resty RetryAfterFunc that differentiates retry
 // delays by HTTP status code:
-//   - 429 with Retry-After header: use the server-specified delay (0 retries as fast as InitialBackoff allows)
+//   - 429 or 503 with Retry-After header: use the server-specified delay (0 retries as fast as InitialBackoff allows)
 //   - 429 without Retry-After: use a longer backoff (rateLimitBackoffMultiplier × initialBackoff)
-//   - 502/503/504: transient failures, faster retry targeting ~maxBackoff/2 (jitter may exceed)
+//   - 502/503/504 without Retry-After: transient failures, faster retry targeting ~maxBackoff/2 (jitter may exceed)
 //   - other 5xx: standard exponential backoff
+//
+// RFC 9110 defines Retry-After on 503 the same way RFC 6585 does on 429: the
+// server tells the client how long it expects to be unavailable. Ignoring it
+// on a 503 would spend every retry inside that window and fail a request the
+// server asked us to resend later.
+//
+// Resty clamps the returned delay to [InitialBackoff, MaxBackoff].
 func newRetryAfterFunc(initialBackoff, maxBackoff time.Duration) func(*resty.Client, *resty.Response) (time.Duration, error) {
 	return func(_ *resty.Client, resp *resty.Response) (time.Duration, error) {
 		if resp == nil {
@@ -346,21 +353,20 @@ func newRetryAfterFunc(initialBackoff, maxBackoff time.Duration) func(*resty.Cli
 
 		switch resp.StatusCode() {
 		case http.StatusTooManyRequests: // 429
-			// Honor server's Retry-After header if present and parseable.
-			// Resty treats returned 0 as "use default algorithm", so we use
-			// 1ns for Retry-After: 0 — resty clamps it to InitialBackoff.
-			if ra := resp.Header().Get("Retry-After"); ra != "" {
-				if d, ok := parseRetryAfter(ra); ok {
-					if d == 0 {
-						d = 1 * time.Nanosecond
-					}
-					return d, nil
-				}
+			if d, ok := serverRetryAfter(resp); ok {
+				return d, nil
 			}
 			// No usable header — use longer backoff
 			return computeBackoff(resp.Request.Attempt, rateLimitBackoffMultiplier*initialBackoff, maxBackoff), nil
 
-		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout: // 502, 503, 504
+		case http.StatusServiceUnavailable: // 503
+			if d, ok := serverRetryAfter(resp); ok {
+				return d, nil
+			}
+			// No usable header: transient failure, retry faster
+			return computeBackoff(resp.Request.Attempt, initialBackoff, maxBackoff/2), nil
+
+		case http.StatusBadGateway, http.StatusGatewayTimeout: // 502, 504
 			// Transient failures — retry faster
 			return computeBackoff(resp.Request.Attempt, initialBackoff, maxBackoff/2), nil
 
@@ -368,6 +374,25 @@ func newRetryAfterFunc(initialBackoff, maxBackoff time.Duration) func(*resty.Cli
 			return computeBackoff(resp.Request.Attempt, initialBackoff, maxBackoff), nil
 		}
 	}
+}
+
+// serverRetryAfter returns the delay from the response's Retry-After header
+// and true when the header is present and parseable. Resty treats a returned
+// 0 as "use default algorithm", so Retry-After: 0 maps to 1ns, which resty
+// clamps to InitialBackoff.
+func serverRetryAfter(resp *resty.Response) (time.Duration, bool) {
+	ra := resp.Header().Get("Retry-After")
+	if ra == "" {
+		return 0, false
+	}
+	d, ok := parseRetryAfter(ra)
+	if !ok {
+		return 0, false
+	}
+	if d == 0 {
+		d = 1 * time.Nanosecond
+	}
+	return d, true
 }
 
 // computeBackoff uses cenkalti/backoff to calculate exponential backoff with

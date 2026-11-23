@@ -1011,7 +1011,9 @@ func TestTrigger(t *testing.T) {
 		}
 
 		cancel()
-		<-done
+		if err := <-done; err != nil && err != context.Canceled {
+			t.Errorf("unexpected error: %v", err)
+		}
 	})
 
 	t.Run("trigger is non-blocking", func(t *testing.T) {

@@ -123,6 +123,9 @@ func Load(path string) (*Config, error) {
 	default:
 		return nil, fmt.Errorf("db_client.type must be \"postgresql\", got %q", cfg.DBClientCfg.Type)
 	}
+	if err := cfg.DBClientCfg.PostgreSQLCfg.Pool.Validate(); err != nil {
+		return nil, fmt.Errorf("db_client.postgresql.pool: %w", err)
+	}
 
 	// Validate via the shared helper (single source of truth for fs/s3/gcs/mock),
 	// then reject mock: gc only supports the real object stores. Keep this local

@@ -41,6 +41,7 @@ func TestAPIServerConfig(t *testing.T) {
 				name: "valid yaml config",
 				yamlConfig: `
 host: 0.0.0.0
+allow_anonymous_tenant: true
 port: "8080"
 ssl_cert_file: testdata/cert.pem
 ssl_key_file: testdata/key.pem
@@ -63,6 +64,7 @@ file_client:
 				name: "valid yml extension",
 				yamlConfig: `
 host: 127.0.0.1
+allow_anonymous_tenant: true
 port: "9000"
 db_client:
   type: "mock"
@@ -81,6 +83,7 @@ file_client:
 				name: "yaml config without ssl",
 				yamlConfig: `
 host: localhost
+allow_anonymous_tenant: true
 port: "3000"
 db_client:
   type: "mock"
@@ -218,17 +221,56 @@ file_client:
 	})
 }
 
+func TestValidateProxyToken(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     ServerConfig
+		wantErr bool
+	}{
+		{
+			name:    "token missing",
+			cfg:     ServerConfig{Port: "8080"},
+			wantErr: true,
+		},
+		{
+			name: "token set",
+			cfg:  ServerConfig{Port: "8080", ProxyToken: "token"},
+		},
+		{
+			name: "anonymous tenant allowed without token",
+			cfg:  ServerConfig{Port: "8080", AllowAnonymousTenant: true},
+		},
+		{
+			name: "tenant and proxy token share a header",
+			cfg: ServerConfig{Port: "8080", ProxyToken: "token", InputHeaders: map[string]string{
+				InputHeaderKeyTenant:     "X-Identity",
+				InputHeaderKeyProxyToken: "x-identity",
+			}},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.cfg.FileClientCfg = sharedcfg.FileClientConfig{Type: "mock"}
+			err := tt.cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestBatchAPIExtraEndpoints(t *testing.T) {
 	sharedCfg := sharedcfg.FileClientConfig{Type: "mock"}
 	t.Run("valid", func(t *testing.T) {
-		cfg := ServerConfig{Port: "8080", FileClientCfg: sharedCfg, BatchAPI: BatchAPIConfig{ExtraEndpoints: []string{"/v1/classify", "/v1/pooling"}}}
+		cfg := ServerConfig{Port: "8080", ProxyToken: "token", FileClientCfg: sharedCfg, BatchAPI: BatchAPIConfig{ExtraEndpoints: []string{"/v1/classify", "/v1/pooling"}}}
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("Validate() unexpected error: %v", err)
 		}
 	})
 
 	t.Run("invalid", func(t *testing.T) {
-		cfg := ServerConfig{Port: "8080", FileClientCfg: sharedCfg, BatchAPI: BatchAPIConfig{ExtraEndpoints: []string{"/v1/classify?mode=test"}}}
+		cfg := ServerConfig{Port: "8080", ProxyToken: "token", FileClientCfg: sharedCfg, BatchAPI: BatchAPIConfig{ExtraEndpoints: []string{"/v1/classify?mode=test"}}}
 		err := cfg.Validate()
 		if err == nil {
 			t.Fatal("Validate() expected error")
@@ -271,7 +313,8 @@ func TestServerConfigValidate_FileClientType(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &ServerConfig{
-				Port: "8080",
+				Port:       "8080",
+				ProxyToken: "token",
 				FileClientCfg: sharedcfg.FileClientConfig{
 					Type: tc.ftype,
 				},
@@ -282,6 +325,46 @@ func TestServerConfigValidate_FileClientType(t *testing.T) {
 			}
 			if !tc.wantErr && err != nil {
 				t.Fatalf("expected no error for file_client.type %q, got %v", tc.ftype, err)
+			}
+		})
+	}
+}
+
+func TestServerConfig_PostgreSQLPoolMaxConnections(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		want    int
+		wantErr bool
+	}{
+		{name: "unset keeps the pgx default", yaml: "", want: 0},
+		{name: "explicit value", yaml: "  postgresql:\n    pool:\n      max_connections: 8\n", want: 8},
+		{name: "negative is rejected", yaml: "  postgresql:\n    pool:\n      max_connections: -1\n", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			content := "port: \"8080\"\nfile_client:\n  type: \"fs\"\ndb_client:\n  type: \"postgresql\"\n" + tc.yaml
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c := NewConfig()
+			if err := c.loadFromFile(path); err != nil {
+				t.Fatalf("loadFromFile() error: %v", err)
+			}
+			c.ProxyToken = "token"
+			err := c.Validate()
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "db_client.postgresql.pool") {
+					t.Fatalf("Validate() error = %v, want db_client.postgresql.pool error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate() unexpected error: %v", err)
+			}
+			if got := c.DBClientCfg.PostgreSQLCfg.Pool.MaxConnections; got != tc.want {
+				t.Fatalf("Pool.MaxConnections = %d, want %d", got, tc.want)
 			}
 		})
 	}

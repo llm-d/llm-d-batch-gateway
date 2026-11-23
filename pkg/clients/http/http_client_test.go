@@ -641,6 +641,121 @@ func TestRetryAfter_5xxUsesFasterBackoff(t *testing.T) {
 	})
 }
 
+// TestRetryAfter_503HonorsRetryAfterHeader verifies that a 503 carrying a
+// Retry-After header waits the server-specified delay instead of the fast
+// transient backoff, while 502/504 keep the fast backoff.
+func TestRetryAfter_503HonorsRetryAfterHeader(t *testing.T) {
+	const (
+		initialBackoff = 1 * time.Second
+		maxBackoff     = 60 * time.Second
+	)
+
+	retryAfter := newRetryAfterFunc(initialBackoff, maxBackoff)
+
+	makeResp := func(statusCode int, retryAfterHeader string) *resty.Response {
+		h := http.Header{}
+		if retryAfterHeader != "" {
+			h.Set("Retry-After", retryAfterHeader)
+		}
+		return &resty.Response{
+			Request:     &resty.Request{Attempt: 1},
+			RawResponse: &http.Response{StatusCode: statusCode, Header: h},
+		}
+	}
+
+	t.Run("503 with seconds", func(t *testing.T) {
+		d, err := retryAfter(nil, makeResp(http.StatusServiceUnavailable, "45"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if d != 45*time.Second {
+			t.Errorf("expected 45s, got %v", d)
+		}
+	})
+
+	t.Run("503 with HTTP-date", func(t *testing.T) {
+		at := time.Now().Add(40 * time.Second).UTC().Format(http.TimeFormat)
+		d, _ := retryAfter(nil, makeResp(http.StatusServiceUnavailable, at))
+		// HTTP-date has one-second resolution.
+		if d < 38*time.Second || d > 41*time.Second {
+			t.Errorf("expected about 40s, got %v", d)
+		}
+	})
+
+	t.Run("503 with zero maps to the minimum", func(t *testing.T) {
+		d, _ := retryAfter(nil, makeResp(http.StatusServiceUnavailable, "0"))
+		if d != time.Nanosecond {
+			t.Errorf("expected 1ns (clamped by resty to InitialBackoff), got %v", d)
+		}
+	})
+
+	// The transient ceiling with +50% jitter, as in TestRetryAfter_5xxUsesFasterBackoff.
+	transientCeiling := maxBackoff / 2 * 3 / 2
+
+	t.Run("503 with invalid header falls back to transient backoff", func(t *testing.T) {
+		d, _ := retryAfter(nil, makeResp(http.StatusServiceUnavailable, "soon"))
+		if d <= 0 || d > transientCeiling {
+			t.Errorf("expected transient backoff in (0, %v], got %v", transientCeiling, d)
+		}
+	})
+
+	for _, code := range []int{http.StatusBadGateway, http.StatusGatewayTimeout} {
+		t.Run(fmt.Sprintf("status_%d_ignores_header", code), func(t *testing.T) {
+			// A 1s initial backoff at attempt 1 is at most 1.5s with jitter,
+			// far below the 45s the header asks for.
+			d, _ := retryAfter(nil, makeResp(code, "45"))
+			if d <= 0 || d > initialBackoff*3/2 {
+				t.Errorf("expected first-attempt transient backoff, got %v", d)
+			}
+		})
+	}
+}
+
+// TestPost_RetryOn503WaitsForRetryAfter verifies end to end that the client
+// waits out a 503's Retry-After before resending.
+func TestPost_RetryOn503WaitsForRetryAfter(t *testing.T) {
+	var attemptCount atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attemptCount.Add(1) < 2 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error": {"message": "unavailable"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"result": "success"}`))
+	}))
+	defer server.Close()
+
+	// Without the header the first retry would wait at most 15ms.
+	client, err := NewHTTPClient(Config{
+		BaseURL:        server.URL,
+		MaxRetries:     3,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     5 * time.Second,
+	}, testLogger(t))
+	if err != nil {
+		t.Fatalf("NewHTTPClient failed: %v", err)
+	}
+
+	start := time.Now()
+	_, statusCode, err := client.Post(context.Background(), "/test", nil, nil, "test-503-retry-after")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Post failed: %v", err)
+	}
+	if statusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", statusCode)
+	}
+	if attemptCount.Load() != 2 {
+		t.Errorf("Expected 2 attempts, got %d", attemptCount.Load())
+	}
+	if elapsed < 900*time.Millisecond {
+		t.Errorf("Expected the retry to wait about 1s for Retry-After, got %v", elapsed)
+	}
+}
+
 // TestParseRetryAfter tests the Retry-After header parsing function.
 func TestParseRetryAfter(t *testing.T) {
 	tests := []struct {

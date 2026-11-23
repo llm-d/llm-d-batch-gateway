@@ -100,6 +100,9 @@ func TestNewConfig_Defaults(t *testing.T) {
 	if c.SendFairnessHeader {
 		t.Fatalf("SendFairnessHeader = true, want false by default")
 	}
+	if c.TenantMetadataKey != "" {
+		t.Fatalf("TenantMetadataKey = %q, want empty (off) by default", c.TenantMetadataKey)
+	}
 	if c.RouteKeyMethod != RouteKeyMethodBare {
 		t.Fatalf("RouteKeyMethod = %q, want empty (bare) by default", c.RouteKeyMethod)
 	}
@@ -204,6 +207,36 @@ func TestProcessorConfig_Validate_FileClientType(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("Validate() unexpected error for file_client.type %q: %v", tt.ftype, err)
+			}
+		})
+	}
+}
+
+func TestProcessorConfig_Validate_PostgreSQLPoolMaxConnections(t *testing.T) {
+	tests := []struct {
+		name           string
+		maxConnections int
+		wantErr        bool
+	}{
+		{name: "default keeps the pgx default", maxConnections: 0},
+		{name: "explicit value", maxConnections: 8},
+		{name: "negative is rejected", maxConnections: -1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewConfig()
+			c.ModelGateways = validPerModelConfig()
+			c.DBClientCfg.PostgreSQLCfg.Pool.MaxConnections = tt.maxConnections
+
+			err := c.Validate()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "db_client.postgresql.pool") {
+					t.Fatalf("Validate() error = %v, want db_client.postgresql.pool error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate() unexpected error: %v", err)
 			}
 		})
 	}
@@ -738,7 +771,12 @@ model_gateways:
     tls_insecure_skip_verify: true
 default_output_expiration_seconds: 86400
 send_fairness_header: true
+tenant_metadata_key: userid
 route_key_method: tenant
+db_client:
+  postgresql:
+    pool:
+      max_connections: 8
 `)
 
 	if err := os.WriteFile(path, yamlData, 0o600); err != nil {
@@ -748,6 +786,9 @@ route_key_method: tenant
 	c := NewConfig()
 	if err := c.LoadFromYAML(path); err != nil {
 		t.Fatalf("LoadFromYAML() error: %v", err)
+	}
+	if got := c.DBClientCfg.PostgreSQLCfg.Pool.MaxConnections; got != 8 {
+		t.Fatalf("DBClientCfg.PostgreSQLCfg.Pool.MaxConnections = %d, want 8", got)
 	}
 
 	if c.PollInterval != 2*time.Second {
@@ -812,6 +853,9 @@ route_key_method: tenant
 	}
 	if !c.SendFairnessHeader {
 		t.Fatalf("SendFairnessHeader = false, want true")
+	}
+	if c.TenantMetadataKey != "userid" {
+		t.Fatalf("TenantMetadataKey = %q, want %q", c.TenantMetadataKey, "userid")
 	}
 	if c.RouteKeyMethod != RouteKeyMethodTenant {
 		t.Fatalf("RouteKeyMethod = %q, want %q", c.RouteKeyMethod, RouteKeyMethodTenant)
@@ -904,6 +948,32 @@ func TestValidate_RouteKeyMethod(t *testing.T) {
 	c.RouteKeyMethod = RouteKeyMethod("geography")
 	if err := c.Validate(); err == nil {
 		t.Fatal("Validate() expected error for unknown route_key_method, got nil")
+	}
+}
+
+func TestValidate_TenantMetadataKey(t *testing.T) {
+	tests := []struct {
+		key     string
+		wantErr bool
+	}{
+		{key: "", wantErr: false},
+		{key: "userid", wantErr: false},
+		{key: "tenant_id", wantErr: false},
+		// Trace context injection would overwrite the tenant under these keys.
+		{key: "traceparent", wantErr: true},
+		{key: "tracestate", wantErr: true},
+		{key: "TraceParent", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			c := NewConfig()
+			c.DispatchMode = DispatchModeSync
+			c.ModelGateways = validPerModelConfig()
+			c.TenantMetadataKey = tt.key
+			if err := c.Validate(); (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() with tenant_metadata_key %q: err = %v, wantErr %v", tt.key, err, tt.wantErr)
+			}
+		})
 	}
 }
 

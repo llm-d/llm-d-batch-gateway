@@ -8,6 +8,20 @@ Batch-gateway delegates authentication to an external system (e.g. Envoy `ext_au
 
 The tenant header name is configurable (`X-MaaS-Username` by default). The middleware takes the **last** entry when multiple values are present, preventing callers from injecting a spoofed identity ahead of the gateway-injected one.
 
+Requests without the tenant header are rejected with `401`. For local development without an auth proxy, set `apiserver.config.allowAnonymousTenant: true` in the Helm values (`allow_anonymous_tenant` in the API server config) to serve them as the `default` tenant. The API server logs at startup when this is on.
+
+To tell a request that passed through the auth proxy from one that did not, the API server also requires a shared token from the proxy:
+
+- The token is the `apiserver-proxy-token` key of the app secret (`global.secretName`, mounted at `/etc/.secrets/`). The API server does not start without it.
+- The proxy sends it in the `X-Gateway-Token` header (configurable as `input_headers.proxy_token`). With Kuadrant, add it to the batch-route AuthPolicy's `response.success.headers`; see [Kuadrant Integration](kuadrant-integration.md#4-authentication--authorization).
+- The API server compares the last value in constant time and removes the header before the handlers, so it is never forwarded as a pass-through header.
+- A request with a missing or wrong token gets **401**. CORS preflight requests are answered before the check.
+- `allowAnonymousTenant` also turns this check off.
+- The API server reads the token once at startup. To rotate it, update the secret and the proxy, then restart the API server.
+- The proxy must also inject the tenant header from the authenticated identity on every request. A proxy that adds the token but lets a client-sent tenant header through lets that client act as any tenant.
+
+A token in a Kuadrant AuthPolicy `plain.value` is readable by anyone who can read AuthPolicy objects in that namespace; restrict that access like the app secret.
+
 Three authentication options are documented in detail:
 
 | Option | Mechanism | Cluster Requirement |
@@ -20,7 +34,7 @@ See [Kuadrant Integration](kuadrant-integration.md) for full setup instructions.
 
 ## 2. Multi-Tenancy Isolation
 
-> **Security prerequisite**: The API server has no built-in authentication. Tenant identity is derived entirely from headers injected by the upstream auth proxy (e.g. Envoy, Kuadrant/Authorino). Direct access to the API server bypasses all tenant isolation. Deployments **must** ensure the API server is not reachable without passing through the auth proxy.
+> **Security prerequisite**: The API server does not authenticate end users. Tenant identity is derived entirely from headers injected by the upstream auth proxy (e.g. Envoy, Kuadrant/Authorino), and the API server only trusts them on requests that carry the shared proxy token (see [Authentication](#1-authentication)). Direct access to the API server port without the token gets **401**. Anyone who holds the token and can reach the port can act as any tenant, so keep it as secret as the database credentials. With `allowAnonymousTenant` on, direct access bypasses all tenant isolation.
 
 All data access is scoped to the authenticated tenant:
 
@@ -103,6 +117,7 @@ Expected secret keys:
 | `postgresql-url` | PostgreSQL connection URL |
 | `inference-api-key` | Global llm-d Router API key |
 | `s3-secret-access-key` | S3 secret access key |
+| `apiserver-proxy-token` | Shared token the auth proxy sends to the API server (required unless `allowAnonymousTenant` is on) |
 
 Per-model API keys can also be loaded from arbitrary file paths via `api_key_file` in the gateway configuration.
 
