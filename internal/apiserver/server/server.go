@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -82,8 +83,8 @@ func New(ctx context.Context, config *common.ServerConfig) (*Server, error) {
 
 	// API mux: business endpoints with per-route middleware.
 	// Request flow:
-	//   Matched:   Client → ServeMux → Recovery → RequestMiddleware (+ OTel) → SecurityHeaders → Handler
-	//   Unmatched: Client → ServeMux → Recovery → RequestMiddleware → SecurityHeaders → NotFoundHandler
+	//   Matched:   Client → ServeMux → Recovery → RequestMiddleware (+ OTel) → SecurityHeaders → RequireTenant → Handler
+	//   Unmatched: Client → ServeMux → Recovery → RequestMiddleware → SecurityHeaders → RequireTenant → NotFoundHandler
 	apiMux := http.NewServeMux()
 	fileHandler := file.NewFileAPIHandler(config, clients)
 	batchHandler, err := batch.NewBatchAPIHandler(config, clients)
@@ -93,7 +94,11 @@ func New(ctx context.Context, config *common.ServerConfig) (*Server, error) {
 	apiMiddlewares := []common.RouteMiddleware{
 		middleware.Recovery,                     // outermost: catches panics from all inner layers
 		middleware.NewRequestMiddleware(config), // request ID, tenant, logging, metrics, OTel tracing
-		middleware.SecurityHeaders,              // innermost: security response headers
+		middleware.SecurityHeaders,              // security response headers, CORS preflight
+		middleware.RequireTenant,                // innermost: rejects requests without a tenant
+	}
+	if config.AllowAnonymousTenant {
+		logger.Info("anonymous tenant allowed: requests without the tenant header are served as the default tenant")
 	}
 	for _, h := range []common.ApiHandler{fileHandler, batchHandler} {
 		common.RegisterHandler(apiMux, h, apiMiddlewares...)
@@ -183,6 +188,11 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		for _, opt := range tlsOpts {
 			opt(httpserver.TLSConfig)
+		}
+		if httpserver.TLSConfig != nil && !slices.Contains(httpserver.TLSConfig.NextProtos, "h2") {
+			protocols := new(http.Protocols)
+			protocols.SetHTTP1(true)
+			httpserver.Protocols = protocols
 		}
 	} else if s.config.SSLCertFile != "" || s.config.SSLKeyFile != "" {
 		err := fmt.Errorf("both tls-cert-file and tls-private-key-file must be provided to enable TLS")

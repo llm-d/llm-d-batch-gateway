@@ -51,7 +51,7 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.11.4
+          version: v2.15.0
 
       - name: Run pre-commit hooks
         uses: pre-commit/action@v3.0.1

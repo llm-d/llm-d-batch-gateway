@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/ptr"
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/retry"
 	inference "github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
+	"go.opentelemetry.io/otel/propagation"
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -122,16 +123,16 @@ type AsyncModelConfig struct {
 	// When empty, the header is not sent.
 	InferenceObjective string `yaml:"inference_objective"`
 
-	// RequestQueueName overrides the Redis sorted-set queue name used to
-	// submit inference requests. When empty, the name is derived from
-	// InferencePoolName as "llm-d-async:requests:<pool>".
+	// RequestQueueName overrides the async request queue name used to submit
+	// inference requests. When empty, the name is derived from InferencePoolName
+	// as "llm-d-async:requests:<pool>".
 	// Deprecated fallback: the derived naming convention will be removed in
 	// a future release. Set explicit queue names for new deployments.
 	RequestQueueName string `yaml:"request_queue_name"`
 
-	// ResultQueueName overrides the Redis list base name used to read inference
-	// results. The Processor appends its replica identity. When empty, the base
-	// name is derived from InferencePoolName as "llm-d-async:results:<pool>".
+	// ResultQueueName overrides the async result queue base name. The Processor
+	// appends its replica identity. When empty, the base name is derived from
+	// InferencePoolName as "llm-d-async:results:<pool>".
 	// Deprecated fallback: the derived naming convention will be removed in
 	// a future release. Set an explicit queue base name for new deployments.
 	ResultQueueName string `yaml:"result_queue_name"`
@@ -140,14 +141,27 @@ type AsyncModelConfig struct {
 // AsyncDispatchConfig holds configuration for the llm-d-async dispatch backend.
 // Only used when DispatchMode == "async".
 type AsyncDispatchConfig struct {
-	// RedisURL is the full Redis connection URL (e.g. "redis://host:6379",
-	// "rediss://user:pass@host:6379" for TLS). Read from the mounted secret
-	// at runtime (SecretKeyRedisURL)
+	// Transport selects the llm-d-async queue backend. The supported values are
+	// "redis-sortedset" and "sql".
+	Transport string `yaml:"transport"`
+
+	// RedisURL is the full Redis connection URL. Read from the mounted secret
+	// at runtime when the transport is "redis-sortedset".
 	RedisURL string `yaml:"-"`
 
-	// ResultPollTimeout is the timeout per GetResult poll cycle.
-	// Controls how long each blocking poll waits before retrying.
+	// SQLURL is the PostgreSQL connection URL. It is populated from the shared
+	// database client configuration when the transport is "sql".
+	SQLURL string `yaml:"-"`
+
+	// ResultPollTimeout is the timeout per result poll cycle.
 	ResultPollTimeout time.Duration `yaml:"result_poll_timeout"`
+
+	// PollInterval controls how frequently the SQL transport checks for results.
+	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// MaxConnections caps the SQL store connection pool for this processor.
+	// Only used when Transport is "sql".
+	MaxConnections int `yaml:"max_connections"`
 
 	// Models maps model names to their async dispatch targets.
 	// Required when DispatchMode == "async".
@@ -267,6 +281,16 @@ type ProcessorConfig struct {
 	// x-gateway-inference-fairness-id on inference requests.
 	// false (default) omits the fairness header.
 	SendFairnessHeader bool `yaml:"send_fairness_header"`
+
+	// TenantMetadataKey, when set, stores the job's tenant ID under this key
+	// in the metadata of each async inference request, so llm-d-async
+	// dispatch gates that key on request metadata can tell tenants apart
+	// (redis-quota; sql-quota is on llm-d-async main, not yet released). Set
+	// it to "userid" to match llm-d-async's default quota attribute; with that key,
+	// llm-d-async's default merge policy also stamps the tenant ID into its
+	// fairness header. Trace context keys (traceparent, tracestate) are
+	// rejected. Empty (default) omits it. Sync dispatch ignores it.
+	TenantMetadataKey string `yaml:"tenant_metadata_key"`
 
 	// EnablePprof enables pprof profiling endpoints on the observability server.
 	EnablePprof bool `yaml:"enable_pprof"`
@@ -434,7 +458,10 @@ func NewConfig() *ProcessorConfig {
 
 		DispatchMode: DispatchModeSync,
 		AsyncDispatchConfig: AsyncDispatchConfig{
+			Transport:         inference.AsyncTransportRedisSortedSet,
+			MaxConnections:    inference.DefaultSQLMaxConns,
 			ResultPollTimeout: 5 * time.Second,
+			PollInterval:      time.Second,
 		},
 		Resumable: ResumableConfig{
 			LeaseDuration:       5 * time.Minute,
@@ -486,6 +513,12 @@ func (c *ProcessorConfig) Validate() error {
 		return fmt.Errorf("e2e_latency_bucket must satisfy: start > 0, factor > 1, count > 0")
 	}
 
+	if err := c.DBClientCfg.PostgreSQLCfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("db_client.postgresql.pool: %w", err)
+	}
+	if err := c.FileClientCfg.ValidateType(); err != nil {
+		return err
+	}
 	if err := c.FileClientCfg.Retry.Validate(); err != nil {
 		return fmt.Errorf("file_client.retry: %w", err)
 	}
@@ -512,6 +545,14 @@ func (c *ProcessorConfig) Validate() error {
 	case RouteKeyMethodBare, RouteKeyMethodTenant:
 	default:
 		return fmt.Errorf("route_key_method must be empty or %q, got %q", RouteKeyMethodTenant, c.RouteKeyMethod)
+	}
+
+	// The async client injects W3C trace context into the same metadata map
+	// after the tenant, so a key the propagator writes would replace the tenant.
+	for _, field := range (propagation.TraceContext{}).Fields() {
+		if strings.EqualFold(c.TenantMetadataKey, field) {
+			return fmt.Errorf("tenant_metadata_key %q is reserved for trace context propagation", c.TenantMetadataKey)
+		}
 	}
 
 	if err := c.validateGateways(); err != nil {
@@ -596,8 +637,18 @@ func (c *ProcessorConfig) validateSyncDispatchConfig() error {
 }
 
 func (c *ProcessorConfig) validateAsyncDispatchConfig() error {
+	transport, err := inference.NormalizeAsyncTransport(c.AsyncDispatchConfig.Transport)
+	if err != nil {
+		return fmt.Errorf("async_dispatch.transport: %w", err)
+	}
+	if transport == inference.AsyncTransportSQL && c.AsyncDispatchConfig.MaxConnections <= 0 {
+		return fmt.Errorf("async_dispatch.max_connections must be > 0")
+	}
 	if c.AsyncDispatchConfig.ResultPollTimeout <= 0 {
 		return fmt.Errorf("async_dispatch.result_poll_timeout must be > 0")
+	}
+	if c.AsyncDispatchConfig.PollInterval <= 0 {
+		return fmt.Errorf("async_dispatch.poll_interval must be > 0")
 	}
 	if c.GlobalInferenceGateway != nil {
 		return fmt.Errorf("global_inference_gateway is not supported with dispatch_mode %q; use async_dispatch.models instead or explicitly set dispatch_mode: sync", DispatchModeAsync)
@@ -762,8 +813,11 @@ func ResolveModelGateways(cfg *ProcessorConfig) (*ResolvedGateways, error) {
 			}
 		}
 		result.Async = &inference.AsyncClientConfig{
+			Transport:         cfg.AsyncDispatchConfig.Transport,
+			MaxConnections:    cfg.AsyncDispatchConfig.MaxConnections,
 			Models:            models,
 			ResultPollTimeout: cfg.AsyncDispatchConfig.ResultPollTimeout,
+			PollInterval:      cfg.AsyncDispatchConfig.PollInterval,
 		}
 		return result, nil
 	}

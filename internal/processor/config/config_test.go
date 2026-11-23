@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/ptr"
+	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
 )
 
 // validPerModelConfig returns a minimal valid per-model gateway config for tests.
@@ -98,6 +99,9 @@ func TestNewConfig_Defaults(t *testing.T) {
 	}
 	if c.SendFairnessHeader {
 		t.Fatalf("SendFairnessHeader = true, want false by default")
+	}
+	if c.TenantMetadataKey != "" {
+		t.Fatalf("TenantMetadataKey = %q, want empty (off) by default", c.TenantMetadataKey)
 	}
 	if c.RouteKeyMethod != RouteKeyMethodBare {
 		t.Fatalf("RouteKeyMethod = %q, want empty (bare) by default", c.RouteKeyMethod)
@@ -176,6 +180,65 @@ func TestProcessorConfig_Validate_ExtraEndpoints(t *testing.T) {
 	c.ExtraEndpoints = []string{"/v1/classify?mode=test"}
 	if err := c.Validate(); err == nil {
 		t.Fatal("Validate() expected error for invalid extra endpoint")
+	}
+}
+
+func TestProcessorConfig_Validate_FileClientType(t *testing.T) {
+	tests := []struct {
+		ftype   string
+		wantErr bool
+	}{
+		{ftype: "fs"},
+		{ftype: "s3"},
+		{ftype: "gcs"},
+		{ftype: "mock"},
+		{ftype: "", wantErr: true},
+		{ftype: "xyz", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run("type="+tt.ftype, func(t *testing.T) {
+			c := NewConfig()
+			c.ModelGateways = validPerModelConfig()
+			c.FileClientCfg.Type = tt.ftype
+
+			err := c.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("Validate() error = nil, want error for file_client.type %q", tt.ftype)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() unexpected error for file_client.type %q: %v", tt.ftype, err)
+			}
+		})
+	}
+}
+
+func TestProcessorConfig_Validate_PostgreSQLPoolMaxConnections(t *testing.T) {
+	tests := []struct {
+		name           string
+		maxConnections int
+		wantErr        bool
+	}{
+		{name: "default keeps the pgx default", maxConnections: 0},
+		{name: "explicit value", maxConnections: 8},
+		{name: "negative is rejected", maxConnections: -1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewConfig()
+			c.ModelGateways = validPerModelConfig()
+			c.DBClientCfg.PostgreSQLCfg.Pool.MaxConnections = tt.maxConnections
+
+			err := c.Validate()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "db_client.postgresql.pool") {
+					t.Fatalf("Validate() error = %v, want db_client.postgresql.pool error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate() unexpected error: %v", err)
+			}
+		})
 	}
 }
 
@@ -708,7 +771,12 @@ model_gateways:
     tls_insecure_skip_verify: true
 default_output_expiration_seconds: 86400
 send_fairness_header: true
+tenant_metadata_key: userid
 route_key_method: tenant
+db_client:
+  postgresql:
+    pool:
+      max_connections: 8
 `)
 
 	if err := os.WriteFile(path, yamlData, 0o600); err != nil {
@@ -718,6 +786,9 @@ route_key_method: tenant
 	c := NewConfig()
 	if err := c.LoadFromYAML(path); err != nil {
 		t.Fatalf("LoadFromYAML() error: %v", err)
+	}
+	if got := c.DBClientCfg.PostgreSQLCfg.Pool.MaxConnections; got != 8 {
+		t.Fatalf("DBClientCfg.PostgreSQLCfg.Pool.MaxConnections = %d, want 8", got)
 	}
 
 	if c.PollInterval != 2*time.Second {
@@ -783,8 +854,74 @@ route_key_method: tenant
 	if !c.SendFairnessHeader {
 		t.Fatalf("SendFairnessHeader = false, want true")
 	}
+	if c.TenantMetadataKey != "userid" {
+		t.Fatalf("TenantMetadataKey = %q, want %q", c.TenantMetadataKey, "userid")
+	}
 	if c.RouteKeyMethod != RouteKeyMethodTenant {
 		t.Fatalf("RouteKeyMethod = %q, want %q", c.RouteKeyMethod, RouteKeyMethodTenant)
+	}
+}
+
+func TestProcessorConfig_AsyncTransportAndPollIntervalFlowFromYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	const yamlData = `
+dispatch_mode: async
+async_dispatch:
+  transport: sql
+  poll_interval: 275ms
+  max_connections: 7
+  result_poll_timeout: 11s
+  models:
+    model-a:
+      inference_pool_name: pool-a
+      request_queue_name: "custom:requests"
+      result_queue_name: "custom:results"
+`
+	if err := os.WriteFile(path, []byte(yamlData), 0o600); err != nil {
+		t.Fatalf("write YAML: %v", err)
+	}
+
+	cfg := NewConfig()
+	if err := cfg.LoadFromYAML(path); err != nil {
+		t.Fatalf("LoadFromYAML: %v", err)
+	}
+	if cfg.AsyncDispatchConfig.Transport != inference.AsyncTransportSQL {
+		t.Fatalf("parsed transport = %q, want %q", cfg.AsyncDispatchConfig.Transport, inference.AsyncTransportSQL)
+	}
+	if cfg.AsyncDispatchConfig.PollInterval != 275*time.Millisecond {
+		t.Fatalf("parsed poll interval = %v, want 275ms", cfg.AsyncDispatchConfig.PollInterval)
+	}
+	if cfg.AsyncDispatchConfig.MaxConnections != 7 {
+		t.Fatalf("parsed max connections = %d, want 7", cfg.AsyncDispatchConfig.MaxConnections)
+	}
+
+	resolved, err := ResolveModelGateways(cfg)
+	if err != nil {
+		t.Fatalf("ResolveModelGateways: %v", err)
+	}
+	if resolved.Async == nil {
+		t.Fatal("expected resolved async configuration")
+	}
+	if resolved.Async.Transport != inference.AsyncTransportSQL {
+		t.Fatalf("resolved transport = %q, want %q", resolved.Async.Transport, inference.AsyncTransportSQL)
+	}
+	if resolved.Async.PollInterval != 275*time.Millisecond {
+		t.Fatalf("resolved poll interval = %v, want 275ms", resolved.Async.PollInterval)
+	}
+	if resolved.Async.MaxConnections != 7 {
+		t.Fatalf("resolved max connections = %d, want 7", resolved.Async.MaxConnections)
+	}
+	if resolved.Async.ResultPollTimeout != 11*time.Second {
+		t.Fatalf("resolved result poll timeout = %v, want 11s", resolved.Async.ResultPollTimeout)
+	}
+	if resolved.Async.Models["model-a"].PoolName != "pool-a" {
+		t.Fatalf("resolved model pool = %q, want pool-a", resolved.Async.Models["model-a"].PoolName)
+	}
+	if resolved.Async.Models["model-a"].RequestQueueName != "custom:requests" {
+		t.Fatalf("resolved request queue = %q, want custom:requests", resolved.Async.Models["model-a"].RequestQueueName)
+	}
+	if resolved.Async.Models["model-a"].ResultQueueName != "custom:results" {
+		t.Fatalf("resolved result queue = %q, want custom:results", resolved.Async.Models["model-a"].ResultQueueName)
 	}
 }
 
@@ -814,12 +951,40 @@ func TestValidate_RouteKeyMethod(t *testing.T) {
 	}
 }
 
+func TestValidate_TenantMetadataKey(t *testing.T) {
+	tests := []struct {
+		key     string
+		wantErr bool
+	}{
+		{key: "", wantErr: false},
+		{key: "userid", wantErr: false},
+		{key: "tenant_id", wantErr: false},
+		// Trace context injection would overwrite the tenant under these keys.
+		{key: "traceparent", wantErr: true},
+		{key: "tracestate", wantErr: true},
+		{key: "TraceParent", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			c := NewConfig()
+			c.DispatchMode = DispatchModeSync
+			c.ModelGateways = validPerModelConfig()
+			c.TenantMetadataKey = tt.key
+			if err := c.Validate(); (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() with tenant_metadata_key %q: err = %v, wantErr %v", tt.key, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestProcessorConfig_Validate_AsyncDispatch(t *testing.T) {
 	validAsyncConfig := func() *ProcessorConfig {
 		c := NewConfig()
 		c.DispatchMode = DispatchModeAsync
 		c.AsyncDispatchConfig = AsyncDispatchConfig{
+			MaxConnections:    inference.DefaultSQLMaxConns,
 			ResultPollTimeout: 5 * time.Second,
+			PollInterval:      time.Second,
 			Models: map[string]AsyncModelConfig{
 				"llama-3": {InferencePoolName: "pool-a"},
 			},
@@ -836,6 +1001,35 @@ func TestProcessorConfig_Validate_AsyncDispatch(t *testing.T) {
 			name:    "valid async config",
 			mutate:  func(_ *ProcessorConfig) {},
 			wantErr: false,
+		},
+		{
+			name: "SQL transport is valid",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.Transport = inference.AsyncTransportSQL
+			},
+			wantErr: false,
+		},
+		{
+			name: "SQL transport requires max connections",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.Transport = inference.AsyncTransportSQL
+				c.AsyncDispatchConfig.MaxConnections = 0
+			},
+			wantErr: true,
+		},
+		{
+			name: "redis transport ignores max connections",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.MaxConnections = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "unknown async transport rejected",
+			mutate: func(c *ProcessorConfig) {
+				c.AsyncDispatchConfig.Transport = "unknown"
+			},
+			wantErr: true,
 		},
 		{
 			name: "sync mode ignores async fields",
@@ -862,6 +1056,11 @@ func TestProcessorConfig_Validate_AsyncDispatch(t *testing.T) {
 		{
 			name:    "async zero result_poll_timeout",
 			mutate:  func(c *ProcessorConfig) { c.AsyncDispatchConfig.ResultPollTimeout = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "async zero poll_interval",
+			mutate:  func(c *ProcessorConfig) { c.AsyncDispatchConfig.PollInterval = 0 },
 			wantErr: true,
 		},
 		{

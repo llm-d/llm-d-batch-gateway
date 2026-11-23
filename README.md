@@ -1,7 +1,7 @@
 # Batch Gateway
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/llm-d/llm-d-batch-gateway)](https://goreportcard.com/report/github.com/llm-d/llm-d-batch-gateway)
-[![Go Version](https://img.shields.io/badge/Go-1.26-blue.svg)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go-1.27.3-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://llm-d.slack.com/archives/C0AA8772H7T)
 [![apiserver](https://img.shields.io/github/v/release/llm-d/llm-d-batch-gateway?label=apiserver)](https://github.com/llm-d/llm-d-batch-gateway/pkgs/container/batch-gateway-apiserver)
@@ -71,21 +71,23 @@ The system is designed to facilitate efficient processing of batch workloads in 
    - Manages batch input and output files, batch jobs' and files' metadata, priority queue, events and status mechanisms.
    - Supports pluggable backends.
    - Backends available out of the box:
-     - Job and file metadata storage: `PostgreSQL`.
-     - Priority queue, event channels, and status updates: `Redis` or `Valkey`.
+     - Job and file metadata, priority queue, events, and status: `PostgreSQL`.
+      - Async request/result queue (when `dispatchMode=async`): `Redis`/`Valkey` sorted sets (default) or experimental PostgreSQL SQL transport.
      - File storage: `S3`, `filesystem`.
 
 4. **Batch Dispatcher** *(optional)* — implemented in [llm-d/llm-d-async](https://github.com/llm-d/llm-d-async)
    - An optional component that provides metrics-driven flow control for batch request dispatching.
    - Monitors downstream inference system metrics (e.g. queue depth, latency, utilization) and dynamically adjusts dispatch flow to minimize interference with interactive requests while meeting batch job SLOs.
    - Not required for batch processing — the batch processor includes built-in AIMD-based adaptive concurrency control.
+   - The Batch Processor supports Redis sorted-set (default) or experimental PostgreSQL SQL transport for async request/result queues. SQL reuses the PostgreSQL URL configured for `db_client`; it does not require Redis for those queues.
 
 ### Processing Flow
 
 ```text
-User → API Server → PostgreSQL (metadata) + Redis/Valkey (queue) + S3 (input file)
+User → API Server → PostgreSQL (metadata) + queue backend (async only) + S3 (input file)
                          ↓
-                  Priority Queue
+                   Priority Queue
+                   (PostgreSQL)
                          ↓
                   Batch Processor (pulls jobs)
                          ↓
@@ -163,9 +165,9 @@ batch-gateway/
 
 ### Prerequisites
 
-- Go 1.26 or later.
-- PostgreSQL 12+ (for metadata storage).
-- Redis 6+ or Valkey 8+ (for job queue).
+- Go 1.27.3 or later.
+- PostgreSQL 12+ (for metadata, priority queue, events, and optionally the async SQL transport).
+- Redis 6+ or Valkey 8+ (only for async dispatch with `redis-sortedset`).
 - S3-compatible object storage or local filesystem.
 - Docker or Podman (for containerized deployment).
 - Kubernetes 1.19+ and Helm 3.0+ (for Kubernetes deployment).
@@ -273,6 +275,8 @@ Images are published to:
 - `ghcr.io/llm-d/batch-gateway-gc`
 
 ## API Usage
+
+The API server identifies the caller's tenant from the tenant header (`X-MaaS-Username` by default), which the auth proxy injects. It returns `401` for requests without that header. Set `allow_anonymous_tenant: true` only for non-production use without an auth proxy; it maps a missing tenant header to the `default` tenant.
 
 ### Submit a Batch Job
 

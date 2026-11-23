@@ -20,12 +20,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/producer"
+	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -318,6 +321,113 @@ func TestAsyncSharedClient_ReceiveResult_durable(t *testing.T) {
 	})
 }
 
+// TestAsyncResolverSQLPostgres_RoundTrip exercises the SQL transport with a
+// real PostgreSQL store. The dispatcher side is represented by sqlqueue.Store:
+// it claims the submitted request and atomically records the inference result
+// on the processor's result route.
+func TestAsyncResolverSQLPostgres_RoundTrip(t *testing.T) {
+	sqlURL := os.Getenv("TEST_POSTGRES_URL")
+	if sqlURL == "" {
+		t.Skip("TEST_POSTGRES_URL not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	poolName := "sql-roundtrip-pool-" + suffix
+	requestQueue := "sql-roundtrip-request-" + suffix
+	resultQueue := "sql-roundtrip-result-" + suffix
+	consumerID := "sql-roundtrip-processor-" + suffix
+	dispatcherID := "sql-roundtrip-dispatcher-" + suffix
+	requestID := "sql-roundtrip-request-" + suffix
+
+	migrateAsyncSQLSchema(t, sqlURL)
+
+	resolver, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
+		Transport:         AsyncTransportSQL,
+		SQLURL:            sqlURL,
+		ConsumerID:        consumerID,
+		ResultPollTimeout: time.Second,
+		PollInterval:      10 * time.Millisecond,
+		Models: map[string]AsyncModelPoolConfig{
+			"model-a": {
+				PoolName:         poolName,
+				RequestQueueName: requestQueue,
+				ResultQueueName:  resultQueue,
+			},
+		},
+	}, testLogger(t))
+	if err != nil {
+		t.Fatalf("NewAsyncResolver SQL: %v", err)
+	}
+	t.Cleanup(func() { _ = resolver.Close() })
+
+	store, err := sqlqueue.Open(ctx, sqlURL)
+	if err != nil {
+		t.Fatalf("sqlqueue.Open dispatcher store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	client := resolver.SharedClientFor("model-a")
+	if client == nil {
+		t.Fatal("expected SQL async client")
+	}
+	if submitErr := client.Submit(ctx, &GenerateRequest{
+		RequestID: requestID,
+		Endpoint:  "/v1/completions",
+		Params:    map[string]any{"model": "model-a", "prompt": "hello"},
+	}); submitErr != nil {
+		t.Fatalf("Submit() error: %s", submitErr.Message)
+	}
+
+	now := time.Now()
+	if err := store.EnsurePartitions(ctx, requestQueue); err != nil {
+		t.Fatalf("EnsurePartitions: %v", err)
+	}
+	if _, err := store.AcquirePartitions(ctx, requestQueue, dispatcherID, now, time.Minute, sqlqueue.Partitions); err != nil {
+		t.Fatalf("AcquirePartitions: %v", err)
+	}
+
+	dispatched, err := store.Dispatch(ctx, requestQueue, dispatcherID, now, 1)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(dispatched) != 1 || dispatched[0].ID != requestID {
+		t.Fatalf("dispatched requests = %+v, want %q", dispatched, requestID)
+	}
+
+	resultPayload, err := json.Marshal(api.ResultMessage{
+		ID:         requestID,
+		StatusCode: 200,
+		Payload:    `{"choices":[{"text":"hello"}]}`,
+	})
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	acked, err := store.Ack(ctx, dispatcherID, []sqlqueue.Completion{{
+		Key:       dispatched[0].Key(),
+		Attempt:   dispatched[0].Attempt,
+		Route:     resultQueue + ":" + consumerID,
+		Payload:   string(resultPayload),
+		ExpiresAt: time.Now().Add(time.Minute).Unix(),
+	}})
+	if err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if len(acked) != 1 || !acked[0] {
+		t.Fatalf("Ack result = %v, want [true]", acked)
+	}
+
+	result, getErr := client.GetResult(ctx)
+	if getErr != nil {
+		t.Fatalf("GetResult: %v", getErr)
+	}
+	if result.RequestID != requestID || result.StatusCode != 200 || result.Response == nil {
+		t.Fatalf("result = %+v, want successful %q result", result, requestID)
+	}
+}
+
 // TestAsyncResolver_RecoveryClientFor_crossProcessor is the transport-layer
 // regression for cross-processor takeover (#742): processor A receives a
 // result under a claim lease and dies before checkpointing it; the lease
@@ -331,7 +441,7 @@ func TestAsyncResolver_RecoveryClientFor_crossProcessor(t *testing.T) {
 
 	newResolver := func(consumer string) *AsyncGatewayResolver {
 		t.Helper()
-		resolver, err := NewAsyncResolver(AsyncClientConfig{
+		resolver, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
 			RedisURL:          "redis://" + mr.Addr(),
 			ConsumerID:        consumer,
 			ResultPollTimeout: 2 * time.Second,
@@ -340,7 +450,7 @@ func TestAsyncResolver_RecoveryClientFor_crossProcessor(t *testing.T) {
 			},
 		}, testLogger(t))
 		if err != nil {
-			t.Fatalf("NewAsyncResolver(%s): %v", consumer, err)
+			t.Fatalf("NewAsyncResolver(context.Background(), %s): %v", consumer, err)
 		}
 		t.Cleanup(func() { _ = resolver.Close() })
 		return resolver

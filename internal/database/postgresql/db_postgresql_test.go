@@ -16,7 +16,19 @@ limitations under the License.
 
 package postgresql
 
-import "testing"
+import (
+	"context"
+	"fmt"
+	"math"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
 
 func TestShortSpanName(t *testing.T) {
 	tests := []struct {
@@ -66,4 +78,128 @@ func TestTokenAfter(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPoolConfigValidate(t *testing.T) {
+	aboveInt32 := math.MaxInt32
+	aboveInt32++
+	tests := []struct {
+		name           string
+		maxConnections int
+		wantErr        bool
+	}{
+		{name: "zero keeps the pgx default", maxConnections: 0},
+		{name: "explicit value", maxConnections: 8},
+		{name: "negative is rejected", maxConnections: -1, wantErr: true},
+		{name: "above int32 is rejected", maxConnections: aboveInt32, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := PoolConfig{MaxConnections: tt.maxConnections}.Validate()
+			if tt.wantErr != (err != nil) {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestNewPool runs against a real PostgreSQL instance (TEST_POSTGRES_URL).
+func TestNewPool(t *testing.T) {
+	url := os.Getenv("TEST_POSTGRES_URL")
+	if url == "" {
+		t.Skip("TEST_POSTGRES_URL not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	// Which connection cap a pool gets for each pool.max_connections value.
+	pgxDefault, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatalf("pgxpool.ParseConfig: %v", err)
+	}
+	tests := []struct {
+		name           string
+		maxConnections int
+		want           int32
+	}{
+		{name: "max_connections 0 leaves the size parsed from the URL", maxConnections: 0, want: pgxDefault.MaxConns},
+		{name: "max_connections 3 caps the pool at 3", maxConnections: 3, want: 3},
+		{name: "max_connections 1 is raised to the LISTEN minimum", maxConnections: 1, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool, err := newPool(ctx, &PostgreSQLConfig{Url: url, Pool: PoolConfig{MaxConnections: tt.maxConnections}})
+			if err != nil {
+				t.Fatalf("newPool: %v", err)
+			}
+			defer pool.Close()
+			if got := pool.Config().MaxConns; got != tt.want {
+				t.Fatalf("MaxConns = %d, want %d", got, tt.want)
+			}
+		})
+	}
+
+	// The cap seen from the server: 12 concurrent queries through a pool
+	// capped at 3 never hold more than 3 connections in pg_stat_activity.
+	t.Run("max_connections caps server connections", func(t *testing.T) {
+		// Tag the pool's connections so pg_stat_activity can tell them apart
+		// from the observer and from other test runs on the same database.
+		applicationName := fmt.Sprintf("pool_max_connections_test_%d", time.Now().UnixNano())
+		separator := "?"
+		if strings.Contains(url, "?") {
+			separator = "&"
+		}
+		pool, err := newPool(ctx, &PostgreSQLConfig{
+			Url:  url + separator + "application_name=" + applicationName,
+			Pool: PoolConfig{MaxConnections: 3},
+		})
+		if err != nil {
+			t.Fatalf("newPool: %v", err)
+		}
+		defer pool.Close()
+
+		observer, err := pgx.Connect(ctx, url)
+		if err != nil {
+			t.Fatalf("pgx.Connect: %v", err)
+		}
+		defer func() { _ = observer.Close(ctx) }()
+
+		var wg sync.WaitGroup
+		for i := 0; i < 12; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := pool.Exec(ctx, "SELECT pg_sleep(0.3)"); err != nil {
+					t.Errorf("query through capped pool: %v", err)
+				}
+			}()
+		}
+		queriesDone := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(queriesDone)
+		}()
+
+		peak := 0
+		for running := true; running; {
+			select {
+			case <-queriesDone:
+				running = false
+			case <-time.After(20 * time.Millisecond):
+			}
+			var connections int
+			if err := observer.QueryRow(ctx,
+				"SELECT count(*) FROM pg_stat_activity WHERE application_name = $1", applicationName,
+			).Scan(&connections); err != nil {
+				<-queriesDone
+				t.Fatalf("count pool connections: %v", err)
+			}
+			if connections > peak {
+				peak = connections
+			}
+		}
+		if peak != 3 {
+			t.Fatalf("peak server connections = %d, want 3", peak)
+		}
+	})
 }

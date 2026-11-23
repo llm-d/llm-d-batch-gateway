@@ -8,6 +8,8 @@ Batch-gateway delegates authentication to an external system (e.g. Envoy `ext_au
 
 The tenant header name is configurable (`X-MaaS-Username` by default). The middleware takes the **last** entry when multiple values are present, preventing callers from injecting a spoofed identity ahead of the gateway-injected one.
 
+Requests without the tenant header are rejected with `401`. For local development without an auth proxy, set `apiserver.config.allowAnonymousTenant: true` in the Helm values (`allow_anonymous_tenant` in the API server config) to serve them as the `default` tenant. The API server logs at startup when this is on.
+
 Three authentication options are documented in detail:
 
 | Option | Mechanism | Cluster Requirement |

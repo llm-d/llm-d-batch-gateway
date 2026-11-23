@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -28,10 +29,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const (
-	durableAsyncImage  = "ghcr.io/llm-d/llm-d-async:v1.0.0@sha256:62a3e78320b0423c3c2ed327e6b870f786c3daf48f81a34f9e0332c80905663c"
-	durableAsyncDigest = "sha256:62a3e78320b0423c3c2ed327e6b870f786c3daf48f81a34f9e0332c80905663c"
-)
+// durableAsyncImage is the digest-pinned Async artifact the hard-kill test
+// proves. The default is the release image scripts/dev-deploy-dispatcher.sh
+// deploys; set TEST_DISPATCHER_IMAGE when the dispatcher runs another build,
+// such as a DISPATCHER_IMAGE override or a downstream distribution.
+var durableAsyncImage = getEnvOrDefault("TEST_DISPATCHER_IMAGE",
+	"ghcr.io/llm-d/llm-d-async:v1.0.0@sha256:62a3e78320b0423c3c2ed327e6b870f786c3daf48f81a34f9e0332c80905663c")
 
 type asyncPod struct {
 	Name    string
@@ -53,6 +56,9 @@ type asyncClaimSnapshot struct {
 // new fenced ownership tokens for the same request generations, and validates
 // Batch Gateway's terminal counts and externally visible JSONL records.
 func testBatchAPIHardKillRecovery(t *testing.T, rdb *redis.Client) {
+	// Reject bad overrides before touching the cluster: a failure after the
+	// force-delete would leave the claims for cleanup to drain.
+	imageDigest, reclaimTimeout := hardKillConfig(t)
 	ctx := context.Background()
 	const requestCount = 2
 	var batchID string
@@ -164,7 +170,7 @@ func testBatchAPIHardKillRecovery(t *testing.T, rdb *redis.Client) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertDurableAsyncImage(t, originalPod)
+	assertDurableAsyncImage(t, originalPod, imageDigest)
 
 	t.Logf("hard-deleting Async pod %s only after %d durable claims were observed", originalPod.Name, len(initialClaims.Owners))
 	out, err := exec.Command("kubectl", "delete", "pod", originalPod.Name,
@@ -178,8 +184,8 @@ func testBatchAPIHardKillRecovery(t *testing.T, rdb *redis.Client) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertDurableAsyncImage(t, replacementPod)
-	reclaimed := waitForClaims(t, rdb, requestCount, initialClaims.Owners, 30*time.Second)
+	assertDurableAsyncImage(t, replacementPod, imageDigest)
+	reclaimed := waitForClaims(t, rdb, requestCount, initialClaims.Owners, reclaimTimeout)
 	if !sameStringMap(initialClaims.ResultQueues, reclaimed.ResultQueues) {
 		t.Fatalf("result queue routing changed across redelivery: before=%v after=%v",
 			initialClaims.ResultQueues, reclaimed.ResultQueues)
@@ -239,10 +245,12 @@ func readyAsyncPod(t *testing.T) (asyncPod, error) {
 
 func listAsyncPods(t *testing.T) ([]asyncPod, error) {
 	t.Helper()
-	release := getEnvOrDefault("TEST_DISPATCHER_RELEASE", "dispatcher")
+	selector := getEnvOrDefault("TEST_DISPATCHER_POD_SELECTOR", fmt.Sprintf(
+		"app.kubernetes.io/instance=%s,app.kubernetes.io/name=llm-d-async",
+		getEnvOrDefault("TEST_DISPATCHER_RELEASE", "dispatcher")))
 	out, err := exec.Command("kubectl", "get", "pods",
 		"--namespace", testNamespace,
-		"--selector", fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/name=llm-d-async", release),
+		"--selector", selector,
 		"-o", "json").CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("list Async pods: %w\n%s", err, out)
@@ -332,13 +340,31 @@ func waitForReplacementAsyncPod(t *testing.T, excludedUID string, timeout time.D
 	return asyncPod{}, fmt.Errorf("Async replacement was not ready within %v: %w", timeout, lastErr)
 }
 
-func assertDurableAsyncImage(t *testing.T, pod asyncPod) {
+var sha256Digest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// hardKillConfig validates TEST_DISPATCHER_IMAGE and TEST_DISPATCHER_RECLAIM_TIMEOUT
+// and returns the image's digest and the reclaim wait.
+func hardKillConfig(t *testing.T) (string, time.Duration) {
+	t.Helper()
+	_, digest, _ := strings.Cut(durableAsyncImage, "@")
+	if !sha256Digest.MatchString(digest) {
+		t.Fatalf("TEST_DISPATCHER_IMAGE %q must be pinned by a SHA-256 digest (image@sha256:<64 hex>)", durableAsyncImage)
+	}
+	raw := getEnvOrDefault("TEST_DISPATCHER_RECLAIM_TIMEOUT", "30s")
+	reclaimTimeout, err := time.ParseDuration(raw)
+	if err != nil || reclaimTimeout <= 0 {
+		t.Fatalf("TEST_DISPATCHER_RECLAIM_TIMEOUT %q must be a positive duration (e.g. 30s, 6m)", raw)
+	}
+	return digest, reclaimTimeout
+}
+
+func assertDurableAsyncImage(t *testing.T, pod asyncPod, digest string) {
 	t.Helper()
 	if pod.Image != durableAsyncImage {
 		t.Fatalf("Async pod %s image = %q, want exact artifact %q", pod.Name, pod.Image, durableAsyncImage)
 	}
-	if !strings.HasSuffix(pod.ImageID, "@"+durableAsyncDigest) {
-		t.Fatalf("Async pod %s runtime imageID = %q, want digest %q", pod.Name, pod.ImageID, durableAsyncDigest)
+	if !strings.HasSuffix(pod.ImageID, "@"+digest) {
+		t.Fatalf("Async pod %s runtime imageID = %q, want digest %q", pod.Name, pod.ImageID, digest)
 	}
 	t.Logf("verified Async pod %s image=%s imageID=%s", pod.Name, pod.Image, pod.ImageID)
 }

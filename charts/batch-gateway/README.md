@@ -123,6 +123,129 @@ The endpoint remains batch-scoped: every request URL in the input JSONL must exa
 | `processor.config.resumable.finalizeConcurrency` | `16` | Bounds the parallel result-object fetches during resumable finalization. |
 | `processor.config.resumable.finalizeTimeout` | `"30m"` | Budget for one resumable finalization attempt. |
 
+### PostgreSQL connection pools
+
+Each pod opens several independent PostgreSQL connection pools from the same
+URL:
+
+| Component | Pools | Count |
+| --------- | ----- | ----- |
+| API server | batch, file, queue, events | 4 |
+| Processor | batch, file, queue, resumable, events | 5 |
+| GC | batch, file, queue, resumable | 4 |
+
+By default each pool can grow to the pgx default of `max(4, number of CPUs)`
+connections, or to `pool_max_conns` if the PostgreSQL URL sets it. The number
+of CPUs is Go's `runtime.NumCPU()`: the CPUs visible to the process, normally
+those of the node, not the pod's CPU limit. Set
+`global.dbClient.postgresql.pool.maxConnections` to cap every pool:
+
+```yaml
+global:
+  dbClient:
+    postgresql:
+      pool:
+        maxConnections: 4
+```
+
+`0` (the default) leaves the pool size as parsed from the URL. A positive value
+overrides the URL. Every pool is kept at 2 or more connections, the minimum a
+pool needs for `LISTEN`, so a limit of `1` from either source is raised to `2`.
+The limit applies to each pool separately, so budget the total against
+PostgreSQL `max_connections`:
+
+```text
+pool limit = max(2, maxConnections)    when maxConnections > 0
+           = max(2, pool_max_conns)    when maxConnections is 0 and the URL sets pool_max_conns
+           = max(4, number of CPUs)    otherwise
+
+  apiserver replicas × 4 × pool limit
++ processor replicas × 5 × pool limit
++ gc pods            × 4 × pool limit
++ processor replicas × asyncDispatch.maxConnections   (SQL async transport only)
++ other clients (llm-d-async dispatcher, migrations, monitoring)
+< PostgreSQL max_connections
+```
+
+### Async inference queue transport
+
+Set `processor.config.dispatchMode` to `async` and choose the queue transport
+with `processor.config.asyncDispatch.transport`:
+
+```yaml
+processor:
+  config:
+    dispatchMode: async
+    asyncDispatch:
+      transport: sql
+      resultPollTimeout: "30s"
+      pollInterval: "1s"
+      maxConnections: 8
+      models:
+        "llama-3":
+          inferencePoolName: pool-a
+          requestQueueName: request-sql
+          resultQueueName: result-sql
+```
+
+`redis-sortedset` is the default and reads `redis-url` from the configured
+Secret. `sql` uses the PostgreSQL URL already configured for `db_client` and
+does not require Redis for the Batch Processor's async request/result queues.
+Each processor replica opens its own SQL store pool; `maxConnections` caps that
+pool (default 8). Budget `processor replicas × maxConnections` against
+PostgreSQL `max_connections`, in addition to the gateway's other PostgreSQL
+pools and the llm-d-async dispatcher's own SQL pool.
+The separately deployed llm-d-async dispatcher must use the same transport,
+queue names, and PostgreSQL Secret:
+
+```yaml
+ap:
+  transport: sql
+  transportConfig:
+    urlSecret:
+      name: batch-gateway-secrets
+      key: postgresql-url
+    result_queue_name: result-sql
+    queues:
+      - queue_name: request-sql
+        igw_base_url: http://inference-gateway:80
+```
+
+Dispatch gates (`gate_type` and `gate_params`) belong to the llm-d-async
+dispatcher queue configuration, not to `processor.config.asyncDispatch` in
+this chart. For example, add `gate_type: prometheus-budget` and its
+`gate_params` under the matching `queues` entry. The Batch Processor's
+`requestQueueName` must equal the dispatcher's `queue_name`.
+
+Most gates are transport-independent. Redis-specific gates still require
+Redis; for SQL transport, use `sql-quota` instead of `redis-quota` when a
+database-backed quota is needed. See the [llm-d-async dispatch gate reference](https://github.com/llm-d/llm-d-async/blob/main/docs/dispatch-gates.md)
+for the supported gate types and parameters.
+
+Quota gates (`redis-quota`, and `sql-quota`, which is on llm-d-async `main`
+but not yet in a release) identify the tenant from request metadata
+(`attribute`, default `userid`), and a request without it is not limited. Set
+`processor.config.tenantMetadataKey` to the same key (for example `userid`) so
+the processor adds the job's tenant ID to each async request. Every Batch API
+job has a tenant: callers without the tenant header (`X-MaaS-Username` by
+default) get the tenant `default`, so they share one quota bucket
+(`quota:userid:default`) rather than going unlimited.
+
+With `userid`, llm-d-async's default `random-robin` merge policy also sends the
+tenant ID to the inference gateway in its fairness header
+(`x-llm-d-inference-fairness-id`), where it may be recorded in access logs.
+Prefer an opaque tenant ID over personally identifying values such as email
+addresses, or set the merge policy's `fairness_header` to `""` to disable it.
+
+The SQL transport is experimental and requires Batch Gateway and llm-d-async
+images built with compatible upstream SQL producer support. SQL result reads
+are destructive in the current upstream producer and do not provide Redis-style
+result acknowledgement. On Processor restart, unresolved entries are
+re-submitted immediately; a result consumed before its Batch Gateway
+checkpoint may therefore cause inference to run again. SQL does not preserve
+completed results across the crash window and should not be treated as
+Redis-equivalent recovery.
+
 ## Usage
 
 ### Method 1: Using a Custom Values File

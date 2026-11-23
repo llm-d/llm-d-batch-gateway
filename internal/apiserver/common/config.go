@@ -142,6 +142,10 @@ type ServerConfig struct {
 	// EnablePprof enables pprof profiling endpoints on the observability server.
 	EnablePprof bool `yaml:"enable_pprof"`
 
+	// AllowAnonymousTenant serves requests that carry no tenant header as
+	// DefaultTenantID. When false, such requests are rejected with 401.
+	AllowAnonymousTenant bool `yaml:"allow_anonymous_tenant"`
+
 	// OTelCfg holds OpenTelemetry-related settings.
 	OTelCfg sharedcfg.OTelConfig `yaml:"otel"`
 }
@@ -195,6 +199,12 @@ func (c *ServerConfig) Validate() error {
 		}
 	}
 
+	if err := c.DBClientCfg.PostgreSQLCfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("db_client.postgresql.pool: %w", err)
+	}
+	if err := c.FileClientCfg.ValidateType(); err != nil {
+		return err
+	}
 	if err := c.FileClientCfg.Retry.Validate(); err != nil {
 		return fmt.Errorf("file_client.retry: %w", err)
 	}

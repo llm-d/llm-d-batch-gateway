@@ -134,9 +134,51 @@ func createTestFile(t *testing.T, handler *FileAPIHandler, ctx context.Context, 
 
 func doTestCreateFile(t *testing.T) {
 	t.Run("Success", doTestCreateFileSuccess)
+	t.Run("MissingFile", doTestCreateFileMissingFile)
 	t.Run("PurposeValidation", doTestCreateFilePurposeValidation)
 	t.Run("ExpiresAfterValidation", doTestCreateFileExpiresAfter)
 	t.Run("StoreValidationErrors", doTestCreateFileStoreValidationErrors)
+}
+
+func doTestCreateFileMissingFile(t *testing.T) {
+	for _, field := range []string{"", "file", "other_file"} {
+		t.Run("field="+field, func(t *testing.T) {
+			body := &bytes.Buffer{}
+			writer := multipart.NewWriter(body)
+			if err := writer.WriteField("purpose", "batch"); err != nil {
+				t.Fatal(err)
+			}
+			if field == "file" {
+				if err := writer.WriteField(field, "not a file part"); err != nil {
+					t.Fatal(err)
+				}
+			} else if field != "" {
+				if _, err := writer.CreateFormFile(field, "input.jsonl"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			w := httptest.NewRecorder()
+			mux := http.NewServeMux()
+			common.RegisterHandler(mux, setupTestHandler(t))
+			mux.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for missing file part, got %d: %s", w.Code, w.Body.String())
+			}
+			var response openai.ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Error.Type != "invalid_request_error" || !strings.Contains(response.Error.Message, "file") {
+				t.Errorf("expected a file validation error, got %+v", response.Error)
+			}
+		})
+	}
 }
 
 // errStoreFileClient implements fsapi.BatchFilesClient and returns a fixed error from Store.

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	sharedcfg "github.com/llm-d/llm-d-batch-gateway/internal/shared/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -218,15 +219,16 @@ file_client:
 }
 
 func TestBatchAPIExtraEndpoints(t *testing.T) {
+	sharedCfg := sharedcfg.FileClientConfig{Type: "mock"}
 	t.Run("valid", func(t *testing.T) {
-		cfg := ServerConfig{Port: "8080", BatchAPI: BatchAPIConfig{ExtraEndpoints: []string{"/v1/classify", "/v1/pooling"}}}
+		cfg := ServerConfig{Port: "8080", FileClientCfg: sharedCfg, BatchAPI: BatchAPIConfig{ExtraEndpoints: []string{"/v1/classify", "/v1/pooling"}}}
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("Validate() unexpected error: %v", err)
 		}
 	})
 
 	t.Run("invalid", func(t *testing.T) {
-		cfg := ServerConfig{Port: "8080", BatchAPI: BatchAPIConfig{ExtraEndpoints: []string{"/v1/classify?mode=test"}}}
+		cfg := ServerConfig{Port: "8080", FileClientCfg: sharedCfg, BatchAPI: BatchAPIConfig{ExtraEndpoints: []string{"/v1/classify?mode=test"}}}
 		err := cfg.Validate()
 		if err == nil {
 			t.Fatal("Validate() expected error")
@@ -247,6 +249,81 @@ func TestBatchAPIExtraEndpoints(t *testing.T) {
 			t.Errorf("ExtraEndpoints = %v, want %v", cfg.BatchAPI.ExtraEndpoints, want)
 		}
 	})
+}
+
+// TestServerConfigValidate_FileClientType verifies the apiserver now validates
+// file_client.type at config-load (previously only file_client.retry was validated
+// and a bad type surfaced later at clientset construction). Closes a gap the S3
+// backend also had.
+func TestServerConfigValidate_FileClientType(t *testing.T) {
+	tests := []struct {
+		name    string
+		ftype   string
+		wantErr bool
+	}{
+		{"fs is valid", "fs", false},
+		{"s3 is valid", "s3", false},
+		{"gcs is valid", "gcs", false},
+		{"mock is valid", "mock", false},
+		{"empty is rejected", "", true},
+		{"unknown is rejected", "xyz", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &ServerConfig{
+				Port: "8080",
+				FileClientCfg: sharedcfg.FileClientConfig{
+					Type: tc.ftype,
+				},
+			}
+			err := c.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for file_client.type %q, got nil", tc.ftype)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error for file_client.type %q, got %v", tc.ftype, err)
+			}
+		})
+	}
+}
+
+func TestServerConfig_PostgreSQLPoolMaxConnections(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		want    int
+		wantErr bool
+	}{
+		{name: "unset keeps the pgx default", yaml: "", want: 0},
+		{name: "explicit value", yaml: "  postgresql:\n    pool:\n      max_connections: 8\n", want: 8},
+		{name: "negative is rejected", yaml: "  postgresql:\n    pool:\n      max_connections: -1\n", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			content := "port: \"8080\"\nfile_client:\n  type: \"fs\"\ndb_client:\n  type: \"postgresql\"\n" + tc.yaml
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c := NewConfig()
+			if err := c.loadFromFile(path); err != nil {
+				t.Fatalf("loadFromFile() error: %v", err)
+			}
+			err := c.Validate()
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "db_client.postgresql.pool") {
+					t.Fatalf("Validate() error = %v, want db_client.postgresql.pool error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate() unexpected error: %v", err)
+			}
+			if got := c.DBClientCfg.PostgreSQLCfg.Pool.MaxConnections; got != tc.want {
+				t.Fatalf("Pool.MaxConnections = %d, want %d", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestGetInputHeader(t *testing.T) {

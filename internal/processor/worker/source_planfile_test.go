@@ -388,6 +388,7 @@ func TestPlanFileSource_Produce_TenantScopedLookup(t *testing.T) {
 	cfg := config.NewConfig()
 	cfg.DispatchMode = config.DispatchModeSync
 	cfg.RouteKeyMethod = config.RouteKeyMethodTenant
+	cfg.TenantMetadataKey = "userid"
 	cfg.ModelGateways = map[string]config.ModelGatewayConfig{
 		"inferset-a/m1": {
 			URL:                "http://gw-a:8000",
@@ -428,6 +429,9 @@ func TestPlanFileSource_Produce_TenantScopedLookup(t *testing.T) {
 	if items[0].Headers[inferenceObjectiveHeader] != "inferset-a-batch" {
 		t.Errorf("objective header = %q, want %q", items[0].Headers[inferenceObjectiveHeader], "inferset-a-batch")
 	}
+	if got := items[0].Metadata["userid"]; got != "inferset-a" {
+		t.Errorf("metadata userid = %q, want tenant %q", got, "inferset-a")
+	}
 
 	// With the default config (route_key_method empty), the same tenant must
 	// not affect the lookup key — guards the backward-compatible behavior.
@@ -455,6 +459,35 @@ func TestPlanFileSource_Produce_TenantScopedLookup(t *testing.T) {
 		if item.ModelID != "m1" {
 			t.Errorf("route_key_method empty: ModelID = %q, want bare %q", item.ModelID, "m1")
 		}
+		// tenant_metadata_key is opt-in: the default config sends no metadata.
+		if item.Metadata != nil {
+			t.Errorf("tenant_metadata_key empty: Metadata = %v, want nil", item.Metadata)
+		}
+	}
+}
+
+func TestTenantMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		key      string
+		tenantID string
+		want     map[string]string
+	}{
+		{name: "key and tenant set", key: "userid", tenantID: "tenant-a", want: map[string]string{"userid": "tenant-a"}},
+		// A gate with a custom attribute: the configured key is used, not "userid".
+		{name: "custom key", key: "tenant_id", tenantID: "tenant-b", want: map[string]string{"tenant_id": "tenant-b"}},
+		{name: "key empty disables", key: "", tenantID: "tenant-a", want: nil},
+		{name: "job without tenant", key: "userid", tenantID: "", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.NewConfig()
+			cfg.TenantMetadataKey = tt.key
+			got := tenantMetadata(cfg, tt.tenantID)
+			if len(got) != len(tt.want) || got[tt.key] != tt.want[tt.key] {
+				t.Errorf("tenantMetadata(%q, %q) = %v, want %v", tt.key, tt.tenantID, got, tt.want)
+			}
+		})
 	}
 }
 

@@ -5,7 +5,7 @@ End-to-end tests for the batch-gateway. They run against a live deployment and c
 ## Prerequisites
 
 - `kubectl`, `helm`, `kind`, Docker or Podman
-- Go 1.26+
+- Go 1.27.3+
 - The vllm-vcr image (`ghcr.io/neuralmagic/vllm-vcr`, multi-arch: linux/amd64
   and linux/arm64). To test an unreleased vllm-vcr build it locally
   (`docker build --load -t ghcr.io/neuralmagic/vllm-vcr:dev .`) and set
@@ -83,6 +83,10 @@ make test-e2e
 | `TEST_SIM_SERVICE`        | `vllm-sim`                       | K8s service name of the primary model's simulator          |
 | `TEST_SIM_SERVICE_B`      | `vllm-sim-b`                     | K8s service name of the secondary model's simulator        |
 | `TEST_SIM_CONTROL_PORT`   | `8001`                           | vllm-vcr control API port on the simulator services        |
+| `TEST_DISPATCHER_RELEASE` | `dispatcher`                     | Helm release of the Async dispatcher (builds the default pod selector) |
+| `TEST_DISPATCHER_POD_SELECTOR` | `app.kubernetes.io/instance=$TEST_DISPATCHER_RELEASE,app.kubernetes.io/name=llm-d-async` | Label selector for the Async pods `BatchAPIHardKillRecovery` force-deletes |
+| `TEST_DISPATCHER_IMAGE`   | the pinned v1.0.0 release image  | Async image `BatchAPIHardKillRecovery` requires on the Async pods; must be `image@sha256:<64 hex>`, and the runtime imageID must carry that digest |
+| `TEST_DISPATCHER_RECLAIM_TIMEOUT` | `30s`                  | Positive Go duration `BatchAPIHardKillRecovery` waits for the replacement Async pod to reclaim the killed pod's claims; must exceed Async's `claim_lease_ttl_seconds` plus `claim_reclaim_interval_ms` |
 | `TEST_CHART_PATH`         | `../../charts/batch-gateway`     | Path to the Helm chart (used by HelmUpgrade tests)         |
 
 Example with overrides:
@@ -110,6 +114,8 @@ ENABLE_DISPATCHER=true make test-e2e TEST_RUN=TestDispatcher
 The harness pins the official llm-d Async v1.0.0 release image, including its multi-architecture manifest digest: `ghcr.io/llm-d/llm-d-async:v1.0.0@sha256:62a3e78320b0423c3c2ed327e6b870f786c3daf48f81a34f9e0332c80905663c`. It also pins chart v1.0.0 and verifies that every running dispatcher pod has both the expected image reference and runtime `imageID`. Local source builds remain preloaded into Kind with `imagePullPolicy: Never`; the released image uses `IfNotPresent` so Kubernetes resolves the immutable `tag@digest` reference.
 
 `TestDispatcher/BatchAPIHardKillRecovery` covers the composed Kubernetes path from the Files and Batch APIs through the Batch Processor, Async, inference, the Processor's replica-specific result queue, and durable output/error files. It complements llm-d Async PR #412's in-process/miniredis component coverage by force-deleting the sole Async pod only after every request is durably claimed, then verifying lease takeover, terminal counts, files, and externally visible deduplication.
+
+`TestDispatcher/QuotaPerTenant` covers per-tenant quotas end to end. The processor runs with `tenantMetadataKey: userid`, so each async request carries the job tenant, and the `sim-model-quota` queue (`sim-pool-quota`) has a `redis-quota` gate that admits one request per tenant every 10 seconds. Two tenants each submit three requests; the test checks that each tenant gets its own `quota:userid:<tenant>` key while the batches run and that neither batch finishes in under two windows.
 
 The v1.0.0 chart exposes Async's canonical `ap.transport` and `ap.transportConfig` values, including the claim lease and reclaim intervals used by the test. Production durability additionally requires persistent Redis through AOF and/or replication. Roll out claim-aware Async replicas before relying on hard-kill recovery; an older replica can still destructively dequeue work during a mixed-version rollout.
 
