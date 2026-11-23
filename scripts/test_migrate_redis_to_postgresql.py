@@ -13,9 +13,11 @@
 # limitations under the License.
 
 import importlib.util
+import itertools
 import json
 import os
 import unittest
+import urllib.parse
 import uuid
 from pathlib import Path
 
@@ -66,7 +68,8 @@ class FakeRedis:
 class FakePostgres:
     """Rows by table, with INSERT ... ON CONFLICT DO NOTHING and commit/rollback.
 
-    The tables have the gateway's columns unless a test changes self.columns.
+    The tables have the gateway's columns and a unique id unless a test changes
+    self.columns or self.unique_id; the table's "oid" is its name.
     The "does the existing row differ" SELECT compares values as plain strings;
     RealPostgresTest checks it with PostgreSQL's own jsonb comparison.
     """
@@ -79,6 +82,7 @@ class FakePostgres:
             table: [(column, migrate.COLUMN_TYPES[column], column in ("id", "tenant_id")) for column in migrate.COLUMNS[item_type]]
             for item_type, table in migrate.TABLES.items()
         }
+        self.unique_id = {}
         self.rowcount = 0
         self.result = []
 
@@ -92,8 +96,14 @@ class FakePostgres:
         return False
 
     def execute(self, sql, params=None):
-        if "information_schema" in sql:
-            self.result = self.columns.get(params[0], [])
+        if "to_regclass" in sql:
+            self.result = (params[0] if self.columns.get(params[0]) else None,)
+            return
+        if "pg_attribute WHERE" in sql:
+            self.result = self.columns[params[0]]
+            return
+        if "pg_index" in sql:
+            self.result = (self.unique_id.get(params[0], True),)
             return
         table = "batch_items" if "batch_items" in sql else "file_items"
         columns = migrate.COLUMNS["batch" if table == "batch_items" else "file"]
@@ -170,6 +180,17 @@ class ToRowTest(unittest.TestCase):
                 key, values = record("batch", "batch_1", **fields)
                 with self.assertRaises(migrate.RecordError):
                     migrate.to_row("batch", key, values)
+
+    def test_record_with_an_empty_id_is_rejected(self):
+        # SCAN's "<prefix>batch:*" also matches the key "<prefix>batch:".
+        key, values = record("batch", "")
+        with self.assertRaisesRegex(migrate.RecordError, "record ID is empty"):
+            migrate.to_row("batch", key, values)
+
+    def test_nul_in_file_purpose_is_rejected(self):
+        key, values = record("file", "file_1", purpose="batch\x00")
+        with self.assertRaises(migrate.RecordError):
+            migrate.to_row("file", key, values)
 
     def test_escaped_backslash_before_u0000_is_not_a_nul(self):
         # The JSON text \\u0000 is a backslash followed by "u0000", which PostgreSQL stores fine.
@@ -281,6 +302,41 @@ class MigrateTest(unittest.TestCase):
                     self.assertEqual(postgres.committed, {"batch_items": {}, "file_items": {}})
                     self.assertTrue(any("cannot hold these records" in message for message in messages))
 
+    def test_id_without_unique_index_stops_the_copy(self):
+        # ON CONFLICT (id) needs it; without the check only the real run would fail.
+        postgres = FakePostgres()
+        postgres.unique_id["file_items"] = False
+        code, messages = run(FakeRedis(record("file", "file_1")), postgres, dry_run=True)
+        self.assertEqual(code, 1)
+        self.assertTrue(any("file_items.id has no unique index" in message for message in messages))
+
+    def test_every_terminal_batch_is_copied(self):
+        statuses = sorted(migrate.TERMINAL_BATCH_STATUSES)
+        postgres = FakePostgres()
+        code, _ = run(FakeRedis(*(record("batch", f"batch_{s}", status=s) for s in statuses)), postgres)
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(postgres.committed["batch_items"]), [f"batch_{s}" for s in statuses])
+
+    def test_deleting_a_record_that_never_expires_is_a_change(self):
+        client = FakeRedis(record("batch", "batch_1"), record("file", "file_1"))
+        client.ttls["llmd_batch:store:file:file_1"] = -1
+        client.on_second_read = lambda c: c.hashes.pop("llmd_batch:store:file:file_1")
+        postgres = FakePostgres()
+        self.assertEqual(run(client, postgres)[0], 1)
+        self.assertEqual(postgres.committed, {"batch_items": {}, "file_items": {}})
+
+    def test_record_gone_before_its_own_deadline_is_a_change(self):
+        # file_1 is read 10s into the run with 5s left, and is gone 1.5s later:
+        # measured from the start of the run it looks expired, but it was deleted.
+        times = itertools.chain([0.0, 10.0, 11.0], itertools.repeat(11.5))
+        client = FakeRedis(record("batch", "batch_1"), record("file", "file_1"))
+        client.ttls["llmd_batch:store:file:file_1"] = 5000
+        client.on_second_read = lambda c: c.hashes.pop("llmd_batch:store:file:file_1")
+        postgres = FakePostgres()
+        code, messages = run(client, postgres, clock=lambda: next(times))
+        self.assertEqual(code, 1)
+        self.assertTrue(any("still running" in message for message in messages))
+
     def test_new_optional_column_is_fine(self):
         postgres = FakePostgres()
         postgres.columns["batch_items"].append(("note", "text", False))
@@ -330,6 +386,25 @@ class WithDbTest(unittest.TestCase):
                 self.assertEqual(pool.connection_kwargs.get("password"), redis.Redis.from_url(url).connection_pool.connection_kwargs.get("password"))
 
 
+class LibpqUrlTest(unittest.TestCase):
+    KEYWORDS = {"sslmode", "options", "application_name", "connect_timeout"}
+
+    def test_session_settings_become_options_and_pgx_settings_are_dropped(self):
+        url = "postgres://u:p@db:5432/batch?sslmode=require&search_path=batch, public&pool_max_conns=10&statement_cache_capacity=0"
+        raw = urllib.parse.urlsplit(migrate.libpq_url(url, self.KEYWORDS)).query
+        # libpq does not decode "+" as a space, unlike parse_qs.
+        self.assertNotIn("+", raw)
+        self.assertEqual(urllib.parse.parse_qs(raw), {"sslmode": ["require"], "options": ["-c search_path=batch,\\ public"]})
+
+    def test_existing_options_are_kept(self):
+        url = "postgres://db/batch?options=-c%20statement_timeout%3D5s&search_path=batch"
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(migrate.libpq_url(url, self.KEYWORDS)).query)
+        self.assertEqual(query["options"], ["-c statement_timeout=5s -c search_path=batch"])
+
+    def test_url_without_extra_settings_is_unchanged(self):
+        self.assertEqual(migrate.libpq_url("postgres://u:p@db:5432/batch?sslmode=disable", self.KEYWORDS), "postgres://u:p@db:5432/batch?sslmode=disable")
+
+
 try:
     import psycopg
 except ImportError:
@@ -359,18 +434,25 @@ class RealPostgresTest(unittest.TestCase):
     def sql(self):
         return psycopg.connect(POSTGRES_URL, options=f"-c search_path={self.schema}")
 
-    def drop_schema(self):
+    def drop_schema(self, schema=None):
         with psycopg.connect(POSTGRES_URL, autocommit=True) as admin:
-            admin.execute(f"DROP SCHEMA {self.schema} CASCADE")
+            admin.execute(f"DROP SCHEMA {schema or self.schema} CASCADE")
 
     def ids(self, table):
         with self.sql() as reader:
             return sorted(row[0] for row in reader.execute(f"SELECT id FROM {table}"))
 
+    def copy(self, client):
+        """Run the copy and commit, as main()'s connection block does, so a
+        missing rollback leaves rows that ids() can see."""
+        result = run(client, self.connection)
+        self.connection.commit()
+        return result
+
     def assert_schema_stops_the_copy(self, ddl):
         with self.sql() as gateway:
             gateway.execute(ddl)
-        code, messages = run(FakeRedis(record("file", "file_1")), self.connection)
+        code, messages = self.copy(FakeRedis(record("file", "file_1")))
         self.assertEqual(code, 1)
         self.assertEqual(self.ids("file_items"), [])
         return messages
@@ -382,22 +464,44 @@ class RealPostgresTest(unittest.TestCase):
     def test_new_required_column_stops_the_copy(self):
         self.assert_schema_stops_the_copy("ALTER TABLE file_items ADD COLUMN owner TEXT NOT NULL")
 
+    def test_tables_are_found_through_the_search_path(self):
+        # The first schema on the path exists but is empty; the tables are in the second.
+        empty = f"{self.schema}_empty"
+        with psycopg.connect(POSTGRES_URL, autocommit=True) as admin:
+            admin.execute(f"CREATE SCHEMA {empty}")
+        self.addCleanup(self.drop_schema, empty)
+        sep = "&" if "?" in POSTGRES_URL else "?"
+        url = migrate.libpq_url(f"{POSTGRES_URL}{sep}search_path={empty},{self.schema}", {o.keyword.decode() for o in psycopg.pq.Conninfo.get_defaults()})
+        with psycopg.connect(url) as connection:
+            self.assertEqual(run(FakeRedis(record("file", "file_1")), connection)[0], 0)
+        self.assertEqual(self.ids("file_items"), ["file_1"])
+
+    def test_columns_postgresql_fills_in_are_not_required(self):
+        with self.sql() as gateway:
+            gateway.execute("ALTER TABLE file_items ADD COLUMN seq BIGINT GENERATED ALWAYS AS IDENTITY")
+            gateway.execute("ALTER TABLE file_items ADD COLUMN size BIGINT NOT NULL GENERATED ALWAYS AS (expiry * 0) STORED")
+        self.assertEqual(self.copy(FakeRedis(record("file", "file_1")))[0], 0)
+        self.assertEqual(self.ids("file_items"), ["file_1"])
+
+    def test_id_without_unique_index_stops_the_copy(self):
+        self.assert_schema_stops_the_copy("ALTER TABLE file_items DROP CONSTRAINT file_items_pkey")
+
     def test_copies_and_a_second_run_changes_nothing(self):
         client = FakeRedis(record("batch", "batch_1"), record("file", "file_1", tags='{"k": "v"}'))
-        self.assertEqual(run(client, self.connection)[0], 0)
+        self.assertEqual(self.copy(client)[0], 0)
         self.assertEqual((self.ids("batch_items"), self.ids("file_items")), (["batch_1"], ["file_1"]))
 
-        code, messages = run(client, self.connection)
+        code, messages = self.copy(client)
         self.assertEqual(code, 0)
         self.assertIn("file_items: 1 in Redis, 0 copied, 1 already in PostgreSQL", messages)
 
     def test_existing_row_that_differs_is_kept_and_the_rest_is_rolled_back(self):
         key, values = record("batch", "batch_1")
-        self.assertEqual(run(FakeRedis((key, values)), self.connection)[0], 0)
+        self.assertEqual(self.copy(FakeRedis((key, values)))[0], 0)
         with psycopg.connect(POSTGRES_URL, options=f"-c search_path={self.schema}") as writer:
             writer.execute("UPDATE batch_items SET status = %s WHERE id = 'batch_1'", ['{"status": "failed"}'])
 
-        code, _ = run(FakeRedis((key, values), record("batch", "batch_2"), record("file", "file_1")), self.connection)
+        code, _ = self.copy(FakeRedis((key, values), record("batch", "batch_2"), record("file", "file_1")))
         self.assertEqual(code, 1)
         self.assertEqual((self.ids("batch_items"), self.ids("file_items")), (["batch_1"], []))
         with psycopg.connect(POSTGRES_URL, options=f"-c search_path={self.schema}") as reader:
@@ -413,16 +517,16 @@ class RealPostgresTest(unittest.TestCase):
         for name, (in_redis, in_postgres, expected) in cases.items():
             with self.subTest(name):
                 key, values = record("batch", f"batch_{uuid.uuid4().hex[:8]}", spec='{"value": %s}' % in_redis)
-                self.assertEqual(run(FakeRedis((key, values)), self.connection)[0], 0)
+                self.assertEqual(self.copy(FakeRedis((key, values)))[0], 0)
                 with psycopg.connect(POSTGRES_URL, options=f"-c search_path={self.schema}") as writer:
                     writer.execute("UPDATE batch_items SET spec = %s::jsonb WHERE id = %s", ['{"value": %s}' % in_postgres, values["ID"]])
 
-                self.assertEqual(run(FakeRedis((key, values)), self.connection)[0], expected)
+                self.assertEqual(self.copy(FakeRedis((key, values)))[0], expected)
 
     def test_change_during_the_copy_rolls_everything_back(self):
         client = FakeRedis(record("batch", "batch_1"), record("file", "file_1"))
         client.on_second_read = lambda c: c.hashes.update([record("file", "file_late")])
-        self.assertEqual(run(client, self.connection)[0], 1)
+        self.assertEqual(self.copy(client)[0], 1)
         self.assertEqual((self.ids("batch_items"), self.ids("file_items")), ([], []))
 
 

@@ -22,7 +22,7 @@
 
 | Script                           | Description |
 | -------------------------------- | ----------- |
-| `migrate-redis-to-postgresql.py` | Copies batch and file records from Redis or Valkey to PostgreSQL, for deployments that used the Redis record store (releases up to v0.5.0) and are moving to a release that only reads PostgreSQL (v0.6.0 and later). |
+| `migrate-redis-to-postgresql.py` | Copies batch and file records from Redis or Valkey to PostgreSQL, for deployments that used the Redis record store (llm-d Batch Gateway releases up to v0.5.0) and are moving to a release that only reads PostgreSQL (llm-d Batch Gateway v0.6.0 and later). |
 
 ### Migrating job records from Redis to PostgreSQL
 
@@ -43,7 +43,9 @@ The script does not create tables: it copies into the tables the gateway creates
 
     `--redis-db` must be the `global.dbClient.redis.db` the gateway used while its records were in Redis (default `0`). The gateway used that number, not the one in `redis-url`, and so does the script. If the script finds no records at all, it stops with an error, which usually means the number is wrong.
 
-5. Run it again without `--dry-run`.
+    If Redis or Valkey uses TLS (`global.dbClient.redis.enableTLS: true`), use `rediss://` in `REDIS_URL`, even if the gateway's `redis-url` says `redis://`: the gateway turns TLS on from `enableTLS`, but the script only uses TLS for `rediss://`, and over `redis://` it would send the password unencrypted. If the certificate is not signed by a public CA, add `?ssl_ca_certs=<path_to_the_CA_file>`. If you connect through a port-forward and the certificate does not name `localhost`, also add `ssl_check_hostname=false`. Without TLS, keep `redis://`.
+
+5. Run the same command again without `--dry-run`, keeping `--redis-db` if you used it.
 6. Start the API server, the processor and the garbage collector again. Do not run the script after this: it would bring back records that users have deleted since.
 
 Without `uv`: `pip install "redis>=5" "psycopg[binary]>=3.1"`, then run the script with `python3`. The URLs can also be passed as `--redis-url` and `--postgresql-url`. The script needs Redis 6.0 or later, or Valkey.

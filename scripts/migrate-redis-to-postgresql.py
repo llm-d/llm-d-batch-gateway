@@ -19,11 +19,13 @@
 # ///
 """Copy Batch Gateway job records from Redis or Valkey to PostgreSQL.
 
-Batch Gateway releases up to v0.5.0 can keep their batch and file records in
-Redis or Valkey; from v0.6.0 the gateway reads them from PostgreSQL only. Run
-this after the gateway has been switched to PostgreSQL, has started once (it
-creates its own tables) and has been stopped again. That can be before the
-upgrade to v0.6.0 or after it. The script does not create tables: it checks
+llm-d Batch Gateway releases up to v0.5.0 can keep their batch and file
+records in Redis or Valkey; from llm-d Batch Gateway v0.6.0 the gateway reads
+them from PostgreSQL only. (These are upstream llm-d release numbers, not the
+version of a product that ships the gateway.) Run this after the gateway has
+been switched to PostgreSQL, has started once (it creates its own tables) and
+has been stopped again. That can be before the upgrade to v0.6.0 or after it.
+The script does not create tables: it checks
 that the gateway's tables can hold the Redis records and copies nothing if
 they cannot. See scripts/README.md for the procedure.
 """
@@ -68,6 +70,8 @@ def to_row(item_type, key, record):
     if version != RECORD_VERSION:
         raise RecordError(f"{key}: record version {version!r} is not supported (expected {RECORD_VERSION!r})")
     item_id = record.get("ID") or ""
+    if not item_id:
+        raise RecordError(f"{key}: record ID is empty")
     if key != f"{KEY_PREFIX}{item_type}:{item_id}":
         raise RecordError(f"{key}: record ID {item_id!r} does not match its key")
     if not record.get("tenantID"):
@@ -114,62 +118,68 @@ def contains_nul(value):
 
 
 def batch_status(row):
-    if row["status"] is None:
-        return None
-    status = json.loads(row["status"])
+    status = None if row["status"] is None else json.loads(row["status"])
     return status.get("status") if isinstance(status, dict) else None
 
 
-def read_records(client, item_type):
-    """Yield (key, (hash, ttl in ms)) for every record of one type."""
+def read_records(client, item_type, clock):
+    """Yield (key, (hash, expiry deadline in s on clock, or None)) for every record of one type."""
     for key in client.scan_iter(match=f"{KEY_PREFIX}{item_type}:*", count=500, _type="hash"):
         # Lifetime first: read after the hash, a record that expires in between
         # would report "no such key" and look deleted rather than expired.
         ttl = client.pttl(key)
+        # Taken after PTTL, so the deadline is never earlier than Redis's own.
+        deadline = clock() + ttl / 1000 if ttl >= 0 else None
         record = client.hgetall(key)
         if record:  # an expired key can vanish between SCAN and HGETALL
-            yield key, (record, ttl)
+            yield key, (record, deadline)
 
 
-def read_all(client):
-    """Return {item type: {key: (record, ttl in ms)}} for every batch and file record."""
-    return {item_type: dict(read_records(client, item_type)) for item_type in TABLES}
+def read_all(client, clock):
+    """Return {item type: {key: (record, deadline)}} for every batch and file record."""
+    return {item_type: dict(read_records(client, item_type, clock)) for item_type in TABLES}
 
 
-def changed_since(before, after, elapsed_ms):
+def changed_since(before, after, now):
     """Keys whose records were added, changed or removed between two reads.
 
-    The record store sets a lifetime on every record, so a record whose
-    lifetime ran out between the reads is expected to be gone and does not
-    count as a change.
+    The record store sets a lifetime on every record, so a record that is gone
+    after its own deadline has expired and does not count as a change.
     """
     changed = []
     for item_type, records in before.items():
         later = after[item_type]
-        for key, (record, ttl) in records.items():
+        for key, (record, deadline) in records.items():
             if key in later:
                 if later[key][0] != record:
                     changed.append(key)
-            elif not 0 <= ttl <= elapsed_ms:
+            elif deadline is None or now < deadline:
                 changed.append(key)
         changed += [key for key in later if key not in records]
     return changed
 
 
 def schema_problems(connection):
-    """Why the gateway's tables cannot hold the Redis records, if they cannot."""
+    """Why the gateway's tables cannot hold the Redis records, if they cannot.
+
+    Each table is looked up the way the inserts will find it (search_path).
+    """
     problems = []
     with connection.cursor() as cursor:
         for item_type, table in TABLES.items():
-            cursor.execute(
-                "SELECT column_name, data_type, is_nullable = 'NO' AND column_default IS NULL"
-                " FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = %s",
-                [table],
-            )
-            found = {name: (data_type, required) for name, data_type, required in cursor.fetchall()}
-            if not found:
+            cursor.execute("SELECT to_regclass(%s)::oid", [table])
+            oid = cursor.fetchone()[0]
+            if oid is None:
                 problems.append(f"table {table} does not exist; start the gateway on PostgreSQL once so it creates its tables, then stop it")
                 continue
+            # Required: NOT NULL with no value PostgreSQL can fill in itself.
+            cursor.execute(
+                "SELECT attname, format_type(atttypid, atttypmod),"
+                " attnotnull AND NOT atthasdef AND attidentity = '' AND attgenerated = ''"
+                " FROM pg_attribute WHERE attrelid = %s AND attnum > 0 AND NOT attisdropped",
+                [oid],
+            )
+            found = {name: (data_type, required) for name, data_type, required in cursor.fetchall()}
             for column in COLUMNS[item_type]:
                 if column not in found:
                     problems.append(f"{table}.{column} does not exist")
@@ -178,12 +188,19 @@ def schema_problems(connection):
             for column, (_, required) in found.items():
                 if required and column not in COLUMNS[item_type]:
                     problems.append(f"{table}.{column} is required but the Redis records have no value for it")
+            # ON CONFLICT (id) needs a unique, non-partial index on id alone.
+            cursor.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]"
+                " WHERE i.indrelid = %s AND i.indisunique AND i.indnkeyatts = 1 AND i.indpred IS NULL AND a.attname = 'id')",
+                [oid],
+            )
+            if not cursor.fetchone()[0]:
+                problems.append(f"{table}.id has no unique index")
     return problems
 
 
 def migrate(client, connection, *, dry_run, report, clock=time.monotonic):
-    started = clock()
-    source = read_all(client)
+    source = read_all(client, clock)
     if problems := schema_problems(connection):
         for problem in problems:
             report(f"ERROR: {problem}")
@@ -244,7 +261,8 @@ def migrate(client, connection, *, dry_run, report, clock=time.monotonic):
         report("Nothing was written")
         return 1
     if not dry_run:
-        changed = changed_since(source, read_all(client), (clock() - started) * 1000)
+        after = read_all(client, clock)
+        changed = changed_since(source, after, clock())
         if changed:
             connection.rollback()
             report(f"ERROR: {len(changed)} record(s) in Redis changed while they were being copied, so the gateway is still running: {', '.join(sorted(changed)[:10])}")
@@ -279,7 +297,7 @@ def main():
     try:
         with (
             redis.Redis.from_url(with_db(args.redis_url, args.redis_db), decode_responses=True) as client,
-            psycopg.connect(args.postgresql_url) as connection,
+            psycopg.connect(libpq_url(args.postgresql_url, {o.keyword.decode() for o in psycopg.pq.Conninfo.get_defaults()})) as connection,
         ):
             return migrate(client, connection, dry_run=args.dry_run, report=report)
     except (redis.RedisError, psycopg.Error) as error:
@@ -299,6 +317,33 @@ def with_db(url, db):
     parts = urllib.parse.urlsplit(url)
     query = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if k != "db"]
     return urllib.parse.urlunsplit(parts._replace(path=f"/{db}", query=urllib.parse.urlencode(query)))
+
+
+# Settings pgx (the gateway's driver) accepts in the URL that libpq does not,
+# besides the pool_* ones. They tune the client, not the session.
+PGX_ONLY = {"statement_cache_capacity", "description_cache_capacity", "default_query_exec_mode", "min_read_buffer_size"}
+
+
+def libpq_url(url, keywords):
+    """Return the gateway's PostgreSQL URL in a form libpq accepts.
+
+    pgx sends any unknown parameter, such as search_path, to the server as a
+    session setting; libpq rejects it. Those become -c options, and pgx's own
+    client settings are dropped.
+    """
+    parts = urllib.parse.urlsplit(url)
+    query, options = [], []
+    for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True):
+        if k in keywords:
+            query.append((k, v))
+        elif not (k.startswith("pool_") or k in PGX_ONLY):
+            # libpq splits options on spaces; a backslash escapes one.
+            options.append("-c " + f"{k}={v}".replace("\\", "\\\\").replace(" ", "\\ "))
+    if options:
+        current = dict(query).get("options")
+        query = [(k, v) for k, v in query if k != "options"] + [("options", " ".join(([current] if current else []) + options))]
+    # libpq decodes %20 but not "+", so spaces must be percent-encoded.
+    return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query, quote_via=urllib.parse.quote)))
 
 
 if __name__ == "__main__":
