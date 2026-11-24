@@ -281,11 +281,14 @@ apiserver:
     enabled: false
     api:
       # Peers that may reach the API port (apiserver.config.port), as a list of
-      # NetworkPolicyPeer. Required when enabled. For the namespace that runs
-      # the gateway or auth proxy:
+      # NetworkPolicyPeer. Required when enabled. For example, the pods of the
+      # gateway "my-gateway" in the namespace "gateway-system":
       #   - namespaceSelector:
       #       matchLabels:
       #         kubernetes.io/metadata.name: gateway-system
+      #     podSelector:
+      #       matchLabels:
+      #         gateway.networking.k8s.io/gateway-name: my-gateway
       from: []
     observability:
       # Peers that may reach the observability port

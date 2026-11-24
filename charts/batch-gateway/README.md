@@ -384,7 +384,7 @@ spec:
 
 ### Restricting access with a NetworkPolicy
 
-The API server trusts the tenant header set by the auth proxy, so nothing else should reach its API port. Enable the NetworkPolicy and list the gateway's namespace:
+The API server trusts the tenant header set by the auth proxy, so nothing else should reach its API port. Enable the NetworkPolicy and list the gateway's pods (e.g. `my-gateway` in `gateway-system`, as in the HTTPRoute above):
 
 ```yaml
 apiserver:
@@ -395,6 +395,9 @@ apiserver:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: gateway-system
+          podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: my-gateway
     observability:
       from:
         - namespaceSelector:
@@ -402,7 +405,7 @@ apiserver:
               kubernetes.io/metadata.name: monitoring
 ```
 
-`api.from` is required when the policy is enabled. An empty `observability.from` allows no peer on the observability port; kubelet probes keep working. The policy has an effect only with a network plugin that enforces `NetworkPolicy`.
+Use your own namespaces and labels. Without the `podSelector`, every pod in the gateway's namespace could reach the API port. `api.from` is required when the policy is enabled. An empty `observability.from` allows no peer on the observability port; kubelet probes keep working. The policy has an effect only with a network plugin that enforces `NetworkPolicy`.
 
 ## Health Checks
 

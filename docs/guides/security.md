@@ -24,7 +24,7 @@ See [Kuadrant Integration](kuadrant-integration.md) for full setup instructions.
 
 > **Security prerequisite**: The API server has no built-in authentication. Tenant identity is derived entirely from headers injected by the upstream auth proxy (e.g. Envoy, Kuadrant/Authorino). Direct access to the API server bypasses all tenant isolation. Deployments **must** ensure the API server is not reachable without passing through the auth proxy.
 
-To enforce that in the cluster, enable the chart's `NetworkPolicy` and list the gateway as the only peer of the API port:
+To limit which pods can reach the API port in the cluster, enable the chart's `NetworkPolicy` and list the gateway's pods as the only peer:
 
 ```yaml
 apiserver:
@@ -35,9 +35,12 @@ apiserver:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: gateway-system
+          podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: my-gateway
 ```
 
-It needs a network plugin that enforces `NetworkPolicy`. See [Networking](networking.md#13-networkpolicy) for the observability port and the details.
+The namespace and labels are examples; use your gateway's. Keep the `podSelector`: without it, every pod in the gateway's namespace can reach the API port. The policy needs a network plugin that enforces `NetworkPolicy`, and other policies that select the API server pods add to what it allows. See [Networking](networking.md#13-networkpolicy) for the observability port and the details.
 
 All data access is scoped to the authenticated tenant:
 

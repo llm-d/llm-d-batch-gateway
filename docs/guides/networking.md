@@ -74,27 +74,34 @@ Base URL: `http://<host>:8081` — always plain HTTP.
 
 The API server trusts the tenant header that the auth proxy injects, so only the proxy should reach the API port. The chart can create a `NetworkPolicy` for the API server pods that allows ingress to each port only from the peers you list. It is off by default, because the chart cannot know where the gateway runs.
 
+Kubernetes combines this policy with every other `NetworkPolicy` that selects the API server pods: a connection is allowed when any of them allows it. If the namespace already has a broader policy, for example one that allows all ingress from within the namespace, its peers can still reach the API port, so review the existing policies before relying on this one.
+
 ```yaml
 apiserver:
   networkPolicy:
     enabled: true
     api:
-      # Who may reach the API port (default 8000): the gateway or auth proxy.
+      # Who may reach the API port (default 8000): the gateway or auth proxy pods.
+      # Example values: use your gateway's namespace and pod labels.
       from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: gateway-system
+          podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: my-gateway
     observability:
       # Who may reach the observability port (default 8081): Prometheus.
+      # Example value: use the namespace your Prometheus runs in.
       from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: monitoring
 ```
 
-Each `from` is a list of [NetworkPolicyPeer](https://kubernetes.io/docs/reference/kubernetes-api/policy-resources/network-policy-v1/#NetworkPolicyPeer) entries, so `namespaceSelector`, `podSelector` and `ipBlock` all work.
+Each `from` is a list of [NetworkPolicyPeer](https://kubernetes.io/docs/reference/kubernetes-api/policy-resources/network-policy-v1/#NetworkPolicyPeer) entries, so `namespaceSelector`, `podSelector` and `ipBlock` all work. A `namespaceSelector` on its own admits every pod in the matching namespaces. With a `podSelector` in the same entry, as above, only the matching pods in those namespaces are admitted. Istio, which the deployment guides use, labels a gateway's pods with `gateway.networking.k8s.io/gateway-name`.
 
-- `api.from` is required. The chart fails to render when the policy is enabled without it.
+- `api.from` is required when the policy is enabled. The chart fails to render without it.
 - An empty `observability.from` allows no peer on the observability port. Liveness and readiness probes come from the kubelet on the pod's node, which network plugins allow regardless of the policy.
 - Traffic that enters through a `NodePort` or `LoadBalancer` Service is not from a pod, so namespace and pod selectors do not match it. Allow it with an `ipBlock` peer if you expose the API server that way.
 - The policy covers ingress only. Egress from the API server is not restricted.

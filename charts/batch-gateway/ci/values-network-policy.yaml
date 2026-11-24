@@ -11,6 +11,9 @@ apiserver:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: gateway-system
+          podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: my-gateway
     observability:
       from:
         - namespaceSelector:
