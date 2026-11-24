@@ -1,0 +1,113 @@
+suite: apiserver networkpolicy
+templates:
+  - templates/apiserver-networkpolicy.yaml
+# Required: fs file client (the default) needs a pvcName to pass template validation.
+set:
+  global.fileClient.fs.pvcName: "test-pvc"
+tests:
+  - it: should not render a NetworkPolicy when disabled (default)
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should not render a NetworkPolicy when the apiserver is disabled
+    set:
+      apiserver.enabled: false
+      apiserver.networkPolicy.enabled: true
+      apiserver.networkPolicy.api.from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway-system
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should fail when enabled without an API peer
+    set:
+      apiserver.networkPolicy.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: "apiserver.networkPolicy.api.from must not be empty when networkPolicy is enabled"
+
+  - it: should allow only the API peers on the API port
+    release:
+      name: bg
+    set:
+      apiserver.networkPolicy.enabled: true
+      apiserver.networkPolicy.api.from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway-system
+    asserts:
+      - isKind:
+          of: NetworkPolicy
+      - equal:
+          path: spec.policyTypes
+          value:
+            - Ingress
+      - equal:
+          path: spec.podSelector.matchLabels
+          value:
+            app.kubernetes.io/name: batch-gateway-apiserver
+            app.kubernetes.io/instance: bg
+            app.kubernetes.io/component: apiserver
+      - equal:
+          path: spec.ingress
+          value:
+            - from:
+                - namespaceSelector:
+                    matchLabels:
+                      kubernetes.io/metadata.name: gateway-system
+              ports:
+                - protocol: TCP
+                  port: 8000
+
+  - it: should add a rule for the observability port when peers are set
+    set:
+      apiserver.networkPolicy.enabled: true
+      apiserver.networkPolicy.api.from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway-system
+      apiserver.networkPolicy.observability.from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+    asserts:
+      - lengthEqual:
+          path: spec.ingress
+          count: 2
+      - equal:
+          path: spec.ingress[1]
+          value:
+            from:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: monitoring
+                podSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: prometheus
+            ports:
+              - protocol: TCP
+                port: 8081
+
+  - it: should follow the configured ports
+    set:
+      apiserver.config.port: "9443"
+      apiserver.config.observabilityPort: "9081"
+      apiserver.networkPolicy.enabled: true
+      apiserver.networkPolicy.api.from:
+        - ipBlock:
+            cidr: 10.0.0.0/24
+      apiserver.networkPolicy.observability.from:
+        - namespaceSelector: {}
+    asserts:
+      - equal:
+          path: spec.ingress[0].ports[0].port
+          value: 9443
+      - equal:
+          path: spec.ingress[1].ports[0].port
+          value: 9081

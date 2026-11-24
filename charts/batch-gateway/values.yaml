@@ -280,6 +280,29 @@ apiserver:
     # Extra labels to match Prometheus Operator's serviceMonitorSelector.
     labels: {}
 
+  # NetworkPolicy for the API server pods (ingress only).
+  # The API server trusts the tenant header that the auth proxy injects, so only
+  # the proxy should be able to reach the API port. The policy has an effect only
+  # when the cluster's network plugin enforces NetworkPolicy.
+  networkPolicy:
+    enabled: false
+    api:
+      # Peers that may reach the API port (apiserver.config.port), as a list of
+      # NetworkPolicyPeer. Required when enabled. For example, the pods of the
+      # gateway "my-gateway" in the namespace "gateway-system":
+      #   - namespaceSelector:
+      #       matchLabels:
+      #         kubernetes.io/metadata.name: gateway-system
+      #     podSelector:
+      #       matchLabels:
+      #         gateway.networking.k8s.io/gateway-name: my-gateway
+      from: []
+    observability:
+      # Peers that may reach the observability port
+      # (apiserver.config.observabilityPort: /metrics, /health, /ready), such as
+      # the namespace Prometheus runs in. Empty means no peer is allowed.
+      from: []
+
   # Logging configuration
   logging:
     verbosity: 2
