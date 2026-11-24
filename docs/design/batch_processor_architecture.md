@@ -772,7 +772,7 @@ Tracing is disabled when `OTEL_EXPORTER_OTLP_ENDPOINT` is not set (no-op provide
 **Cancellation Metrics**
 
 - `batch_cancellation_total{phase}` (counter)
-  Total batch job cancellations by phase. `phase` values: `queued` (cancelled before execution started), `in_progress` (cancelled during execution), `finalizing` (cancelled during file upload/finalization).
+  Total batch job cancellations by phase. `phase` values: `queued` (cancelled before execution started), `in_progress` (cancelled during execution).
 
 **Startup Recovery Metrics**
 

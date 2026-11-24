@@ -67,7 +67,7 @@ Processor metrics intentionally omit unbounded identifiers such as tenant IDs. P
 
 **Cancellation Metrics:**
 
-- `batch_cancellation_total{phase}` (Counter) - Total batch job cancellations. `phase` values: `queued` (cancelled before execution started), `in_progress` (cancelled during execution), `finalizing` (cancelled during file upload/finalization).
+- `batch_cancellation_total{phase}` (Counter) - Total batch job cancellations. `phase` values: `queued` (cancelled before execution started), `in_progress` (cancelled during execution).
 
 **Startup Recovery:**
 
