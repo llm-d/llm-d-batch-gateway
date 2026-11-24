@@ -79,8 +79,20 @@ func (p *Processor) finalizeResumableJob(
 	dbJob.ExpectedResumable = &resumable
 
 	// in_progress → finalizing, before artifact assembly so the API server
-	// can reject cancel requests once finalization has begun.
-	if err := updater.UpdatePersistentStatus(ioCtx, dbJob, openai.BatchStatusFinalizing, nil, nil); err != nil {
+	// can reject cancel requests once finalization has begun. The write is a
+	// CAS on the persisted status: a user cancel that persisted cancelling
+	// after execution finished, but before this write, wins, and the batch
+	// finalizes as cancelled from cancelling instead of being overwritten
+	// with finalizing and completed.
+	expected := openai.BatchStatusFinalizing
+	rowCancelled := false
+	rowStatus, err := updater.TransitionPersistentStatus(ioCtx, dbJob, openai.BatchStatusInProgress, openai.BatchStatusFinalizing)
+	switch {
+	case err == nil:
+	case errors.Is(err, db.ErrConflict) && rowStatus == openai.BatchStatusCancelling:
+		logger.V(logging.INFO).Info("Cancel persisted before finalization began; finalizing as cancelled")
+		expected, rowCancelled = openai.BatchStatusCancelling, true
+	default:
 		return fmt.Errorf("failed to update job status to finalizing: %w", err)
 	}
 
@@ -95,9 +107,9 @@ func (p *Processor) finalizeResumableJob(
 
 	// Best-effort: honour a user cancel that arrived during finalization —
 	// same contract as the legacy finalizer.
-	if errors.Is(context.Cause(ctx), batchctx.ErrCancelled) {
+	if rowCancelled || errors.Is(context.Cause(ctx), batchctx.ErrCancelled) {
 		logger.V(logging.INFO).Info("Cancel requested during finalization; finalizing as cancelled")
-		if err := p.finalizeResumableStatus(ioCtx, updater, dbJob, openai.BatchStatusFinalizing, openai.BatchStatusCancelled, counts, outputFileID, errorFileID); err != nil {
+		if err := p.finalizeResumableStatus(ioCtx, updater, dbJob, expected, openai.BatchStatusCancelled, counts, outputFileID, errorFileID); err != nil {
 			// The row stays non-terminal: the reconciler requeue retries the
 			// finalization, and a pickup routes a cancelling row back here.
 			return fmt.Errorf("cancelled status write failed: %w", err)

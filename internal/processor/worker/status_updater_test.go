@@ -344,3 +344,87 @@ func TestUpdatePersistentStatus_PreservesPriorTimestamps(t *testing.T) {
 		})
 	}
 }
+
+func TestTransitionPersistentStatus(t *testing.T) {
+	ctx := context.Background()
+	const jobID = "job-transition"
+
+	seedRow := func(t *testing.T, dbClient db.BatchProgressDBClient, status openai.BatchStatus, epoch int64) *db.BatchItem {
+		t.Helper()
+		item := &db.BatchItem{
+			BaseIndexes: db.BaseIndexes{ID: jobID},
+			BaseContents: db.BaseContents{
+				Status: mustJSON(t, openai.BatchStatusInfo{
+					Status:        status,
+					RequestCounts: openai.BatchRequestCounts{Total: 4, Completed: 4},
+				}),
+			},
+			Epoch: epoch,
+		}
+		if err := dbClient.DBStore(ctx, item); err != nil {
+			t.Fatalf("DBStore seed: %v", err)
+		}
+		return item
+	}
+	staleJob := func(t *testing.T, epoch int64) *db.BatchItem {
+		t.Helper()
+		// The caller's in-memory copy still says in_progress, with no counts.
+		return &db.BatchItem{
+			BaseIndexes:  db.BaseIndexes{ID: jobID},
+			BaseContents: db.BaseContents{Status: mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusInProgress})},
+			Epoch:        epoch,
+		}
+	}
+
+	t.Run("writes the transition from the persisted status", func(t *testing.T) {
+		dbClient := newMockBatchDBClient()
+		seedRow(t, dbClient, openai.BatchStatusInProgress, 2)
+		job := staleJob(t, 2)
+
+		got, err := NewStatusUpdater(dbClient).TransitionPersistentStatus(ctx, job, openai.BatchStatusInProgress, openai.BatchStatusFinalizing)
+		if err != nil || got != openai.BatchStatusFinalizing {
+			t.Fatalf("TransitionPersistentStatus = (%s, %v), want (finalizing, nil)", got, err)
+		}
+		assertJobStatus(t, dbClient, jobID, openai.BatchStatusFinalizing)
+		var info openai.BatchStatusInfo
+		if err := json.Unmarshal(job.Status, &info); err != nil {
+			t.Fatalf("unmarshal dbJob status: %v", err)
+		}
+		if info.Status != openai.BatchStatusFinalizing || info.RequestCounts.Completed != 4 {
+			t.Fatalf("dbJob status = %+v, want finalizing built on the row's counts", info)
+		}
+	})
+
+	t.Run("does not overwrite a cancelling row", func(t *testing.T) {
+		dbClient := newMockBatchDBClient()
+		seedRow(t, dbClient, openai.BatchStatusCancelling, 2)
+
+		got, err := NewStatusUpdater(dbClient).TransitionPersistentStatus(ctx, staleJob(t, 2), openai.BatchStatusInProgress, openai.BatchStatusFinalizing)
+		if !errors.Is(err, db.ErrConflict) || got != openai.BatchStatusCancelling {
+			t.Fatalf("TransitionPersistentStatus = (%s, %v), want (cancelling, ErrConflict)", got, err)
+		}
+		assertJobStatus(t, dbClient, jobID, openai.BatchStatusCancelling)
+	})
+
+	t.Run("leaves a row already in the target status", func(t *testing.T) {
+		dbClient := newMockBatchDBClient()
+		seedRow(t, dbClient, openai.BatchStatusFinalizing, 2)
+
+		got, err := NewStatusUpdater(dbClient).TransitionPersistentStatus(ctx, staleJob(t, 2), openai.BatchStatusInProgress, openai.BatchStatusFinalizing)
+		if err != nil || got != openai.BatchStatusFinalizing {
+			t.Fatalf("TransitionPersistentStatus = (%s, %v), want (finalizing, nil)", got, err)
+		}
+		assertJobStatus(t, dbClient, jobID, openai.BatchStatusFinalizing)
+	})
+
+	t.Run("refuses a row owned by another epoch", func(t *testing.T) {
+		dbClient := newMockBatchDBClient()
+		seedRow(t, dbClient, openai.BatchStatusInProgress, 3)
+
+		got, err := NewStatusUpdater(dbClient).TransitionPersistentStatus(ctx, staleJob(t, 2), openai.BatchStatusInProgress, openai.BatchStatusFinalizing)
+		if !errors.Is(err, db.ErrConflict) || got != "" {
+			t.Fatalf("TransitionPersistentStatus = (%q, %v), want (\"\", ErrConflict)", got, err)
+		}
+		assertJobStatus(t, dbClient, jobID, openai.BatchStatusInProgress)
+	})
+}
