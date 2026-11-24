@@ -1049,6 +1049,9 @@ apply_batch_auth_policy() {
     step "Creating batch-route AuthPolicy (authentication only)..."
     # No authorization here; model-level authorization happens when batch processor
     # forwards requests to the Internal Gateway's batch-llm-route.
+    # On success, inject the caller's username as the tenant and the shared proxy
+    # token the API server requires (apiserver-proxy-token in the app secret).
+    resolve_batch_proxy_token
     kubectl apply -f - <<EOF
 apiVersion: kuadrant.io/v1
 kind: AuthPolicy
@@ -1066,6 +1069,15 @@ spec:
         kubernetesTokenReview:
           audiences:
           - https://kubernetes.default.svc
+    response:
+      success:
+        headers:
+          "x-maas-username":
+            plain:
+              selector: auth.identity.user.username
+          "x-gateway-token":
+            plain:
+              value: "${BATCH_PROXY_TOKEN}"
 EOF
     log "Batch AuthPolicy applied."
 }
