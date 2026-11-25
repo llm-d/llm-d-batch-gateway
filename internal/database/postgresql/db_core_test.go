@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/pashagolub/pgxmock/v5"
+	"github.com/pashagolub/pgxmock/v6"
 
 	"github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 )
