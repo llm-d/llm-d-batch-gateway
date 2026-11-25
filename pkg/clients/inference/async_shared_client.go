@@ -17,6 +17,7 @@ import (
 	httpclient "github.com/llm-d/llm-d-batch-gateway/pkg/clients/http"
 
 	"github.com/llm-d/llm-d-async/producer"
+	producersql "github.com/llm-d/llm-d-async/producer-sql"
 )
 
 // asyncSharedClient decouples submit from collect.
@@ -27,7 +28,7 @@ import (
 // broadcaster hands to the checkpointer to call after the durable checkpoint.
 type asyncSharedClient struct {
 	producer    producer.Producer
-	durable     producer.DurableResultProducer
+	receive     receiveFunc
 	pollTimeout time.Duration
 	logger      logr.Logger
 }
@@ -35,16 +36,38 @@ type asyncSharedClient struct {
 var _ AsyncInferenceClient = (*asyncSharedClient)(nil)
 var _ DurableResultClient = (*asyncSharedClient)(nil)
 
+type receiveFunc func(ctx context.Context) (*asyncapi.ResultMessage, ResultAck, error)
+
 func newAsyncSharedClient(p producer.Producer, pollTimeout time.Duration, logger logr.Logger) *asyncSharedClient {
-	var durable producer.DurableResultProducer
-	if d, ok := p.(producer.DurableResultProducer); ok {
-		durable = d
-	}
 	return &asyncSharedClient{
 		producer:    p,
-		durable:     durable,
+		receive:     durableReceiver(p),
 		pollTimeout: pollTimeout,
 		logger:      logger,
+	}
+}
+
+// durableReceiver returns nil when p lacks durable result delivery.
+func durableReceiver(p producer.Producer) receiveFunc {
+	switch d := p.(type) {
+	case producer.DurableResultProducer:
+		return func(ctx context.Context) (*asyncapi.ResultMessage, ResultAck, error) {
+			delivery, err := d.ReceiveResult(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			return delivery.Result, func(ctx context.Context) error { return d.AckResult(ctx, delivery) }, nil
+		}
+	case *producersql.Producer:
+		return func(ctx context.Context) (*asyncapi.ResultMessage, ResultAck, error) {
+			delivery, err := d.ReceiveResult(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			return delivery.Result, func(ctx context.Context) error { return d.AckResult(ctx, delivery) }, nil
+		}
+	default:
+		return nil
 	}
 }
 
@@ -117,19 +140,17 @@ func (c *asyncSharedClient) GetResult(ctx context.Context) (*GenerateResponse, e
 // durable capability report ErrDurableResultsUnavailable so the caller falls
 // back to GetResult.
 func (c *asyncSharedClient) ReceiveResult(ctx context.Context) (*GenerateResponse, ResultAck, error) {
-	if c.durable == nil {
+	if c.receive == nil {
 		return nil, nil, ErrDurableResultsUnavailable
 	}
 	pollCtx, pollCancel := context.WithTimeout(ctx, c.pollTimeout)
 	defer pollCancel()
 
-	delivery, err := c.durable.ReceiveResult(pollCtx)
+	result, ack, err := c.receive(pollCtx)
 	if err != nil {
 		return nil, nil, err
 	}
-	return generateResponseFrom(delivery.Result), func(ctx context.Context) error {
-		return c.durable.AckResult(ctx, delivery)
-	}, nil
+	return generateResponseFrom(result), ack, nil
 }
 
 func generateResponseFrom(result *asyncapi.ResultMessage) *GenerateResponse {

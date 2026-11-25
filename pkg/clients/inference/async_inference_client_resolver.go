@@ -85,10 +85,12 @@ type AsyncGatewayResolver struct {
 	closers         []io.Closer
 	clientFactories map[string]func() AsyncInferenceClient // test-only override
 	// routeBases maps each model to its result-route prefix (before the
-	// consumer suffix); Redis rebuilds producers for cross-processor recovery.
+	// consumer suffix); recovery rebuilds producers on another consumer's route.
 	routeBases        map[string]string
 	transport         string
 	rdb               redis.UniversalClient
+	sqlStore          *sqlqueue.Store
+	pollInterval      time.Duration
 	resultPollTimeout time.Duration
 	logger            logr.Logger
 }
@@ -110,10 +112,10 @@ func (r *AsyncGatewayResolver) Models() []string {
 }
 
 // SupportsResultRecovery reports whether an unacknowledged result can be
-// recovered after the owning Processor fails. Redis leases results until ack;
-// the SQL producer currently deletes results when they are read.
+// recovered after the owning Processor fails. Both transports lease results
+// until ack.
 func (r *AsyncGatewayResolver) SupportsResultRecovery() bool {
-	return r.transport == AsyncTransportRedisSortedSet
+	return r.transport == AsyncTransportRedisSortedSet || r.transport == AsyncTransportSQL
 }
 
 // SharedClientFor returns a shared client for the given model.
@@ -292,6 +294,8 @@ func NewAsyncResolver(ctx context.Context, config AsyncClientConfig, logger logr
 		routeBases:        routeBases,
 		transport:         transport,
 		rdb:               rdb,
+		sqlStore:          sqlStore,
+		pollInterval:      pollInterval,
 		resultPollTimeout: config.ResultPollTimeout,
 		logger:            logger,
 	}, nil
@@ -323,8 +327,7 @@ const recoveryClaimLeaseTTL = 60 * time.Second
 // route of consumer — the route on which that processor's unacknowledged
 // deliveries are stranded after a disruption. A processor recovering a batch
 // reads the previous submitter's route through it so a completed result is
-// checkpointed instead of re-inferred. Currently only Redis supports this
-// operation; SQL result reads are destructive.
+// checkpointed instead of re-inferred.
 func (r *AsyncGatewayResolver) RecoveryClientFor(modelID, consumerID string) (AsyncInferenceClient, error) {
 	if r.clientFactories != nil {
 		return nil, fmt.Errorf("recovery clients require a real async transport")
@@ -347,7 +350,18 @@ func (r *AsyncGatewayResolver) RecoveryClientFor(modelID, consumerID string) (As
 			producer.WithResultClaimLeaseTTL(recoveryClaimLeaseTTL),
 		)
 	case AsyncTransportSQL:
-		return nil, fmt.Errorf("SQL transport does not support cross-processor result recovery; resume by re-submission")
+		if r.sqlStore == nil {
+			return nil, fmt.Errorf("SQL recovery route for model %q is not configured", modelID)
+		}
+		p, err = producersql.New(
+			context.Background(),
+			producersql.Config{
+				ResultQueueName: base + ":" + consumerID,
+				PollInterval:    r.pollInterval,
+				ResultLeaseTTL:  recoveryClaimLeaseTTL,
+			},
+			producersql.WithStore(r.sqlStore),
+		)
 	default:
 		return nil, fmt.Errorf("unsupported async transport %q", r.transport)
 	}

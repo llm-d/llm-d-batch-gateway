@@ -318,21 +318,21 @@ func TestNewAsyncResolver(t *testing.T) {
 			t.Fatal("expected an error when SQL URL is missing")
 		}
 	})
-	t.Run("does not build unsafe SQL recovery clients", func(t *testing.T) {
+	t.Run("SQL recovery requires a store", func(t *testing.T) {
 		r := &AsyncGatewayResolver{
 			transport:  AsyncTransportSQL,
 			routeBases: map[string]string{"model-a": "results:model-a"},
 		}
-		if r.SupportsResultRecovery() {
-			t.Fatal("SQL resolver should not support result recovery")
+		if !r.SupportsResultRecovery() {
+			t.Fatal("SQL resolver should support result recovery")
 		}
 
 		_, err := r.RecoveryClientFor("model-a", "processor-1")
 		if err == nil {
-			t.Fatal("expected SQL recovery to be unsupported")
+			t.Fatal("expected SQL recovery without a store to fail")
 		}
-		if !strings.Contains(err.Error(), "does not support cross-processor result recovery") {
-			t.Fatalf("error = %q, want SQL recovery limitation", err)
+		if !strings.Contains(err.Error(), "SQL recovery route") {
+			t.Fatalf("error = %q, want missing SQL recovery route", err)
 		}
 	})
 }
