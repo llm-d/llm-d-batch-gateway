@@ -384,7 +384,7 @@ func (p *Processor) validateLineForDispatch(line []byte, batchEndpoint string, d
 	}
 	gcsURI, hasGCSURI := body["gcs_uri"]
 	_, hasFileKey := body["file"]
-	file, _ := body["file"].(string)
+	fileBase64, _ := body["file_base64"].(string)
 
 	if isAudioEndpoint(batchEndpoint) {
 		if format, ok := body["response_format"].(string); ok && isPlainTextAudioFormat(format) {
@@ -393,8 +393,8 @@ func (p *Processor) validateLineForDispatch(line []byte, batchEndpoint string, d
 	}
 
 	if hasGCSURI {
-		if hasFileKey {
-			return requestMeta{}, fmt.Errorf("body.gcs_uri and body.file are mutually exclusive")
+		if hasFileKey || fileBase64 != "" {
+			return requestMeta{}, fmt.Errorf("body.gcs_uri is mutually exclusive with body.file and body.file_base64")
 		}
 		if !isAudioEndpoint(batchEndpoint) {
 			return requestMeta{}, fmt.Errorf("gcs_uri is supported only on audio endpoints")
@@ -412,8 +412,8 @@ func (p *Processor) validateLineForDispatch(line []byte, batchEndpoint string, d
 		meta.usesGCSURI = true
 		return meta, nil
 	}
-	if isAudioEndpoint(batchEndpoint) && file == "" {
-		return requestMeta{}, fmt.Errorf("audio requests require body.gcs_uri or body.file")
+	if isAudioEndpoint(batchEndpoint) {
+		return requestMeta{}, fmt.Errorf("audio requests require body.gcs_uri; inline body.file media is not supported")
 	}
 	return meta, nil
 }
@@ -452,7 +452,7 @@ func validateGCSURI(signedURL string, hosts []string, deadline time.Time) error 
 		parsed.Path == "" || parsed.Path == "/" || parsed.RawQuery == "" || parsed.Fragment != "" {
 		return fmt.Errorf("gcs_uri must be an HTTPS URL for a GCS object")
 	}
-	if !hasGCSBucketAndObject(parsed.Path) {
+	if !hasGCSBucketAndObject(parsed.Host, parsed.Path) {
 		return fmt.Errorf("gcs_uri must identify a GCS bucket and object")
 	}
 	if !allowedGCSHost(parsed.Host, hosts) {
@@ -468,16 +468,17 @@ func validateGCSURI(signedURL string, hosts []string, deadline time.Time) error 
 	if query.Get("X-Goog-Date") == "" || query.Get("X-Goog-Expires") == "" {
 		return fmt.Errorf("gcs_uri is missing required V4 expiry fields")
 	}
-	signatureLength := 0
 	switch query.Get("X-Goog-Algorithm") {
 	case "GOOG4-RSA-SHA256":
-		// A service-account RSA-SHA256 signature is 256 bytes, hex-encoded.
-		signatureLength = 512
+		if !isHexSignature(signature) || len(signature)%2 != 0 {
+			return fmt.Errorf("gcs_uri has an invalid signature")
+		}
 	case "GOOG4-HMAC-SHA256":
 		// An HMAC-SHA256 signature is 32 bytes, hex-encoded.
-		signatureLength = 64
-	}
-	if !isHexSignature(signature) || len(signature) != signatureLength {
+		if !isHexSignature(signature) || len(signature) != 64 {
+			return fmt.Errorf("gcs_uri has an invalid signature")
+		}
+	default:
 		return fmt.Errorf("gcs_uri has an invalid signature")
 	}
 	if query.Get("X-Goog-Credential") == "" || query.Get("X-Goog-SignedHeaders") == "" {
@@ -494,10 +495,15 @@ func validateGCSURI(signedURL string, hosts []string, deadline time.Time) error 
 	return nil
 }
 
-// hasGCSBucketAndObject checks that the path is "/<bucket>/<object>". It splits
-// only once after the bucket, because an object name can start with "/".
-func hasGCSBucketAndObject(path string) bool {
-	bucket, object, found := strings.Cut(strings.TrimPrefix(path, "/"), "/")
+// hasGCSBucketAndObject accepts path-style and virtual-hosted GCS object URLs.
+// Path-style URLs split only once after the bucket, because an object name can
+// start with "/".
+func hasGCSBucketAndObject(host, path string) bool {
+	objectPath := strings.TrimPrefix(path, "/")
+	if strings.HasSuffix(strings.ToLower(host), ".storage.googleapis.com") {
+		return objectPath != ""
+	}
+	bucket, object, found := strings.Cut(objectPath, "/")
 	return found && bucket != "" && object != ""
 }
 

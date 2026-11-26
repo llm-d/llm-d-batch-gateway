@@ -252,7 +252,7 @@ For `/v1/audio/transcriptions` and `/v1/audio/translations`, `body.gcs_uri` may
 reference private GCS media with a signed HTTPS URL. The processor validates the
 URL host, signature, and expiry before dispatch, requires `dispatchMode: async`,
 and sends the model's `provider` value as async request metadata. The processor
-does not download the object; vLLM fetches the signed URL.
+does not download the object; llm-d-async downloads it before inference.
 For now, `http://`, `gs://`, and all other schemes are rejected.
 Both GCS V4 signing algorithms are accepted: `GOOG4-RSA-SHA256` and
 `GOOG4-HMAC-SHA256`.
@@ -271,22 +271,28 @@ processor:
           provider: whisper
 ```
 
-Configure the existing llm-d-async transform on the separately deployed chart:
+Configure the llm-d-async transform on the separately deployed chart. The
+llm-d-async version must include `gcs_file_multipart`:
 
 ```yaml
 ap:
   transformConfig:
     requestTransforms:
       - name: gcs-media
-        type: gcs_uri_multipart
+        type: gcs_file_multipart
         parameters:
           providers: ["whisper"]
+          allowedHosts: '["storage.googleapis.com"]'
+          maxFileBytes: "4194304"
 ```
 
-The transform converts `gcs_uri` to the multipart `url` field and removes
-`gcs_uri` from the request sent to vLLM. Requests using the existing
-`body.file` field for S3 or data-URL media are unchanged. Treat signed URLs as
-secrets; do not copy complete URLs into logs.
+The transform downloads the GCS object with the signed URL, writes the bytes to
+the multipart `file` field, and removes `gcs_uri` from the request sent to vLLM.
+Keep `allowedHosts` aligned with `gcsSignedURLHosts`; for a virtual-hosted URL,
+list the exact bucket hostname in both fields. Audio requests must use
+`body.gcs_uri`; inline `body.file` and `body.file_base64` media are not supported
+on these endpoints. Other endpoint request bodies are unchanged. Treat signed
+URLs as secrets; do not copy complete URLs into logs.
 
 ## Usage
 

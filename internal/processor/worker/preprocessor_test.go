@@ -1299,7 +1299,7 @@ func v4GCSURIWithLegacyExpires(expiresAt time.Time, missingFields ...string) str
 
 func TestValidateGCSURI(t *testing.T) {
 	deadline := time.Now().Add(time.Hour)
-	hosts := []string{"storage.googleapis.com"}
+	hosts := []string{"storage.googleapis.com", "bucket.storage.googleapis.com"}
 
 	tests := []struct {
 		name    string
@@ -1307,13 +1307,15 @@ func TestValidateGCSURI(t *testing.T) {
 		wantErr string
 	}{
 		{name: "valid", uri: v4GCSURI(deadline.Add(time.Hour), strings.Repeat("a", 512))},
+		{name: "valid virtual-hosted URL", uri: strings.Replace(v4GCSURI(deadline.Add(time.Hour), strings.Repeat("a", 512)), "storage.googleapis.com/bucket/audio.wav", "bucket.storage.googleapis.com/audio.wav", 1)},
 		{name: "valid HMAC", uri: v4GCSURIWithAlgorithm(deadline.Add(time.Hour), "GOOG4-HMAC-SHA256", strings.Repeat("a", 64))},
 		{name: "expired", uri: v4GCSURI(deadline.Add(-time.Minute), strings.Repeat("a", 512)), wantErr: "expires"},
 		{name: "expires at deadline", uri: v4GCSURI(deadline, strings.Repeat("a", 512)), wantErr: "expires"},
 		{name: "missing signature", uri: "https://storage.googleapis.com/bucket/audio.wav?X-Goog-Date=20260101T000000Z&X-Goog-Expires=60", wantErr: "signature"},
 		{name: "legacy signature", uri: "https://storage.googleapis.com/bucket/audio.wav?Signature=anything&Expires=4102444800", wantErr: "signature"},
 		{name: "invalid signature", uri: v4GCSURI(deadline.Add(time.Hour), "not-hex"), wantErr: "signature"},
-		{name: "short signature", uri: v4GCSURI(deadline.Add(time.Hour), strings.Repeat("a", 64)), wantErr: "signature"},
+		{name: "valid short RSA signature", uri: v4GCSURI(deadline.Add(time.Hour), strings.Repeat("a", 64))},
+		{name: "odd-length RSA signature", uri: v4GCSURI(deadline.Add(time.Hour), "aaa"), wantErr: "signature"},
 		{name: "HMAC signature with RSA length", uri: v4GCSURIWithAlgorithm(deadline.Add(time.Hour), "GOOG4-HMAC-SHA256", strings.Repeat("a", 512)), wantErr: "signature"},
 		{name: "bucket only", uri: "https://storage.googleapis.com/bucket?" + v4SignatureQuery(deadline.Add(time.Hour)), wantErr: "bucket and object"},
 		{name: "bucket with trailing slash", uri: "https://storage.googleapis.com/bucket/?" + v4SignatureQuery(deadline.Add(time.Hour)), wantErr: "bucket and object"},
@@ -1399,16 +1401,16 @@ func TestValidateLineForDispatch_GCSURI(t *testing.T) {
 	t.Run("missing media rejected", func(t *testing.T) {
 		p := newProcessor(config.DispatchModeAsync)
 		_, err := p.validateLineForDispatch(line("/v1/audio/transcriptions", `{"model":"whisper","language":"en"}`), "/v1/audio/transcriptions", deadline)
-		if err == nil || !strings.Contains(err.Error(), "body.gcs_uri or body.file") {
+		if err == nil || !strings.Contains(err.Error(), "audio requests require body.gcs_uri") {
 			t.Fatalf("validateLineForDispatch() error = %v, want missing media error", err)
 		}
 	})
 
-	t.Run("existing file media unchanged", func(t *testing.T) {
+	t.Run("inline file media rejected", func(t *testing.T) {
 		p := newProcessor(config.DispatchModeAsync)
 		_, err := p.validateLineForDispatch(line("/v1/audio/transcriptions", `{"model":"whisper","file":"data:audio/wav;base64,QUJD","language":"en"}`), "/v1/audio/transcriptions", deadline)
-		if err != nil {
-			t.Fatalf("validateLineForDispatch() error = %v, want nil", err)
+		if err == nil || !strings.Contains(err.Error(), "inline body.file media is not supported") {
+			t.Fatalf("validateLineForDispatch() error = %v, want inline media error", err)
 		}
 	})
 
@@ -1416,6 +1418,18 @@ func TestValidateLineForDispatch_GCSURI(t *testing.T) {
 		p := newProcessor(config.DispatchModeAsync)
 		_, err := p.validateLineForDispatch(
 			line("/v1/audio/transcriptions", `{"model":"whisper","gcs_uri":"`+validURI+`","file":"data:audio/wav;base64,QUJD","language":"en"}`),
+			"/v1/audio/transcriptions",
+			deadline,
+		)
+		if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Fatalf("validateLineForDispatch() error = %v, want mutually exclusive error", err)
+		}
+	})
+
+	t.Run("gcs_uri and file_base64 media rejected", func(t *testing.T) {
+		p := newProcessor(config.DispatchModeAsync)
+		_, err := p.validateLineForDispatch(
+			line("/v1/audio/transcriptions", `{"model":"whisper","gcs_uri":"`+validURI+`","file_base64":"QUJD","language":"en"}`),
 			"/v1/audio/transcriptions",
 			deadline,
 		)
@@ -1456,7 +1470,7 @@ func TestValidateLineForDispatch_GCSURI(t *testing.T) {
 			"/v1/audio/transcriptions",
 			deadline,
 		)
-		if err == nil || !strings.Contains(err.Error(), "body.gcs_uri or body.file") {
+		if err == nil || !strings.Contains(err.Error(), "audio requests require body.gcs_uri") {
 			t.Fatalf("validateLineForDispatch() error = %v, want missing media error", err)
 		}
 	})
@@ -1485,15 +1499,17 @@ func TestValidateLineForDispatch_GCSURI(t *testing.T) {
 	// store them. They must be rejected up front for every kind of media.
 	t.Run("response_format", func(t *testing.T) {
 		media := map[string]string{
-			"gcs_uri": `"gcs_uri":"` + validURI + `"`,
-			"file":    `"file":"data:audio/wav;base64,QUJD"`,
+			"gcs_uri":     `"gcs_uri":"` + validURI + `"`,
+			"file":        `"file":"data:audio/wav;base64,QUJD"`,
+			"file_base64": `"file_base64":"QUJD"`,
 		}
 		tests := []struct {
-			name     string
-			endpoint string
-			media    string
-			format   string
-			wantErr  bool
+			name            string
+			endpoint        string
+			media           string
+			format          string
+			wantErr         bool
+			wantErrContains string
 		}{
 			{name: "gcs_uri json", endpoint: "/v1/audio/transcriptions", media: "gcs_uri", format: "json"},
 			{name: "gcs_uri verbose_json", endpoint: "/v1/audio/transcriptions", media: "gcs_uri", format: "verbose_json"},
@@ -1501,7 +1517,8 @@ func TestValidateLineForDispatch_GCSURI(t *testing.T) {
 			{name: "gcs_uri srt", endpoint: "/v1/audio/transcriptions", media: "gcs_uri", format: "srt", wantErr: true},
 			{name: "gcs_uri vtt", endpoint: "/v1/audio/transcriptions", media: "gcs_uri", format: "vtt", wantErr: true},
 			{name: "gcs_uri text on translations", endpoint: "/v1/audio/translations", media: "gcs_uri", format: "text", wantErr: true},
-			{name: "file json", endpoint: "/v1/audio/transcriptions", media: "file", format: "json"},
+			{name: "file json", endpoint: "/v1/audio/transcriptions", media: "file", format: "json", wantErr: true, wantErrContains: "inline body.file media is not supported"},
+			{name: "file_base64 json", endpoint: "/v1/audio/transcriptions", media: "file_base64", format: "json", wantErr: true, wantErrContains: "audio requests require body.gcs_uri"},
 			{name: "file text", endpoint: "/v1/audio/transcriptions", media: "file", format: "text", wantErr: true},
 			{name: "file srt", endpoint: "/v1/audio/transcriptions", media: "file", format: "srt", wantErr: true},
 			{name: "file vtt on translations", endpoint: "/v1/audio/translations", media: "file", format: "vtt", wantErr: true},
@@ -1517,8 +1534,12 @@ func TestValidateLineForDispatch_GCSURI(t *testing.T) {
 					}
 					return
 				}
-				if err == nil || !strings.Contains(err.Error(), "response_format") {
-					t.Fatalf("validateLineForDispatch() error = %v, want response_format error", err)
+				wantErrContains := tt.wantErrContains
+				if wantErrContains == "" {
+					wantErrContains = "response_format"
+				}
+				if err == nil || !strings.Contains(err.Error(), wantErrContains) {
+					t.Fatalf("validateLineForDispatch() error = %v, want error containing %q", err, wantErrContains)
 				}
 			})
 		}

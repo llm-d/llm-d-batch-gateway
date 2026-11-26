@@ -114,7 +114,7 @@ const (
 )
 
 const (
-	// AsyncProviderMetadataKey selects the gcs_uri_multipart transform in llm-d-async.
+	// AsyncProviderMetadataKey selects the gcs_file_multipart transform in llm-d-async.
 	AsyncProviderMetadataKey = "provider"
 	// DefaultGCSSignedURLHost is the only signed GCS URL host accepted by default.
 	DefaultGCSSignedURLHost = "storage.googleapis.com"
@@ -145,7 +145,7 @@ type AsyncModelConfig struct {
 	ResultQueueName string `yaml:"result_queue_name"`
 
 	// Provider is sent as async request metadata so llm-d-async can select a
-	// request transform such as gcs_uri_multipart.
+	// request transform such as gcs_file_multipart.
 	Provider string `yaml:"provider"`
 }
 
