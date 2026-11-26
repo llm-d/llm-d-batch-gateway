@@ -20,6 +20,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -93,6 +94,68 @@ func (s *StatusUpdater) CheckJobStatus(ctx context.Context, jobID string, epoch 
 		return "", fmt.Errorf("CheckJobStatus: %w", db.ErrConflict)
 	}
 	return info.Status, nil
+}
+
+// maxTransitionAttempts bounds the read/CAS loop of TransitionPersistentStatus.
+const maxTransitionAttempts = 3
+
+// TransitionPersistentStatus writes newStatus only while the persisted row is
+// still owned at dbJob.Epoch and in fromStatus. The write is a CAS on the
+// row's current status document, the same fence the API server's cancel
+// takes, so a concurrent cancelling write cannot be overwritten: whichever
+// transition lands second sees a changed row. A row already in newStatus (a
+// re-run of the same transition) is left as is. dbJob.Status is refreshed
+// from the row either way.
+//
+// It returns the row's lifecycle status. A row owned by another epoch, or in
+// any status other than fromStatus or newStatus, is not written and returns
+// db.ErrConflict, together with that status when the row is still owned.
+func (s *StatusUpdater) TransitionPersistentStatus(
+	ctx context.Context,
+	dbJob *db.BatchItem,
+	fromStatus, newStatus openai.BatchStatus,
+) (openai.BatchStatus, error) {
+	if dbJob == nil {
+		return "", fmt.Errorf("dbJob is nil")
+	}
+	for attempt := 1; ; attempt++ {
+		items, _, _, err := s.db.DBGet(ctx,
+			&db.BatchQuery{
+				BaseQuery: db.BaseQuery{IDs: []string{dbJob.ID}},
+			},
+			false, 0, 1)
+		if err != nil {
+			return "", err
+		}
+		if len(items) == 0 || items[0].Epoch != dbJob.Epoch {
+			return "", fmt.Errorf("TransitionPersistentStatus: %w", db.ErrConflict)
+		}
+		row := items[0]
+
+		var info openai.BatchStatusInfo
+		if err := json.Unmarshal(row.Status, &info); err != nil {
+			return "", fmt.Errorf("unmarshal job status: %w", err)
+		}
+		dbJob.Status = row.Status
+		switch info.Status {
+		case newStatus:
+			return newStatus, nil
+		case fromStatus:
+		default:
+			return info.Status, fmt.Errorf("TransitionPersistentStatus: %s is %s, not %s: %w",
+				dbJob.ID, info.Status, fromStatus, db.ErrConflict)
+		}
+
+		err = s.updatePersistentStatus(ctx, dbJob, newStatus, nil, nil, row.Status)
+		if err == nil {
+			return newStatus, nil
+		}
+		if !errors.Is(err, db.ErrConflict) || attempt == maxTransitionAttempts {
+			return "", err
+		}
+		// The row moved between the read and the CAS (a progress write or a
+		// cancel): re-read it and decide again.
+	}
 }
 
 // UpdatePersistentStatus writes the job status to the persistent database (e.g. PostgreSQL).

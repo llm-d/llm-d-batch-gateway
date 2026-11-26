@@ -99,6 +99,33 @@ func (r *rowSyncedResumable) FinalizeResumableBatch(ctx context.Context, fin *db
 	return nil
 }
 
+// ActivateResumableBatch mirrors the activation CTE's validating →
+// in_progress status write (with in_progress_at) into the row mock, so the
+// finalizer's CAS on the persisted status sees what production committed.
+func (r *rowSyncedResumable) ActivateResumableBatch(ctx context.Context, activation *db.ResumableActivation) error {
+	if err := r.MockResumableStore.ActivateResumableBatch(ctx, activation); err != nil {
+		return err
+	}
+	items, _, _, err := r.rows.DBGet(ctx, &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{activation.BatchID}}}, true, 0, 1)
+	if err != nil || len(items) != 1 {
+		return fmt.Errorf("mirror activation of %s into row mock: err=%v len=%d", activation.BatchID, err, len(items))
+	}
+	item := *items[0]
+	var status map[string]any
+	if err := json.Unmarshal(item.Status, &status); err != nil {
+		return fmt.Errorf("mirror activation of %s into row mock: %w", activation.BatchID, err)
+	}
+	status["status"] = string(openai.BatchStatusInProgress)
+	status["in_progress_at"] = time.Now().Unix()
+	if item.Status, err = json.Marshal(status); err != nil {
+		return fmt.Errorf("mirror activation of %s into row mock: %w", activation.BatchID, err)
+	}
+	if err := r.rows.DBStore(ctx, &item); err != nil {
+		return fmt.Errorf("mirror activation of %s into row mock: %w", activation.BatchID, err)
+	}
+	return nil
+}
+
 // durableInputLine builds one input line for the given model and custom ID.
 func durableInputLine(model, customID string) string {
 	return fmt.Sprintf(`{"custom_id":%q,"method":"POST","url":"/v1/chat/completions","body":{"model":%q,"messages":[{"role":"user","content":"hi"}]}}`+"\n", customID, model)
@@ -1432,6 +1459,56 @@ func TestFinalizeResumableJob_CancelDuringFinalization(t *testing.T) {
 		if outLines[i].ID != want {
 			t.Fatalf("output line %d id = %s, want %s", i, outLines[i].ID, want)
 		}
+	}
+}
+
+// TestFinalizeResumableJob_CancelPersistedBeforeFinalizing covers a user
+// cancel that the API server persisted after execution finished but before
+// the finalizer's in_progress → finalizing write, with the cancel event not
+// delivered yet. The finalizing write must not overwrite cancelling: the
+// batch finalizes through the fenced cancelling → cancelled transition, not
+// as completed.
+func TestFinalizeResumableJob_CancelPersistedBeforeFinalizing(t *testing.T) {
+	const jobID = "job-resumable-cancel-before-fin"
+
+	env := setupDurableJob(t, jobID, []string{"test-model", "test-model"})
+	stageFinalizingClaim(t, env, jobID)
+
+	// markCancelling's CAS on the in_progress row; env.jobItem, the
+	// finalizer's in-memory copy, still says in_progress.
+	items, _, _, err := env.dbClient.DBGet(context.Background(), &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{jobID}}}, true, 0, 1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("DBGet %s: err=%v len=%d", jobID, err, len(items))
+	}
+	row := *items[0]
+	cancellingAt := time.Now().Unix()
+	row.Status = mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusCancelling, CancellingAt: &cancellingAt})
+	resumable := true
+	row.ExpectedResumable = &resumable
+	if err := env.dbClient.DBUpdate(testLoggerCtx(t), &row, items[0].Status); err != nil {
+		t.Fatalf("DBUpdate cancelling row: %v", err)
+	}
+
+	err = env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo)
+	if !errors.Is(err, batchctx.ErrCancelled) {
+		t.Fatalf("error = %v, want batchctx.ErrCancelled", err)
+	}
+
+	status := durableJobStatus(t, env)
+	if status.Status != openai.BatchStatusCancelled {
+		t.Fatalf("status = %s, want cancelled (the persisted cancel must not be overwritten)", status.Status)
+	}
+	if status.CancellingAt == nil {
+		t.Fatal("cancelling_at was dropped; the terminal document must build on the cancelling row")
+	}
+	wantCounts := openai.BatchRequestCounts{Total: 2, Completed: 2, Failed: 0}
+	if status.RequestCounts != wantCounts {
+		t.Fatalf("counts = %+v, want %+v", status.RequestCounts, wantCounts)
+	}
+	outLines := readArtifactLines(t, env,
+		ucom.FileStorageName(stableFileID(jobID, metrics.FileTypeOutput), jobOutputStorageName(jobID)))
+	if len(outLines) != 2 {
+		t.Fatalf("output artifact lines = %d, want 2", len(outLines))
 	}
 }
 
