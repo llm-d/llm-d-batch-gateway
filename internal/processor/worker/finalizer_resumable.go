@@ -64,6 +64,7 @@ func (p *Processor) finalizeResumableJob(
 	updater *StatusUpdater,
 	dbJob *db.BatchItem,
 	jobInfo *batch_types.JobInfo,
+	execCounts *openai.BatchRequestCounts,
 ) error {
 	logger := logr.FromContextOrDiscard(ctx)
 	logger.V(logging.INFO).Info("Starting finalization: resumable job")
@@ -79,8 +80,11 @@ func (p *Processor) finalizeResumableJob(
 	dbJob.ExpectedResumable = &resumable
 
 	// in_progress → finalizing, before artifact assembly so the API server
-	// can reject cancel requests once finalization has begun.
-	if err := updater.UpdatePersistentStatus(ioCtx, dbJob, openai.BatchStatusFinalizing, nil, nil); err != nil {
+	// can reject cancel requests once finalization has begun. It carries the
+	// execution counts: progress writes update the stored row only, so
+	// without them the document is built from dbJob's stale counts and
+	// request_counts loses the batch's progress for the whole finalization.
+	if err := updater.UpdatePersistentStatus(ioCtx, dbJob, openai.BatchStatusFinalizing, execCounts, nil); err != nil {
 		return fmt.Errorf("failed to update job status to finalizing: %w", err)
 	}
 
