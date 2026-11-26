@@ -518,13 +518,17 @@ func (c *PostgresResumableStore) FindEntryByRequestID(ctx context.Context, batch
 // HasOpenEntryByRequest reports whether any batch still awaits the result of
 // the request ID (pending or in_flight entry). Request IDs are stable and
 // batch-scoped, so at most one batch matches; the EXISTS over all batches is
-// conservative if duplicates ever existed.
+// conservative if duplicates ever existed. Only a live resumable batch awaits
+// a result: FinalizeResumableBatch leaves the entries of a cancelled or failed
+// batch open, and no owner will ever route a late result for them.
 func (c *PostgresResumableStore) HasOpenEntryByRequest(ctx context.Context, requestID string) (bool, error) {
 	var open bool
 	if err := c.pool.QueryRow(ctx,
 		`SELECT EXISTS(
-			SELECT 1 FROM batch_entries
-			WHERE request_id = $1 AND status IN ('pending','in_flight'))`,
+			SELECT 1 FROM batch_entries e
+			JOIN batch_items b ON b.id = e.batch_id
+			WHERE e.request_id = $1 AND e.status IN ('pending','in_flight')
+			  AND b.resumable = TRUE AND `+buildNonTerminalCondition("b."+colStatus)+`)`,
 		requestID,
 	).Scan(&open); err != nil {
 		return false, fmt.Errorf("HasOpenEntryByRequest: %w", err)

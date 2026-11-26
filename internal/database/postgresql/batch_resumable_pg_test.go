@@ -1029,3 +1029,41 @@ func TestResumableSubmitterTrackingPG(t *testing.T) {
 		}
 	})
 }
+
+// TestHasOpenEntryByRequestTerminalBatchPG pins the residue check against a
+// finalized batch: FinalizeResumableBatch leaves the entries of a cancelled
+// or failed batch open, and a late result for one of them must still be
+// acknowledged instead of being redelivered forever.
+func TestHasOpenEntryByRequestTerminalBatchPG(t *testing.T) {
+	env := newResumablePgEnv(t)
+
+	const batchID = "batch-residue"
+	epoch := env.activate(t, batchID)
+	if _, err := env.store.MarkEntryInFlight(env.ctx, batchID, "batch_req_a", testProcessorID, epoch); err != nil {
+		t.Fatalf("MarkEntryInFlight: %v", err)
+	}
+
+	t.Run("open entries of a live batch hold their results", func(t *testing.T) {
+		for _, requestID := range []string{"batch_req_a", "batch_req_b"} {
+			open, err := env.store.HasOpenEntryByRequest(env.ctx, requestID)
+			if err != nil || !open {
+				t.Fatalf("HasOpenEntryByRequest(%s) = %v (err %v), want true", requestID, open, err)
+			}
+		}
+	})
+
+	t.Run("open entries of a finalized batch release their results", func(t *testing.T) {
+		if err := env.store.FinalizeResumableBatch(env.ctx, &api.ResumableFinalization{
+			BatchID: batchID, ProcessorID: testProcessorID, Epoch: epoch,
+			ExpectedStatus: "in_progress", Status: []byte(`{"status":"cancelled"}`),
+		}); err != nil {
+			t.Fatalf("FinalizeResumableBatch: %v", err)
+		}
+		for _, requestID := range []string{"batch_req_a", "batch_req_b"} {
+			open, err := env.store.HasOpenEntryByRequest(env.ctx, requestID)
+			if err != nil || open {
+				t.Fatalf("HasOpenEntryByRequest(%s) = %v (err %v), want false", requestID, open, err)
+			}
+		}
+	})
+}

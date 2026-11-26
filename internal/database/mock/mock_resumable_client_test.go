@@ -478,3 +478,33 @@ func TestMockResumableStore_Queries(t *testing.T) {
 		}
 	})
 }
+
+func TestMockResumableStore_HasOpenEntryByRequest(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name     string
+		finalize bool
+		want     bool
+	}{
+		{name: "open entry of a live batch", finalize: false, want: true},
+		{name: "open entry of a finalized batch", finalize: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, _ := seedActivated(t)
+			if tt.finalize {
+				if err := store.FinalizeResumableBatch(ctx, &api.ResumableFinalization{
+					BatchID: "job-1", ProcessorID: "proc-1", Epoch: activationEpoch,
+					ExpectedStatus: "in_progress", Status: []byte(`{"status":"cancelled"}`),
+				}); err != nil {
+					t.Fatalf("FinalizeResumableBatch: %v", err)
+				}
+			}
+			open, err := store.HasOpenEntryByRequest(ctx, "r-1")
+			if err != nil || open != tt.want {
+				t.Fatalf("HasOpenEntryByRequest(r-1) = %v (err %v), want %v", open, err, tt.want)
+			}
+		})
+	}
+}

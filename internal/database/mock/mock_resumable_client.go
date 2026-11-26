@@ -409,6 +409,9 @@ func (m *MockResumableStore) HasOpenEntryByRequest(_ context.Context, requestID 
 	defer m.mu.Unlock()
 
 	for _, b := range m.batches {
+		if b.terminal || !b.resumable {
+			continue
+		}
 		for _, e := range b.entries {
 			if e.RequestID == requestID && !e.Status.IsTerminal() {
 				return true, nil
