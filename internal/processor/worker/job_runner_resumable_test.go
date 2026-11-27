@@ -1157,7 +1157,7 @@ func TestFinalizeResumableJob_RefinalizesIdempotently(t *testing.T) {
 	outKey := ucom.FileStorageName(outFileID, jobOutputStorageName(jobID))
 	wantLines := readArtifactLines(t, env, outKey)
 
-	if err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo); err != nil {
+	if err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo, nil); err != nil {
 		t.Fatalf("finalizeResumableJob: %v", err)
 	}
 
@@ -1219,7 +1219,7 @@ func TestFinalizeResumableJob_IntegrityFailureLeavesRowRetryable(t *testing.T) {
 		t.Fatalf("store corrupted object: %v", err)
 	}
 
-	err = env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo)
+	err = env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo, nil)
 	if err == nil || errors.Is(err, errFinalizeFailedOver) {
 		t.Fatalf("error = %v, want the surfaced assembly failure", err)
 	}
@@ -1249,7 +1249,7 @@ func TestFinalizeResumableJob_IntegrityFailureLeavesRowRetryable(t *testing.T) {
 		t.Fatalf("delete corrupted object for retry: %v", err)
 	}
 	storeCheckpointedResult(t, env.filesClient, env.jobInfo.TenantID, jobID, "req-2")
-	if err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo); err != nil {
+	if err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo, nil); err != nil {
 		t.Fatalf("retry finalizeResumableJob: %v", err)
 	}
 	status := durableJobStatus(t, env)
@@ -1287,6 +1287,74 @@ func (w *failingCommitWriter) Commit(ctx context.Context) (*filesapi.BatchFileMe
 	return nil, errors.New("injected error-artifact commit failure")
 }
 
+// TestFinalizeResumableJob_FinalizingRequestCounts covers the request counts
+// of the in_progress → finalizing write. Progress writes update the stored
+// row only, so the document must take the counts from execution; built from
+// dbJob alone it would report the batch's progress as lost until completion.
+// Artifact assembly is failed on purpose so the row stays in finalizing.
+func TestFinalizeResumableJob_FinalizingRequestCounts(t *testing.T) {
+	tests := []struct {
+		name       string
+		execCounts *openai.BatchRequestCounts
+		want       openai.BatchRequestCounts
+	}{
+		{
+			name:       "execution counts are written",
+			execCounts: &openai.BatchRequestCounts{Total: 2, Completed: 1, Failed: 1},
+			want:       openai.BatchRequestCounts{Total: 2, Completed: 1, Failed: 1},
+		},
+		{
+			name: "without execution counts the row's counts are kept",
+			want: openai.BatchRequestCounts{Total: 2},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const jobID = "job-resumable-finalizing-counts"
+
+			env := setupDurableJob(t, jobID, []string{"test-model", "test-model"})
+			// The row as the processor holds it: activated, no progress yet.
+			env.jobItem.Status = mustJSON(t, openai.BatchStatusInfo{
+				Status:        openai.BatchStatusInProgress,
+				RequestCounts: openai.BatchRequestCounts{Total: 2},
+			})
+			env.jobItem.Epoch = 2
+			if err := env.dbClient.DBStore(testLoggerCtx(t), env.jobItem); err != nil {
+				t.Fatalf("DBStore job item: %v", err)
+			}
+			env.stageResumedClaim(t, 2,
+				checkpointedLineEntry(t, env, jobID, "req-1", 0),
+				rejectedLineEntry(t, env, jobID, "req-2", 1),
+			)
+			errKey := ucom.FileStorageName(stableFileID(jobID, metrics.FileTypeError), jobErrorStorageName(jobID))
+			env.p.files.storage = &failingCommitFilesClient{
+				MockBatchFilesClient: env.p.files.storage.(*mockfiles.MockBatchFilesClient),
+				failKey:              errKey,
+			}
+
+			err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo, tt.execCounts)
+			if err == nil {
+				t.Fatal("finalizeResumableJob succeeded, want the injected assembly failure")
+			}
+
+			items, _, _, err := env.dbClient.DBGet(context.Background(), &db.BatchQuery{BaseQuery: db.BaseQuery{IDs: []string{jobID}}}, true, 0, 1)
+			if err != nil || len(items) != 1 {
+				t.Fatalf("DBGet %s: err=%v len=%d", jobID, err, len(items))
+			}
+			var status openai.BatchStatusInfo
+			if err := json.Unmarshal(items[0].Status, &status); err != nil {
+				t.Fatalf("unmarshal status: %v", err)
+			}
+			if status.Status != openai.BatchStatusFinalizing {
+				t.Fatalf("status = %s, want %s", status.Status, openai.BatchStatusFinalizing)
+			}
+			if status.RequestCounts != tt.want {
+				t.Fatalf("request_counts while finalizing = %+v, want %+v", status.RequestCounts, tt.want)
+			}
+		})
+	}
+}
+
 // TestFinalizeResumableJob_ErrorArtifactCommitFailureKeepsOutput covers the
 // window between the output artifact's commit and the error artifact's:
 // the failure returns the error without a terminal write, so the row stays
@@ -1315,7 +1383,7 @@ func TestFinalizeResumableJob_ErrorArtifactCommitFailureKeepsOutput(t *testing.T
 		failKey:              errKey,
 	}
 
-	err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo)
+	err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo, nil)
 	if err == nil || errors.Is(err, errFinalizeFailedOver) {
 		t.Fatalf("finalizeResumableJob error = %v, want the surfaced assembly failure", err)
 	}
@@ -1341,7 +1409,7 @@ func TestFinalizeResumableJob_ErrorArtifactCommitFailureKeepsOutput(t *testing.T
 	// (existing mode), the error artifact commits, and the fenced terminal
 	// write records both.
 	env.p.files.storage = env.filesClient
-	if err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo); err != nil {
+	if err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo, nil); err != nil {
 		t.Fatalf("retry finalizeResumableJob: %v", err)
 	}
 	status := durableJobStatus(t, env)
@@ -1374,7 +1442,7 @@ func TestFinalizeResumableJob_FencedOutZombieCannotComplete(t *testing.T) {
 	// The claim's lease (staged with a one-minute TTL) has expired.
 	env.resumable.Now = func() time.Time { return time.Now().Add(2 * time.Minute) }
 
-	err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo)
+	err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo, nil)
 	if !errors.Is(err, db.ErrConflict) {
 		t.Fatalf("error = %v, want a fenced-out conflict", err)
 	}
@@ -1405,7 +1473,7 @@ func TestFinalizeResumableJob_CancelDuringFinalization(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	cancel(batchctx.ErrCancelled)
 
-	err := env.p.finalizeResumableJob(ctx, NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo)
+	err := env.p.finalizeResumableJob(ctx, NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo, nil)
 	if !errors.Is(err, batchctx.ErrCancelled) {
 		t.Fatalf("error = %v, want batchctx.ErrCancelled", err)
 	}
@@ -1968,7 +2036,7 @@ func TestRunJob_Resumable_PanicAfterCheckpointLeavesRowRetryable(t *testing.T) {
 	// The replacement incarnation a requeue delivers finalizes from the
 	// checkpointed entries and completes the batch.
 	env.p.files.storage = env.filesClient
-	if err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo); err != nil {
+	if err := env.p.finalizeResumableJob(testLoggerCtx(t), NewStatusUpdater(env.dbClient), env.jobItem, env.jobInfo, nil); err != nil {
 		t.Fatalf("retry finalizeResumableJob: %v", err)
 	}
 	status := durableJobStatus(t, env)
