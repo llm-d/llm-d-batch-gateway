@@ -117,8 +117,14 @@ CREATE TABLE IF NOT EXISTS batch_entries (
 -- Schema migration for entries written before submitter tracking existed.
 ALTER TABLE batch_entries ADD COLUMN IF NOT EXISTS submitted_by TEXT;
 CREATE INDEX IF NOT EXISTS idx_batch_entries_ordinal ON batch_entries (batch_id, ordinal);
-CREATE INDEX IF NOT EXISTS idx_batch_entries_open
-    ON batch_entries (batch_id) WHERE status IN ('pending','in_flight');
+-- Open entries, keyed down to the request. The entry writes look one entry up
+-- by (batch_id, request_id) with an open-status filter, and the planner may
+-- pick this partial index over the primary key; keyed on batch_id alone it
+-- then scanned every open entry of the batch per write (quadratic in batch
+-- size until autoanalyze caught up).
+DROP INDEX IF EXISTS idx_batch_entries_open;
+CREATE INDEX IF NOT EXISTS idx_batch_entries_open_request
+    ON batch_entries (batch_id, request_id) WHERE status IN ('pending','in_flight');
 -- Global lookup by request ID: request IDs are stable and batch-scoped
 -- (SHA-1 of batch ID + custom ID), so the residue check can resolve an
 -- unrouted delivery to its entry without knowing the batch. Not UNIQUE:
