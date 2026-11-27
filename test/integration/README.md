@@ -16,7 +16,7 @@ Integration tests validate feature-level behavior through the real HTTP stack �
 
 ## Prerequisites
 
-- Go 1.27.3+
+- Go 1.27.4+
 - Docker or Podman (optional, for inference client tests and the GCS emulator)
 - S3-compatible service (optional, for S3 tests — set `S3_TEST_ENDPOINT`)
 - GCS-compatible service (optional, for GCS tests — `make test-integration-gcs` provisions fake-gcs-server automatically; or set `GCS_TEST_BUCKET`/`GCS_TEST_PROJECT` to use real GCS via ADC, or `STORAGE_EMULATOR_HOST` to point the SDK at a manually-started emulator)
