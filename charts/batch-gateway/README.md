@@ -113,6 +113,17 @@ This procedure requires operator coordination. Accepted batches do not retain a 
 
 The endpoint remains batch-scoped: every request URL in the input JSONL must exactly match the endpoint declared when creating the batch. The configured path is forwarded unchanged in synchronous and asynchronous dispatch modes. Omitting `global.extraEndpoints` preserves the default OpenAI-only behavior.
 
+#### Media endpoints
+
+`/v1/audio/transcriptions`, `/v1/audio/translations` (vLLM) and `/v1/images/edits` (vllm-omni) accept only `multipart/form-data`, so they need `processor.config.dispatchMode: async` and an llm-d Async with the `s3_multipart` request transform (llm-d/llm-d-async#548). The transform rewrites each JSON batch line into the multipart body; configure it with `ap.transformConfig` on the llm-d Async release and give it storage credentials through `ap.env`. A processor in sync mode refuses to start when `extraEndpoints` lists one of them. Like the transform, the gateway recognizes these endpoints by path suffix, so the same rules apply when one is enabled under a prefix (for example `/api/v1/audio/transcriptions`).
+
+Input lines reference media as `s3://bucket/key` or as `data:` URLs:
+
+- Transcriptions and translations: `file` is the audio, an `s3://` reference or a base64 `data:` URL. `response_format` must be absent, `json`, or `verbose_json`.
+- Image edits: `images` is a list of `{"image_url": ...}`, each an `s3://` reference or a base64 `data:image/` URL; `file_id`, a non-null `mask`, and caller-supplied `url`, `url[]`, `mask_image` or `reference_image` fields are rejected. `response_format` must be absent or `b64_json`.
+
+An `s3://` reference into the gateway's files bucket must sit under the batch tenant's folder (`[prefix/]t-<hash>/`), so a batch can only read its own tenant's uploads; any other reference fails the batch at ingestion. This check needs the files store to be S3 (`global.fileClient.type: s3`); with any other files store there is no files bucket to guard. References to other buckets are governed only by the transform's `allowedBuckets`, which every tenant can read: never list a bucket there that holds data any tenant must not see.
+
 ### Resumable pipeline tunables
 
 `processor.config.resumable` tunes the durable pipeline that async dispatch always runs on — there is no enabled flag; `processor.config.dispatchMode` is the mode boundary.

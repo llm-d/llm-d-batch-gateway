@@ -69,6 +69,12 @@ ENABLE_GIE="${ENABLE_GIE:-false}"
 # llm-d-async dev fixtures; sync dispatch is required for per-model EPPs and custom layouts.
 # Set DISPATCHER_SOURCE to a local llm-d-async checkout to build from source.
 ENABLE_DISPATCHER="${ENABLE_DISPATCHER:-false}"
+# Set ENABLE_DISPATCHER_MEDIA=true (with ENABLE_DISPATCHER=true) to also deploy the
+# multipart media fixtures: the media-echo test backend and the dispatcher-media release.
+# Its s3_multipart request transform needs an llm-d-async with llm-d/llm-d-async#548,
+# so set DISPATCHER_SOURCE or DISPATCHER_IMAGE; the pinned release image lacks it.
+ENABLE_DISPATCHER_MEDIA="${ENABLE_DISPATCHER_MEDIA:-false}"
+MEDIA_ECHO_IMAGE="${MEDIA_ECHO_IMAGE:-localhost/batch-gateway-mediaecho:dev}"
 # EPP comes from the llm-d-router standalone chart. The InferencePool CRD comes
 # from GAIE; InferenceObjective and InferenceModelRewrite CRDs come from
 # llm-d-router. Chart "v0" is built from router main (llm-d.ai/v1 is only there
@@ -129,6 +135,28 @@ check_prerequisites() {
         if [ -n "${DISPATCHER_SOURCE:-}" ] && [ ! -f "${DISPATCHER_SOURCE}/charts/llm-d-async/Chart.yaml" ]; then
             die "DISPATCHER_SOURCE must contain charts/llm-d-async/Chart.yaml. Fix the checkout path or set ENABLE_DISPATCHER=false for sync deployment."
         fi
+    fi
+    case "${ENABLE_DISPATCHER_MEDIA}" in
+        true|false) ;;
+        *) die "ENABLE_DISPATCHER_MEDIA must be true or false." ;;
+    esac
+    if [ "${ENABLE_DISPATCHER_MEDIA}" = "true" ]; then
+        if [ "${ENABLE_DISPATCHER}" != "true" ]; then
+            die "ENABLE_DISPATCHER_MEDIA=true requires ENABLE_DISPATCHER=true: the media endpoints only work through async dispatch."
+        fi
+        if [ -z "${DISPATCHER_SOURCE:-}" ] && [ -z "${DISPATCHER_IMAGE:-}" ]; then
+            die "ENABLE_DISPATCHER_MEDIA=true needs an llm-d-async with the s3_multipart transform (llm-d/llm-d-async#548): set DISPATCHER_SOURCE or DISPATCHER_IMAGE."
+        fi
+        # test/e2e/dispatcher/helm-values-media.yaml reads the gateway's files store.
+        local media_setting
+        for media_setting in FILE_CLIENT_TYPE=s3 S3_ACCESS_KEY=s3admin S3_REGION=us-east-1 \
+            S3_BUCKET=llm-d-batch-gateway APP_SECRET_NAME=batch-gateway-secrets \
+            SEAWEEDFS_NAME=seaweedfs SEAWEEDFS_S3_PORT=8333; do
+            local media_name="${media_setting%%=*}" media_expected="${media_setting#*=}"
+            if [ "${!media_name}" != "${media_expected}" ]; then
+                die "Media dev fixtures require ${media_setting} (got ${!media_name})."
+            fi
+        done
     fi
     local missing=()
     local required=(kubectl helm kind make)
@@ -958,6 +986,70 @@ EOF
     log "vllm-vcr installed. Service: ${sim_name}:8000 (control API :${VLLM_SIM_CONTROL_PORT})"
 }
 
+# install_media_echo deploys the test-only stand-in for the multipart media
+# backends (test/e2e/mediaecho) as Service media-echo:8000.
+install_media_echo() {
+    step "Building and loading media-echo image '${MEDIA_ECHO_IMAGE}'..."
+    "${CONTAINER_TOOL}" build -t "${MEDIA_ECHO_IMAGE}" "${REPO_ROOT}/test/e2e/mediaecho"
+    kind load docker-image "${MEDIA_ECHO_IMAGE}" --name "${KIND_CLUSTER}"
+
+    kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: media-echo
+  namespace: ${NAMESPACE}
+  labels:
+    app: media-echo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: media-echo
+  template:
+    metadata:
+      labels:
+        app: media-echo
+    spec:
+      containers:
+      - name: media-echo
+        image: ${MEDIA_ECHO_IMAGE}
+        imagePullPolicy: Never
+        ports:
+        - name: http
+          containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 2
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: media-echo
+  namespace: ${NAMESPACE}
+  labels:
+    app: media-echo
+spec:
+  selector:
+    app: media-echo
+  ports:
+  - name: http
+    protocol: TCP
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP
+EOF
+
+    wait_for_deployment media-echo "${NAMESPACE}" 120s
+    log "media-echo installed. Service: media-echo:8000"
+}
+
 # ── Router EPP and GAIE InferencePool support ─────────────────────────────────
 
 install_gie_crds() {
@@ -1146,6 +1238,9 @@ install_batch_gateway() {
 
     if [ "${ENABLE_DISPATCHER}" = "true" ]; then
         helm_args+=(--values "${REPO_ROOT}/test/e2e/dispatcher/processor-async-values.yaml")
+        if [ "${ENABLE_DISPATCHER_MEDIA}" = "true" ]; then
+            helm_args+=(--values "${REPO_ROOT}/test/e2e/dispatcher/processor-media-values.yaml")
+        fi
     else
         helm_args+=(
             --set processor.config.dispatchMode=sync
@@ -1538,6 +1633,9 @@ main() {
         install_gie_epp "${VLLM_SIM_NAME}" "${VLLM_SIM_MODEL}"
         install_gie_epp "${VLLM_SIM_B_NAME}" "${VLLM_SIM_B_MODEL}"
         create_inference_objectives
+    fi
+    if [ "${ENABLE_DISPATCHER_MEDIA}" = "true" ]; then
+        install_media_echo
     fi
     if [ "${ENABLE_DISPATCHER}" = "true" ]; then
         source "${SCRIPT_DIR}/dev-deploy-dispatcher.sh"

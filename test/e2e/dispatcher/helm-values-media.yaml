@@ -1,0 +1,53 @@
+# Async dispatcher for the multipart media endpoints (release dispatcher-media,
+# deployed with ENABLE_DISPATCHER_MEDIA=true). Its s3_multipart request
+# transform turns JSON batch lines into the multipart bodies the media
+# backends need, reading s3:// references from the dev SeaweedFS that also
+# holds the gateway's files. The mediaecho test server stands in for vLLM's
+# speech-to-text and vllm-omni's image edits.
+ap:
+  imagePullPolicy: Never
+  transport: "redis-sortedset"
+  concurrency: 1
+  prometheusCacheTTL: "0s"
+  otel:
+    endpoint: "http://jaeger.default.svc.cluster.local:4317"
+    insecure: true
+    sampler: "always_on"
+    samplerArg: "1.0"
+  metrics:
+    enabled: true
+    port: 9093
+    secure: false
+  # Storage keys for s3_multipart, from the gateway's own Secret: the same
+  # store and credentials the batch gateway uses for files.
+  env:
+    - name: AWS_ACCESS_KEY_ID
+      value: "s3admin"
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: batch-gateway-secrets
+          key: s3-secret-access-key
+  transformConfig:
+    requestTransforms:
+      - name: media
+        type: s3_multipart
+        parameters:
+          endpoint: "http://seaweedfs.default.svc.cluster.local:8333"
+          region: "us-east-1"
+          usePathStyle: true
+          allowedBuckets: ["llm-d-batch-gateway"]
+  transportConfig:
+    urlSecret:
+      url: "redis://redis-master.default.svc.cluster.local:6379"
+    result_queue_name: "result-list"
+    poll_interval_ms: 500
+    batch_size: 10
+    queues:
+      - queue_name: "llm-d-async:requests:media-pool"
+        request_path_url: "/v1/audio/transcriptions"
+        igw_base_url: "http://media-echo.default.svc.cluster.local:8000"
+        gate_type: "constant"
+        gate_params: {}
+  modelServerMonitor:
+    enabled: false
