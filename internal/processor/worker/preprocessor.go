@@ -170,7 +170,7 @@ func (p *Processor) preProcessJob(ctx context.Context, jobInfo *batch_types.JobI
 			return nil, fmt.Errorf("write line %d to input file %q: %w", lineCount, localInputFilePath, err)
 		}
 
-		requestMeta, err := extractAndValidateLine(line, p.endpointAllowlist, jobInfo.BatchJob.Endpoint.String())
+		requestMeta, err := extractAndValidateLine(line, p.endpointAllowlist, jobInfo.BatchJob.Endpoint.String(), p.cfg.GroupFirstUserMessage)
 		if err != nil {
 			return nil, fmt.Errorf("validate request at line %d: %w", lineCount, err)
 		}
@@ -285,7 +285,7 @@ type requestMeta struct {
 
 // extractAndValidateLine parses and validates a request line and returns the
 // metadata needed during ingestion.
-func extractAndValidateLine(line []byte, endpointAllowlist openai.EndpointAllowlist, batchEndpoint string) (requestMeta, error) {
+func extractAndValidateLine(line []byte, endpointAllowlist openai.EndpointAllowlist, batchEndpoint string, groupFirstUserMessage bool) (requestMeta, error) {
 	var req planRequestLine
 	trimmedLine := bytes.TrimSuffix(line, []byte{'\n'})
 	if err := json.Unmarshal(trimmedLine, &req); err != nil {
@@ -320,6 +320,16 @@ func extractAndValidateLine(line []byte, endpointAllowlist openai.EndpointAllowl
 	}
 
 	prefixHash := NoPrefixHash
+	if groupFirstUserMessage && len(req.Body.Messages) > 0 && req.Body.Messages[0].Role == "user" {
+		// Group only an entire plain-string first user message. The existing
+		// system-message selection below takes precedence.
+		var firstText string
+		if json.Unmarshal(req.Body.Messages[0].Content, &firstText) == nil && firstText != "" {
+			h := fnv.New32a()
+			h.Write([]byte(firstText))
+			prefixHash = h.Sum32()
+		}
+	}
 	for _, msg := range req.Body.Messages {
 		if msg.Role != "system" {
 			continue

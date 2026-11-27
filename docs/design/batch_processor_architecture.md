@@ -472,9 +472,13 @@ Goals:
 -   Ensure fairness across models via bounded per-endpoint concurrency
 -   Prevent system overload via global concurrency cap
 
+An operator can also set `group_first_user_message: true` in the processor configuration, or `processor.config.groupFirstUserMessage=true` in Helm. The default is false. When enabled, an identical, nonempty plain-string first message with role `user` is eligible for grouping. The existing first nonempty system-message text still takes precedence. Content-part user messages and later turns do not select this fallback. Requests and result IDs are unchanged.
+
+This ordering hint does not tokenize prompts, compare partial prefixes or change the inference backend's cache keys. Its benefit depends on the model's rendered prompt and prefix-cache support. Grouping stays within one job and model. Dispatch order may change; equal-hash relative order and per-prefix latency are not guaranteed. The backend remains responsible for correct cache matching and tenant isolation. Deploy the matching processor image before enabling the setting; disabling it restores system-only grouping for subsequent preprocessing.
+
 **Limitation — PrefixHash grouping (exact match only):**
 
-The current implementation hashes the full system prompt text using FNV-32a and groups requests with identical hashes. This means only requests with **exactly the same** system prompt are grouped together — requests with **similar but not identical** prompts are not considered neighbors.
+The implementation hashes the selected complete system-message text, or the opted-in first user message, using FNV-32a. It groups identical hashes. It does not place similar but different strings next to each other.
 
 This is a known limitation. Downstream inference engines (e.g., vLLM) perform prefix matching at the token level, where even partially overlapping prompts can benefit from KV cache reuse. A more advanced approach (e.g., greedy string prefix matching or token-aware grouping) could capture these "similar prefix" cases, but adds complexity (tokenization dependency, O(n²) comparisons, etc.) that is out of scope for the MVP.
 
