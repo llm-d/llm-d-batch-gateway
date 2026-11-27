@@ -33,11 +33,13 @@ type Endpoint string
 
 // Supported batch API endpoints
 const (
-	EndpointResponses       Endpoint = "/v1/responses"
-	EndpointChatCompletions Endpoint = "/v1/chat/completions"
-	EndpointEmbeddings      Endpoint = "/v1/embeddings"
-	EndpointCompletions     Endpoint = "/v1/completions"
-	EndpointModerations     Endpoint = "/v1/moderations"
+	EndpointResponses           Endpoint = "/v1/responses"
+	EndpointChatCompletions     Endpoint = "/v1/chat/completions"
+	EndpointEmbeddings          Endpoint = "/v1/embeddings"
+	EndpointCompletions         Endpoint = "/v1/completions"
+	EndpointModerations         Endpoint = "/v1/moderations"
+	EndpointAudioTranscriptions Endpoint = "/v1/audio/transcriptions"
+	EndpointAudioTranslations   Endpoint = "/v1/audio/translations"
 )
 
 // EndpointAllowlist reports which batch endpoints are accepted. The zero value accepts
@@ -83,7 +85,9 @@ func isDefaultEndpoint(endpoint Endpoint) bool {
 		EndpointChatCompletions,
 		EndpointEmbeddings,
 		EndpointCompletions,
-		EndpointModerations:
+		EndpointModerations,
+		EndpointAudioTranscriptions,
+		EndpointAudioTranslations:
 		return true
 	default:
 		return false

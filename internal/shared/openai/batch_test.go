@@ -38,6 +38,8 @@ func TestEndpointAllowlist(t *testing.T) {
 			EndpointEmbeddings,
 			EndpointCompletions,
 			EndpointModerations,
+			EndpointAudioTranscriptions,
+			EndpointAudioTranslations,
 		} {
 			if !defaults.IsValid(endpoint.String()) {
 				t.Errorf("zero-value allowlist rejected default endpoint %q", endpoint)

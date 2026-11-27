@@ -491,6 +491,105 @@ func TestTenantMetadata(t *testing.T) {
 	}
 }
 
+func TestPlanFileSource_ProduceAsyncProviderMetadata(t *testing.T) {
+	dir := t.TempDir()
+	request := `{"custom_id":"audio-1","method":"POST","url":"/v1/audio/transcriptions","body":{"model":"whisper","gcs_uri":"https://storage.googleapis.com/bucket/audio.wav","language":"en"}}` + "\n"
+	inputPath := filepath.Join(dir, "input.jsonl")
+	if err := os.WriteFile(inputPath, []byte(request), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writePlanFile(t, filepath.Join(dir, "plans"), "whisper", []planEntry{
+		{Offset: 0, Length: uint32(len(request))},
+	})
+
+	inputFile, err := os.Open(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inputFile.Close()
+
+	cfg := config.NewConfig()
+	cfg.DispatchMode = config.DispatchModeAsync
+	cfg.TenantMetadataKey = "userid"
+	cfg.AsyncDispatchConfig.Models = map[string]config.AsyncModelConfig{
+		"whisper": {InferencePoolName: "whisper-pool", Provider: "whisper"},
+	}
+
+	source := NewPlanFileSource(PlanFileSourceConfig{
+		InputFile: inputFile,
+		PlansDir:  filepath.Join(dir, "plans"),
+		ModelMap:  &modelMapFile{SafeToModel: map[string]string{"whisper": "whisper"}, LineCount: 1},
+		Cfg:       cfg,
+		TenantID:  "tenant-a",
+		Logger:    logr.Discard(),
+	})
+
+	out := make(chan pipeline.RequestItem, 1)
+	if err := source.Produce(context.Background(), out); err != nil {
+		t.Fatalf("Produce error: %v", err)
+	}
+	items := []pipeline.RequestItem{}
+	for item := range out {
+		items = append(items, item)
+	}
+	if len(items) != 1 {
+		t.Fatalf("produced %d items, want 1", len(items))
+	}
+	if got := items[0].Metadata["provider"]; got != "whisper" {
+		t.Fatalf("metadata provider = %q, want %q", got, "whisper")
+	}
+	if got := items[0].Metadata["userid"]; got != "tenant-a" {
+		t.Fatalf("metadata userid = %q, want %q", got, "tenant-a")
+	}
+}
+
+func TestPlanFileSource_ProduceNormalFileMediaUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	request := `{"custom_id":"audio-2","method":"POST","url":"/v1/audio/transcriptions","body":{"model":"whisper","file":"data:audio/wav;base64,QUJD","language":"en"}}` + "\n"
+	inputPath := filepath.Join(dir, "input.jsonl")
+	if err := os.WriteFile(inputPath, []byte(request), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writePlanFile(t, filepath.Join(dir, "plans"), "whisper", []planEntry{
+		{Offset: 0, Length: uint32(len(request))},
+	})
+
+	inputFile, err := os.Open(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inputFile.Close()
+
+	cfg := config.NewConfig()
+	cfg.DispatchMode = config.DispatchModeAsync
+	cfg.AsyncDispatchConfig.Models = map[string]config.AsyncModelConfig{
+		"whisper": {InferencePoolName: "whisper-pool", Provider: "whisper"},
+	}
+
+	source := NewPlanFileSource(PlanFileSourceConfig{
+		InputFile: inputFile,
+		PlansDir:  filepath.Join(dir, "plans"),
+		ModelMap:  &modelMapFile{SafeToModel: map[string]string{"whisper": "whisper"}, LineCount: 1},
+		Cfg:       cfg,
+		Logger:    logr.Discard(),
+	})
+
+	out := make(chan pipeline.RequestItem, 1)
+	if err := source.Produce(context.Background(), out); err != nil {
+		t.Fatalf("Produce error: %v", err)
+	}
+	item, ok := <-out
+	if !ok {
+		t.Fatal("no request produced")
+	}
+	if got := item.Body["file"]; got != "data:audio/wav;base64,QUJD" {
+		t.Fatalf("body file = %v, want original data URL", got)
+	}
+	if _, exists := item.Body["gcs_uri"]; exists {
+		t.Fatal("body gcs_uri unexpectedly added")
+	}
+}
+
 func TestPlanFileSource_Produce_MultipleModels(t *testing.T) {
 	dir := t.TempDir()
 

@@ -455,9 +455,12 @@ tests:
       processor.config.dispatchMode: async
       processor.config.asyncDispatch:
         resultPollTimeout: "30s"
+        gcsSignedURLHosts:
+          - "storage.googleapis.com"
         models:
           "sim-model":
             inferencePoolName: "sim-pool"
+            provider: "whisper"
           "sim-model-inject":
             inferencePoolName: "sim-pool-inject"
     asserts:
@@ -467,6 +470,12 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: 'async_dispatch:[\s\S]*models:[\s\S]*"sim-model":[\s\S]*inference_pool_name: "sim-pool"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'async_dispatch:[\s\S]*gcs_signed_url_hosts:[\s\S]*- "storage.googleapis.com"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '"sim-model":[\s\S]*provider: "whisper"'
       - matchRegex:
           path: data["config.yaml"]
           pattern: '"sim-model-inject":[\s\S]*inference_pool_name: "sim-pool-inject"'

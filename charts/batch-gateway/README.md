@@ -246,6 +246,54 @@ checkpoint may therefore cause inference to run again. SQL does not preserve
 completed results across the crash window and should not be treated as
 Redis-equivalent recovery.
 
+### Signed GCS audio media
+
+For `/v1/audio/transcriptions` and `/v1/audio/translations`, `body.gcs_uri` may
+reference private GCS media with a signed HTTPS URL. The processor validates the
+URL host, signature, and expiry before dispatch, requires `dispatchMode: async`,
+and sends the model's `provider` value as async request metadata. The processor
+does not download the object; llm-d-async downloads it before inference.
+For now, `http://`, `gs://`, and all other schemes are rejected.
+Both GCS V4 signing algorithms are accepted: `GOOG4-RSA-SHA256` and
+`GOOG4-HMAC-SHA256`.
+Batch results must be JSON. Audio requests with `response_format` set to
+`text`, `srt`, or `vtt` are rejected; use `json` or `verbose_json`.
+
+```yaml
+processor:
+  config:
+    asyncDispatch:
+      gcsSignedURLHosts:
+        - storage.googleapis.com
+      models:
+        whisper:
+          inferencePoolName: whisper-pool
+          provider: whisper
+```
+
+Configure the llm-d-async transform on the separately deployed chart. The
+llm-d-async version must include `gcs_file_multipart`:
+
+```yaml
+ap:
+  transformConfig:
+    requestTransforms:
+      - name: gcs-media
+        type: gcs_file_multipart
+        parameters:
+          providers: ["whisper"]
+          allowedHosts: '["storage.googleapis.com"]'
+          maxFileBytes: "4194304"
+```
+
+The transform downloads the GCS object with the signed URL, writes the bytes to
+the multipart `file` field, and removes `gcs_uri` from the request sent to vLLM.
+Keep `allowedHosts` aligned with `gcsSignedURLHosts`; for a virtual-hosted URL,
+list the exact bucket hostname in both fields. Audio requests must use
+`body.gcs_uri`; inline `body.file` and `body.file_base64` media are not supported
+on these endpoints. Other endpoint request bodies are unchanged. Treat signed
+URLs as secrets; do not copy complete URLs into logs.
+
 ## Usage
 
 ### Method 1: Using a Custom Values File

@@ -61,11 +61,20 @@ data:
       result_poll_timeout: {{ .Values.processor.config.asyncDispatch.resultPollTimeout | quote }}
       poll_interval: {{ default "1s" .Values.processor.config.asyncDispatch.pollInterval | quote }}
       max_connections: {{ .Values.processor.config.asyncDispatch.maxConnections }}
+      {{- if .Values.processor.config.asyncDispatch.gcsSignedURLHosts }}
+      gcs_signed_url_hosts:
+        {{- range .Values.processor.config.asyncDispatch.gcsSignedURLHosts }}
+        - {{ . | quote }}
+        {{- end }}
+      {{- end }}
       {{- if .Values.processor.config.asyncDispatch.models }}
       models:
         {{- range $model, $cfg := .Values.processor.config.asyncDispatch.models }}
         {{ $model | quote }}:
           inference_pool_name: {{ $cfg.inferencePoolName | quote }}
+          {{- if $cfg.provider }}
+          provider: {{ $cfg.provider | quote }}
+          {{- end }}
           {{- if $cfg.inferenceObjective }}
           inference_objective: {{ $cfg.inferenceObjective | quote }}
           {{- end }}
