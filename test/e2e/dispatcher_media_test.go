@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -124,13 +125,30 @@ func doTestMediaImageEdit(t *testing.T) {
 
 // doTestMediaOtherTenantFileRejected references another tenant's upload in
 // the shared files bucket. The processor must fail the batch at ingestion,
-// before the transform reads the object with its storage credentials.
+// before the transform reads the object with its storage credentials, and for
+// that reason rather than another one.
 func doTestMediaOtherTenantFileRejected(t *testing.T) {
 	ref := mustUploadMedia(t, "media-other-"+testRunID, "clip.wav", randomMedia(t))
 
+	since := time.Now().UTC().Add(-time.Second).Format(time.RFC3339)
 	line := fmt.Sprintf(`{"custom_id":"x","method":"POST","url":%q,"body":{"model":%q,"file":%q}}`, mediaTranscription, mediaModel, ref)
 	batchID := mustCreateMediaBatch(t, mediaTranscription, line)
 	waitForIngestionFailure(t, batchID, 2*time.Minute)
+
+	// The batch API does not carry the reason, so read it from the processor.
+	// kubectl works here: TestDispatcherMedia only runs after reading the
+	// processor config with it.
+	out, err := exec.Command("kubectl", "logs",
+		"-l", fmt.Sprintf("app.kubernetes.io/instance=%s,app.kubernetes.io/component=processor", testHelmRelease),
+		"-n", testNamespace,
+		"--since-time="+since,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("kubectl logs failed: %v\n%s", err, out)
+	}
+	if logs := string(out); !strings.Contains(logs, ref) || !strings.Contains(logs, "outside this tenant's files") {
+		t.Fatalf("processor logs since %s do not reject %s as outside this tenant's files:\n%s", since, ref, logs)
+	}
 }
 
 // runMediaBatch submits one line per custom_id, waits for completion, and

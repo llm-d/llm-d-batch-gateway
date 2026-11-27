@@ -81,7 +81,9 @@ func (m mediaRules) check(line []byte, endpoint string) error {
 	if err := json.Unmarshal(line, &req); err != nil {
 		return err
 	}
-	if openai.Endpoint(endpoint) == openai.EndpointImagesEdits {
+	// By suffix, like IsMultipartMediaEndpoint: a prefixed image edit path
+	// must get the image rules, not the audio ones.
+	if strings.HasSuffix(endpoint, string(openai.EndpointImagesEdits)) {
 		return m.checkImageEdit(req.Body)
 	}
 	return m.checkAudio(req.Body)
@@ -124,7 +126,11 @@ func (m mediaRules) checkImageEdit(body map[string]json.RawMessage) error {
 		if err := json.Unmarshal(raw, &ref); err != nil {
 			return fmt.Errorf("images[%d].image_url must be a string", i)
 		}
-		if err := m.checkRef(ref, "data:image/"); err != nil {
+		err := m.checkRef(ref, "data:image/")
+		if err == nil && strings.HasPrefix(ref, "data:") {
+			err = checkDataURL(ref)
+		}
+		if err != nil {
 			return fmt.Errorf("images[%d].image_url: %w", i, err)
 		}
 	}

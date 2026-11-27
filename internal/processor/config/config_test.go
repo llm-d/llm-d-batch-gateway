@@ -195,6 +195,7 @@ func TestProcessorConfig_Validate_MediaEndpointsNeedAsync(t *testing.T) {
 		{name: "sync without media endpoints", extra: []string{"/v1/classify"}},
 		{name: "sync with transcriptions", extra: []string{"/v1/classify", media[0]}, wantErr: true},
 		{name: "sync with image edits", extra: []string{media[2]}, wantErr: true},
+		{name: "sync with a prefixed media endpoint", extra: []string{"/api/v1/audio/transcriptions"}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

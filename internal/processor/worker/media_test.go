@@ -33,6 +33,9 @@ func TestExtractAndValidateLine_MediaEndpoints(t *testing.T) {
 		openai.EndpointAudioTranscriptions.String(),
 		openai.EndpointAudioTranslations.String(),
 		openai.EndpointImagesEdits.String(),
+		// The same endpoints under a path prefix, which the transform also claims.
+		"/api/v1/audio/transcriptions",
+		"/api/v1/images/edits",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +46,9 @@ func TestExtractAndValidateLine_MediaEndpoints(t *testing.T) {
 		transcribe = "/v1/audio/transcriptions"
 		translate  = "/v1/audio/translations"
 		edit       = "/v1/images/edits"
+		// Prefixed paths: the transform matches by suffix, so the checks must too.
+		prefixedTranscribe = "/api/v1/audio/transcriptions"
+		prefixedEdit       = "/api/v1/images/edits"
 	)
 
 	tests := []struct {
@@ -84,6 +90,8 @@ func TestExtractAndValidateLine_MediaEndpoints(t *testing.T) {
 		{name: "image in another tenant's folder", endpoint: edit, body: `"images":[{"image_url":"s3://files/pfx/t-mine/a.png"},{"image_url":"s3://files/pfx/t-other/b.png"}]`, wantErr: "images[1].image_url"},
 		{name: "image file_id", endpoint: edit, body: `"images":[{"file_id":"file-abc"}]`, wantErr: "file_id is not supported"},
 		{name: "non-image data URL", endpoint: edit, body: `"images":[{"image_url":"data:text/plain;base64,QUJD"}]`, wantErr: "data:image/"},
+		{name: "image data URL with invalid base64", endpoint: edit, body: `"images":[{"image_url":"data:image/png;base64,!!!"}]`, wantErr: "images[0].image_url: data URL has invalid base64"},
+		{name: "image data URL not base64", endpoint: edit, body: `"images":[{"image_url":"data:image/png,QUJD"}]`, wantErr: "images[0].image_url: data URL must be base64-encoded"},
 		{name: "no images", endpoint: edit, body: `"prompt":"x"`, wantErr: "non-empty list"},
 		{name: "empty images", endpoint: edit, body: `"images":[]`, wantErr: "non-empty list"},
 		{name: "b64_json", endpoint: edit, body: `"images":[{"image_url":"data:image/png;base64,iVBORw=="}],"response_format":"b64_json"`},
@@ -94,6 +102,15 @@ func TestExtractAndValidateLine_MediaEndpoints(t *testing.T) {
 		{name: "mask", endpoint: edit, body: `"images":[{"image_url":"data:image/png;base64,iVBORw=="}],"mask":{"image_url":"data:image/png;base64,iVBORw=="}`, wantErr: "mask is not supported"},
 		{name: "caller url field", endpoint: edit, body: `"images":[{"image_url":"data:image/png;base64,iVBORw=="}],"url":"http://example.com/a.png"`, wantErr: "url is not accepted"},
 		{name: "reference_image field", endpoint: edit, body: `"images":[{"image_url":"data:image/png;base64,iVBORw=="}],"reference_image":"x"`, wantErr: "reference_image is not accepted"},
+
+		// Media endpoints under a path prefix get the same checks.
+		{name: "prefixed transcriptions, another tenant's folder", endpoint: prefixedTranscribe, body: `"file":"s3://files/pfx/t-other/a.wav"`, wantErr: "outside this tenant's files"},
+		{name: "prefixed transcriptions, own folder", endpoint: prefixedTranscribe, body: `"file":"s3://files/pfx/t-mine/a.wav"`},
+		{name: "prefixed image edits, another tenant's folder", endpoint: prefixedEdit, body: `"images":[{"image_url":"s3://files/pfx/t-other/b.png"}]`, wantErr: "images[0].image_url"},
+		// The attack: a prefixed image edit with a valid audio-style file, so
+		// audio rules would pass it, and another tenant's image, which the
+		// transform (matching by suffix) would fetch.
+		{name: "prefixed image edits, valid file but another tenant's image", endpoint: prefixedEdit, body: `"file":"s3://files/pfx/t-mine/a.wav","images":[{"image_url":"s3://files/pfx/t-other/b.png"}]`, wantErr: "images[0].image_url"},
 
 		// Other endpoints are not media endpoints.
 		{name: "chat completions ignore media fields", endpoint: "/v1/chat/completions", body: `"messages":[{"role":"user","content":"hi"}],"file":"https://x"`},

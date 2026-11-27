@@ -23,6 +23,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -108,7 +109,10 @@ func fetch(r *http.Request, u string) ([]byte, error) {
 		}
 		return base64.StdEncoding.DecodeString(b64)
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, nil)
+	// Bound the fetch so a stuck store fails the request instead of hanging it.
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}

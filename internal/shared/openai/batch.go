@@ -52,14 +52,18 @@ const (
 )
 
 // IsMultipartMediaEndpoint reports whether endpoint is one of the media
-// endpoints that need async dispatch.
+// endpoints that need async dispatch. It matches by path suffix, as
+// llm-d-async's s3_multipart transform does, so a media endpoint enabled under
+// a prefix (e.g. /api/v1/audio/transcriptions) still gets the media checks:
+// otherwise the transform would claim a request whose references were never
+// checked.
 func IsMultipartMediaEndpoint(endpoint Endpoint) bool {
-	switch endpoint {
-	case EndpointAudioTranscriptions, EndpointAudioTranslations, EndpointImagesEdits:
-		return true
-	default:
-		return false
+	for _, media := range []Endpoint{EndpointAudioTranscriptions, EndpointAudioTranslations, EndpointImagesEdits} {
+		if strings.HasSuffix(string(endpoint), string(media)) {
+			return true
+		}
 	}
+	return false
 }
 
 // EndpointAllowlist reports which batch endpoints are accepted. The zero value accepts
