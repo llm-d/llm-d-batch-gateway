@@ -32,7 +32,10 @@ global:
   #   postgresql-url        — PostgreSQL connection URL (e.g. postgresql://[user]:[pass]@[host]/[db])
   #   redis-url             — Redis URL for llm-d-async queues when using the redis-sortedset transport
   #   inference-api-key     — API key for the inference gateway (optional; omit if not required)
-  #   s3-secret-access-key  — S3 secret access key (required when file_client.type is "s3")
+  #   s3-secret-access-key  — S3 secret access key (required when file_client.type is "s3";
+  #                          not needed for "gcs" when using Workload Identity / ADC)
+  #   apiserver-proxy-token — shared token the auth proxy sends to the API server
+  #                           (required unless apiserver.config.allowAnonymousTenant is true)
   # Create with: kubectl create secret generic <name> --from-literal=postgresql-url=postgresql://...
   secretName: "batch-gateway-secrets"
 
@@ -40,6 +43,20 @@ global:
   dbClient:
     # Database backend type: "postgresql".
     type: "postgresql"
+    postgresql:
+      pool:
+        # Max connections of each PostgreSQL pool. 0 leaves the size parsed
+        # from the PostgreSQL URL: the pgx default, max(4, CPUs of the node,
+        # not the pod's CPU limit), unless the URL sets pool_max_conns. A
+        # positive value overrides the URL.
+        # Every pool is kept at 2 or more connections, the minimum a pool
+        # needs for LISTEN, so a limit of 1 from either source is raised to 2.
+        # Each pod opens several pools from the same URL: apiserver 4,
+        # processor 5, gc 4. Budget sum(pools × pool limit × replicas) against
+        # PostgreSQL max_connections; see "PostgreSQL connection pools" in the
+        # chart README. The processor's SQL async transport pool is sized
+        # separately by processor.config.asyncDispatch.maxConnections.
+        maxConnections: 0
 
   # OpenTelemetry configuration
   otel:
@@ -68,7 +85,7 @@ global:
 
   # File client configuration
   fileClient:
-    type: "fs"  # Options: "fs", "s3"
+    type: "fs"  # Options: "fs", "s3", "gcs"
     # Filesystem client configuration (required when type is "fs")
     fs:
       basePath: "/tmp/batch-gateway"
@@ -83,8 +100,38 @@ global:
       prefix: ""
       usePathStyle: false
       autoCreateBucket: true
+    # GCS client configuration (required when type is "gcs").
+    # Authentication uses Application Default Credentials; on GKE this is normally
+    # Workload Identity bound to the component's Kubernetes ServiceAccount via
+    # the iam.gke.io/gcp-service-account annotation (see values.yaml per-component
+    # serviceAccount.annotations). No secret key from /etc/.secrets is required.
+    gcs:
+      bucket: ""
+      prefix: ""
+      projectId: ""            # required only when autoCreateBucket is true
+      autoCreateBucket: false  # opt-in: create the bucket at startup when missing.
+                               # Off by default — the gateway's day-1 job is reading
+                               # and writing objects, not provisioning buckets; when
+                               # enabled the pod's service account needs the far more
+                               # permissive roles/storage.admin instead of the
+                               # least-privilege roles/storage.objectUser.
+                               # When false, create the bucket out-of-band (Terraform,
+                               # gcloud) and grant only object-level roles.
+                               # Only runs at startup under verifyBucketOnStart=true;
+                               # the combination autoCreateBucket=true + verifyBucketOnStart=false
+                               # is rejected by the gcs client's Validate().
+      # verifyBucketOnStart runs a HeadBucket against the configured bucket at
+      # pod startup, failing fast if the bucket is missing or unreachable. The
+      # default is true everywhere (omitting it in a raw config behaves the
+      # same as the chart's explicit true). Set to false when the workload
+      # service account lacks roles/storage.bucketViewer (e.g. GKE Workload
+      # Identity granted only objectUser), since the HeadBucket otherwise fails
+      # with 403 and prevents the pod from starting. When skipped, an
+      # unreachable/non-existent bucket surfaces as an error on the first object
+      # operation instead.
+      verifyBucketOnStart: true
     # Retry configuration for file storage operations (Store, Retrieve, Delete).
-    # Set maxRetries to 0 to disable. Useful for S3 transient errors.
+    # Set maxRetries to 0 to disable. Useful for S3/GCS transient errors.
     retry:
       maxRetries: 3
       initialBackoff: "1s"
@@ -185,6 +232,14 @@ apiserver:
     observabilityPort: "8081"
     inputHeaders:
       tenant: "X-MaaS-Username"
+      # Header in which the auth proxy sends the apiserver-proxy-token value.
+      proxy_token: "X-Gateway-Token"
+    # When `allowAnonymousTenant: false`, requests must include a non-empty
+    # tenant header and a valid proxy token, otherwise the API server returns 401.
+    # When `allowAnonymousTenant: true`, a missing tenant header maps to the
+    # "default" tenant and proxy token verification is disabled. Use true only
+    # in non-production without an auth proxy.
+    allowAnonymousTenant: false
     readHeaderTimeoutSeconds: 10
     readTimeoutSeconds: 900
     writeTimeoutSeconds: 120
@@ -224,6 +279,29 @@ apiserver:
     interval: "30s"
     # Extra labels to match Prometheus Operator's serviceMonitorSelector.
     labels: {}
+
+  # NetworkPolicy for the API server pods (ingress only).
+  # The API server trusts the tenant header that the auth proxy injects, so only
+  # the proxy should be able to reach the API port. The policy has an effect only
+  # when the cluster's network plugin enforces NetworkPolicy.
+  networkPolicy:
+    enabled: false
+    api:
+      # Peers that may reach the API port (apiserver.config.port), as a list of
+      # NetworkPolicyPeer. Required when enabled. For example, the pods of the
+      # gateway "my-gateway" in the namespace "gateway-system":
+      #   - namespaceSelector:
+      #       matchLabels:
+      #         kubernetes.io/metadata.name: gateway-system
+      #     podSelector:
+      #       matchLabels:
+      #         gateway.networking.k8s.io/gateway-name: my-gateway
+      from: []
+    observability:
+      # Peers that may reach the observability port
+      # (apiserver.config.observabilityPort: /metrics, /health, /ready), such as
+      # the namespace Prometheus runs in. Empty means no peer is allowed.
+      from: []
 
   # Logging configuration
   logging:
@@ -451,6 +529,12 @@ processor:
     # Whether to send x-gateway-inference-fairness-id on inference requests.
     # false (default) omits the header entirely.
     sendFairnessHeader: false
+    # Metadata key under which the processor stores the job's tenant ID on
+    # async inference requests, so llm-d-async quota gates can tell tenants
+    # apart (redis-quota; sql-quota is on llm-d-async main, not yet released).
+    # Use "userid" to match their default attribute. Must not be traceparent
+    # or tracestate. Empty (default) omits it.
+    tenantMetadataKey: ""
     # Enable pprof profiling endpoints on the observability server (/debug/pprof/)
     enablePprof: false
 

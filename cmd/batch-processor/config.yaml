@@ -51,6 +51,30 @@ shutdown_timeout: "30s"
 # Work directory for processor
 work_dir: "/var/lib/batch-gateway/processor"
 
+# File client configuration. The processor reads batch input files from and
+# writes output/error files to this store. Type must match the apiserver.
+file_client:
+  # Implementation type: "mock" (default for dev), "fs", "s3", or "gcs"
+  type: "mock"
+  fs:
+    base_path: "/tmp/batch-gateway"
+  # S3-compatible storage (uncomment to use instead of mock)
+  # s3:
+  #   region: "us-east-1"
+  #   bucket: "llm-d-batch-gateway"  # Required: single bucket for all tenants
+  #   endpoint: ""
+  #   access_key_id: ""
+  #   prefix: ""
+  #   use_path_style: false
+  # GCS (uncomment to use instead of mock). Uses Application Default Credentials
+  # (e.g. GKE Workload Identity); no secret key required.
+  # gcs:
+  #   bucket: "llm-d-batch-gateway"  # Required: single bucket for all tenants
+  #   prefix: ""
+  #   project_id: ""                # Required only when auto_create_bucket is true
+  #   auto_create_bucket: false
+  #   verify_bucket_on_start: true  # HeadBucket at startup; required when auto_create_bucket is true
+
 # Inference gateway configuration.
 # Either global_inference_gateway or model_gateways must be configured.
 dispatch_mode: sync
@@ -100,3 +124,10 @@ default_output_expiration_seconds: 7776000  # 90 days
 # Whether to send x-gateway-inference-fairness-id on inference requests.
 # false (default) omits the fairness header entirely.
 send_fairness_header: false
+
+# Metadata key under which the job's tenant ID is stored on async inference
+# requests, so llm-d-async quota gates can tell tenants apart (redis-quota;
+# sql-quota is on llm-d-async main, not yet released). Use "userid" to match
+# their default attribute. Must not be traceparent or tracestate.
+# Empty (default) omits it.
+tenant_metadata_key: ""
