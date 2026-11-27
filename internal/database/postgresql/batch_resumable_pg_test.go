@@ -1029,3 +1029,71 @@ func TestResumableSubmitterTrackingPG(t *testing.T) {
 		}
 	})
 }
+
+// TestOpenEntriesIndexPG pins the key of the partial index over open entries.
+// The per-request entry writes look one entry up by (batch_id, request_id)
+// with an open-status filter, and the planner may serve them from this index
+// instead of the primary key. Keyed on batch_id alone it made every such
+// write scan all open entries of the batch.
+func TestOpenEntriesIndexPG(t *testing.T) {
+	tests := []struct {
+		name string
+		// setup runs before the schema is re-applied.
+		setup string
+	}{
+		{name: "fresh schema"},
+		{
+			name: "upgrade from the batch-only index",
+			setup: `CREATE INDEX IF NOT EXISTS idx_batch_entries_open
+				ON batch_entries (batch_id) WHERE status IN ('pending','in_flight')`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newResumablePgEnv(t)
+			if tt.setup != "" {
+				if _, err := env.pool.Exec(env.ctx, tt.setup); err != nil {
+					t.Fatalf("setup: %v", err)
+				}
+			}
+
+			// Any pod (re)starting runs the embedded schema.
+			batchDB, err := NewPostgresBatchDBClient(env.ctx, &PostgreSQLConfig{Url: env.url})
+			if err != nil {
+				t.Fatalf("NewPostgresBatchDBClient (schema re-run): %v", err)
+			}
+			t.Cleanup(func() { _ = batchDB.Close() })
+
+			rows, err := env.pool.Query(env.ctx,
+				`SELECT indexname, indexdef FROM pg_indexes
+				 WHERE schemaname = current_schema() AND tablename = 'batch_entries'
+				   AND indexdef LIKE '%WHERE%'`)
+			if err != nil {
+				t.Fatalf("list partial indexes: %v", err)
+			}
+			defer rows.Close()
+			partial := make(map[string]string)
+			for rows.Next() {
+				var name, def string
+				if err := rows.Scan(&name, &def); err != nil {
+					t.Fatalf("scan: %v", err)
+				}
+				partial[name] = def
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("list partial indexes: %v", err)
+			}
+
+			if def, ok := partial["idx_batch_entries_open"]; ok {
+				t.Fatalf("batch-only open-entries index still present: %s", def)
+			}
+			def, ok := partial["idx_batch_entries_open_request"]
+			if !ok {
+				t.Fatalf("idx_batch_entries_open_request missing; partial indexes: %v", partial)
+			}
+			if !strings.Contains(def, "(batch_id, request_id)") {
+				t.Fatalf("open-entries index is not keyed on (batch_id, request_id): %s", def)
+			}
+		})
+	}
+}
