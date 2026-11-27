@@ -1,7 +1,7 @@
 # Batch Gateway
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/llm-d/llm-d-batch-gateway)](https://goreportcard.com/report/github.com/llm-d/llm-d-batch-gateway)
-[![Go Version](https://img.shields.io/badge/Go-1.26-blue.svg)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go-1.27.4-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://llm-d.slack.com/archives/C0AA8772H7T)
 [![apiserver](https://img.shields.io/github/v/release/llm-d/llm-d-batch-gateway?label=apiserver)](https://github.com/llm-d/llm-d-batch-gateway/pkgs/container/batch-gateway-apiserver)
@@ -165,7 +165,7 @@ batch-gateway/
 
 ### Prerequisites
 
-- Go 1.26 or later.
+- Go 1.27.4 or later.
 - PostgreSQL 12+ (for metadata, priority queue, events, and optionally the async SQL transport).
 - Redis 6+ or Valkey 8+ (only for async dispatch with `redis-sortedset`).
 - S3-compatible object storage or local filesystem.
@@ -275,6 +275,8 @@ Images are published to:
 - `ghcr.io/llm-d/batch-gateway-gc`
 
 ## API Usage
+
+The API server scopes each request to the tenant in the tenant header (`X-MaaS-Username` by default), which the auth proxy must set from the authenticated caller's identity. By default, a missing tenant header or a missing or invalid shared proxy token (`X-Gateway-Token` by default) results in `401`; see the [security guide](docs/guides/security.md#1-authentication). Set `allow_anonymous_tenant: true` only for non-production use without an auth proxy. It disables the token check and maps a missing tenant header to the `default` tenant.
 
 ### Submit a Batch Job
 

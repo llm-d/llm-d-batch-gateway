@@ -17,7 +17,6 @@ package e2e_test
 import (
 	"fmt"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -53,38 +52,26 @@ func doTestConcurrentBatches(t *testing.T) {
 	}
 
 	// Wait for all batches concurrently.
-	type result struct {
-		index int
-		batch *openai.Batch
-	}
-	results := make([]result, batchCount)
-	var wg sync.WaitGroup
-	wg.Add(batchCount)
 	for i, bid := range batchIDs {
-		go func(idx int, batchID string) {
-			defer wg.Done()
-			b, _ := waitForBatchStatus(t, batchID, 5*time.Minute, openai.BatchStatusCompleted)
-			results[idx] = result{index: idx, batch: b}
-		}(i, bid)
-	}
-	wg.Wait()
+		i, bid := i, bid
+		t.Run(fmt.Sprintf("Batch%d", i), func(t *testing.T) {
+			t.Parallel()
 
-	// Verify each batch completed independently.
-	for _, r := range results {
-		b := r.batch
-		if b.RequestCounts.Total != 2 {
-			t.Errorf("batch %d (%s): total = %d, want 2", r.index, b.ID, b.RequestCounts.Total)
-		}
-		if b.RequestCounts.Completed != 2 {
-			t.Errorf("batch %d (%s): completed = %d, want 2", r.index, b.ID, b.RequestCounts.Completed)
-		}
-		if b.RequestCounts.Failed != 0 {
-			t.Errorf("batch %d (%s): failed = %d, want 0", r.index, b.ID, b.RequestCounts.Failed)
-		}
-		if b.OutputFileID == "" {
-			t.Errorf("batch %d (%s): output_file_id is empty", r.index, b.ID)
-		}
-		t.Logf("batch %d (%s): completed (completed=%d, failed=%d)",
-			r.index, b.ID, b.RequestCounts.Completed, b.RequestCounts.Failed)
+			b, _ := waitForBatchStatus(t, bid, 5*time.Minute, openai.BatchStatusCompleted)
+			if b.RequestCounts.Total != 2 {
+				t.Errorf("batch %d (%s): total = %d, want 2", i, b.ID, b.RequestCounts.Total)
+			}
+			if b.RequestCounts.Completed != 2 {
+				t.Errorf("batch %d (%s): completed = %d, want 2", i, b.ID, b.RequestCounts.Completed)
+			}
+			if b.RequestCounts.Failed != 0 {
+				t.Errorf("batch %d (%s): failed = %d, want 0", i, b.ID, b.RequestCounts.Failed)
+			}
+			if b.OutputFileID == "" {
+				t.Errorf("batch %d (%s): output_file_id is empty", i, b.ID)
+			}
+			t.Logf("batch %d (%s): completed (completed=%d, failed=%d)",
+				i, b.ID, b.RequestCounts.Completed, b.RequestCounts.Failed)
+		})
 	}
 }

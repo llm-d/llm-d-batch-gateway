@@ -629,6 +629,7 @@ if [ -n "${VALUES_FILE}" ]; then
         --set global.secretName=batch-gateway-secrets \
         --set global.fileClient.type=fs \
         --set global.fileClient.fs.pvcName=batch-gateway-files \
+        --set apiserver.config.allowAnonymousTenant=true \
         --set gc.enabled=false \
         "${BG_EXTRA_ARGS[@]+"${BG_EXTRA_ARGS[@]}"}" >/dev/null
 

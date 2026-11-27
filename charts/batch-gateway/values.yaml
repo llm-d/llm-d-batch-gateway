@@ -34,6 +34,8 @@ global:
   #   inference-api-key     — API key for the inference gateway (optional; omit if not required)
   #   s3-secret-access-key  — S3 secret access key (required when file_client.type is "s3";
   #                          not needed for "gcs" when using Workload Identity / ADC)
+  #   apiserver-proxy-token — shared token the auth proxy sends to the API server
+  #                           (required unless apiserver.config.allowAnonymousTenant is true)
   # Create with: kubectl create secret generic <name> --from-literal=postgresql-url=postgresql://...
   secretName: "batch-gateway-secrets"
 
@@ -230,6 +232,14 @@ apiserver:
     observabilityPort: "8081"
     inputHeaders:
       tenant: "X-MaaS-Username"
+      # Header in which the auth proxy sends the apiserver-proxy-token value.
+      proxy_token: "X-Gateway-Token"
+    # When `allowAnonymousTenant: false`, requests must include a non-empty
+    # tenant header and a valid proxy token, otherwise the API server returns 401.
+    # When `allowAnonymousTenant: true`, a missing tenant header maps to the
+    # "default" tenant and proxy token verification is disabled. Use true only
+    # in non-production without an auth proxy.
+    allowAnonymousTenant: false
     readHeaderTimeoutSeconds: 10
     readTimeoutSeconds: 900
     writeTimeoutSeconds: 120
@@ -269,6 +279,29 @@ apiserver:
     interval: "30s"
     # Extra labels to match Prometheus Operator's serviceMonitorSelector.
     labels: {}
+
+  # NetworkPolicy for the API server pods (ingress only).
+  # The API server trusts the tenant header that the auth proxy injects, so only
+  # the proxy should be able to reach the API port. The policy has an effect only
+  # when the cluster's network plugin enforces NetworkPolicy.
+  networkPolicy:
+    enabled: false
+    api:
+      # Peers that may reach the API port (apiserver.config.port), as a list of
+      # NetworkPolicyPeer. Required when enabled. For example, the pods of the
+      # gateway "my-gateway" in the namespace "gateway-system":
+      #   - namespaceSelector:
+      #       matchLabels:
+      #         kubernetes.io/metadata.name: gateway-system
+      #     podSelector:
+      #       matchLabels:
+      #         gateway.networking.k8s.io/gateway-name: my-gateway
+      from: []
+    observability:
+      # Peers that may reach the observability port
+      # (apiserver.config.observabilityPort: /metrics, /health, /ready), such as
+      # the namespace Prometheus runs in. Empty means no peer is allowed.
+      from: []
 
   # Logging configuration
   logging:
