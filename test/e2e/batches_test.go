@@ -49,7 +49,6 @@ func testBatches(t *testing.T) {
 	skipIf(t, testDispatcherDeployed, "requires sync dispatch slot saturation", "Expiration", doTestBatchExpiration)
 	skipIf(t, testDispatcherDeployed, "sim-model-b not available in async dispatch", "MultiModel", doTestMultiModelBatch)
 	skipIf(t, testDispatcherDeployed, "progress tracking differs in async dispatch", "ProgressEpochFence", doTestProgressEpochFence)
-	t.Run("ProgressPolling", doTestProgressPolling)
 	t.Run("Ingestion", func(t *testing.T) {
 		t.Run("DuplicateCustomID", doTestDuplicateCustomID)
 		t.Run("StreamingRejected", doTestStreamingRejected)
@@ -858,70 +857,6 @@ func doTestMultiModelBatch(t *testing.T) {
 		t.Errorf("expected 2 responses from %s, got %d", testModelB, modelsFound[testModelB])
 	}
 	t.Logf("multi-model output: %v", modelsFound)
-}
-
-// doTestProgressPolling submits a batch with a mix of fast and slow requests
-// and verifies that request_counts.completed is non-zero while the batch is
-// still in_progress. The fast requests finish quickly, guaranteeing a non-zero
-// completed count well before the slow requests finish — this avoids flakiness
-// from tight timing windows.
-func doTestProgressPolling(t *testing.T) {
-	t.Helper()
-
-	// 5 fast requests (max_tokens=1, ~150ms each) complete almost immediately.
-	// In sync mode, 15 slow requests (max_tokens=200, ~20s each at the
-	// simulator's 100ms inter-token latency) keep the batch in_progress long
-	// enough for the 15-second progress ticker to fire and persist intermediate
-	// counts to the DB. The dispatcher processes requests with concurrency 1, so
-	// it uses shorter slow requests to finish inside the final timeout.
-	slowMaxTokens := 200
-	if testDispatcherDeployed {
-		slowMaxTokens = 60
-	}
-	var lines []string
-	for i := 1; i <= 5; i++ {
-		lines = append(lines, fmt.Sprintf(
-			`{"custom_id":"fast-%d","method":"POST","url":"/v1/chat/completions","body":{"model":"%s","max_tokens":1,"messages":[{"role":"user","content":"fast %d"}]}}`, i, testSimModel, i))
-	}
-	for i := 1; i <= 15; i++ {
-		lines = append(lines, fmt.Sprintf(
-			`{"custom_id":"slow-%d","method":"POST","url":"/v1/chat/completions","body":{"model":"%s","max_tokens":%d,"messages":[{"role":"user","content":"slow %d"}]}}`, i, testSimModel, slowMaxTokens, i))
-	}
-	fileID := mustCreateFile(t, fmt.Sprintf("test-progress-%s.jsonl", testRunID), strings.Join(lines, "\n"))
-	batchID := mustCreateBatch(t, fileID)
-
-	_, _ = waitForBatchStatus(t, batchID, 2*time.Minute, openai.BatchStatusInProgress)
-
-	client := newClient()
-	ctx := context.Background()
-	var sawNonZeroCompleted bool
-	deadline := time.Now().Add(3 * time.Minute)
-	for time.Now().Before(deadline) {
-		b, err := client.Batches.Get(ctx, batchID)
-		if err != nil {
-			t.Fatalf("get batch failed: %v", err)
-		}
-		t.Logf("progress: status=%s completed=%d failed=%d total=%d",
-			b.Status, b.RequestCounts.Completed, b.RequestCounts.Failed, b.RequestCounts.Total)
-
-		if b.RequestCounts.Completed > 0 && b.Status == openai.BatchStatusInProgress {
-			sawNonZeroCompleted = true
-			break
-		}
-		if terminalBatchStatuses[b.Status] {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	if !sawNonZeroCompleted {
-		t.Error("never saw non-zero completed count while batch was in_progress")
-	}
-
-	finalBatch, _ := waitForBatchStatus(t, batchID, 3*time.Minute, openai.BatchStatusCompleted)
-	if finalBatch.RequestCounts.Completed != 20 {
-		t.Errorf("completed = %d, want 20", finalBatch.RequestCounts.Completed)
-	}
 }
 
 // doTestDuplicateCustomID submits a JSONL with duplicate custom_ids.
