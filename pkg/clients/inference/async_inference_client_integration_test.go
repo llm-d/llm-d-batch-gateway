@@ -26,8 +26,10 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/llm-d/llm-d-async/producer"
+	producersql "github.com/llm-d/llm-d-async/producer-sql"
 	"github.com/llm-d/llm-d-async/producer-sql/sqlqueue"
 	"github.com/redis/go-redis/v9"
 )
@@ -545,6 +547,158 @@ func TestAsyncResolver_RecoveryClientFor_crossProcessor(t *testing.T) {
 	}
 
 	// A recovery client is receive-only garbage for unknown models.
+	if _, err := recoverer.RecoveryClientFor("nope", "proc-a"); err == nil {
+		t.Fatal("RecoveryClientFor for an unknown model must fail")
+	}
+}
+
+// TestAsyncResolverSQLPostgres_RecoveryClientFor_crossProcessor is the SQL
+// counterpart of TestAsyncResolver_RecoveryClientFor_crossProcessor:
+// processor A leases a result and dies before checkpointing it, the lease
+// lapses, and processor B recovers the result from A's route.
+func TestAsyncResolverSQLPostgres_RecoveryClientFor_crossProcessor(t *testing.T) {
+	sqlURL := os.Getenv("TEST_POSTGRES_URL")
+	if sqlURL == "" {
+		t.Skip("TEST_POSTGRES_URL not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	requestQueue := "sql-xp-request-" + suffix
+	resultQueue := "sql-xp-result-" + suffix
+	dispatcherID := "sql-xp-dispatcher-" + suffix
+	requestID := "sql-xp-request-" + suffix
+
+	migrateAsyncSQLSchema(t, sqlURL)
+
+	newResolver := func(consumer string) *AsyncGatewayResolver {
+		t.Helper()
+		resolver, err := NewAsyncResolver(context.Background(), AsyncClientConfig{
+			Transport:         AsyncTransportSQL,
+			SQLURL:            sqlURL,
+			ConsumerID:        consumer,
+			ResultPollTimeout: 2 * time.Second,
+			PollInterval:      10 * time.Millisecond,
+			Models: map[string]AsyncModelPoolConfig{
+				"m1": {PoolName: "sql-xp-pool-" + suffix, RequestQueueName: requestQueue, ResultQueueName: resultQueue},
+			},
+		}, testLogger(t))
+		if err != nil {
+			t.Fatalf("NewAsyncResolver(%s): %v", consumer, err)
+		}
+		t.Cleanup(func() { _ = resolver.Close() })
+		return resolver
+	}
+	owner := newResolver("proc-a")
+	recoverer := newResolver("proc-b")
+	if !owner.SupportsResultRecovery() {
+		t.Fatal("SQL resolver should support result recovery")
+	}
+
+	ownerClient := owner.SharedClientFor("m1")
+	if submitErr := ownerClient.Submit(ctx, &GenerateRequest{
+		RequestID: requestID,
+		Endpoint:  "/v1/completions",
+		Params:    map[string]any{"model": "m1", "prompt": "hello"},
+	}); submitErr != nil {
+		t.Fatalf("Submit() error: %s", submitErr.Message)
+	}
+
+	store, err := sqlqueue.Open(ctx, sqlURL)
+	if err != nil {
+		t.Fatalf("sqlqueue.Open dispatcher store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now()
+	if err := store.EnsurePartitions(ctx, requestQueue); err != nil {
+		t.Fatalf("EnsurePartitions: %v", err)
+	}
+	if _, err := store.AcquirePartitions(ctx, requestQueue, dispatcherID, now, time.Minute, sqlqueue.Partitions); err != nil {
+		t.Fatalf("AcquirePartitions: %v", err)
+	}
+	dispatched, err := store.Dispatch(ctx, requestQueue, dispatcherID, now, 1)
+	if err != nil || len(dispatched) != 1 {
+		t.Fatalf("Dispatch = %+v (err %v), want the submitted request", dispatched, err)
+	}
+	payload, err := json.Marshal(api.ResultMessage{ID: requestID, StatusCode: 200, Payload: `{"choices":[{"text":"hello"}]}`})
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	ownerRoute := resultQueue + ":proc-a"
+	acked, err := store.Ack(ctx, dispatcherID, []sqlqueue.Completion{{
+		Key:       dispatched[0].Key(),
+		Attempt:   dispatched[0].Attempt,
+		Route:     ownerRoute,
+		Payload:   string(payload),
+		ExpiresAt: time.Now().Add(time.Minute).Unix(),
+	}})
+	if err != nil || len(acked) != 1 || !acked[0] {
+		t.Fatalf("Ack = %v (err %v), want [true]", acked, err)
+	}
+
+	pool, err := pgxpool.New(ctx, sqlURL)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	rows := func() int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM async_results WHERE route = $1`, ownerRoute).Scan(&n); err != nil {
+			t.Fatalf("count results: %v", err)
+		}
+		return n
+	}
+
+	// proc-a leases the delivery, then dies before checkpointing it.
+	durableOwner, ok := ownerClient.(DurableResultClient)
+	if !ok {
+		t.Fatal("the shared async client must expose durable result delivery")
+	}
+	resp, staleAck, err := durableOwner.ReceiveResult(ctx)
+	if err != nil {
+		t.Fatalf("proc-a ReceiveResult: %v", err)
+	}
+	if resp.RequestID != requestID {
+		t.Fatalf("proc-a received %q, want %q", resp.RequestID, requestID)
+	}
+	if got := rows(); got != 1 {
+		t.Fatalf("results after lease = %d, want 1 (recoverable until acked)", got)
+	}
+
+	// The lease lapses, as time passage would.
+	if _, err := pool.Exec(ctx, `UPDATE async_results SET claim_expires_ms = 0 WHERE route = $1`, ownerRoute); err != nil {
+		t.Fatalf("backdate claim lease: %v", err)
+	}
+
+	recoveryClient, err := recoverer.RecoveryClientFor("m1", "proc-a")
+	if err != nil {
+		t.Fatalf("RecoveryClientFor: %v", err)
+	}
+	recoveryDurable, ok := recoveryClient.(DurableResultClient)
+	if !ok {
+		t.Fatal("the recovery client must expose durable result delivery")
+	}
+	resp2, ack2, err := recoveryDurable.ReceiveResult(ctx)
+	if err != nil {
+		t.Fatalf("proc-b recovery ReceiveResult: %v", err)
+	}
+	if resp2.RequestID != requestID || resp2.StatusCode != 200 || resp2.Response == nil {
+		t.Fatalf("recovered response = %+v, want the completed result", resp2)
+	}
+
+	if err := staleAck(ctx); !errors.Is(err, producersql.ErrResultDeliveryOwnershipLost) {
+		t.Fatalf("stale proc-a ack = %v, want ErrResultDeliveryOwnershipLost", err)
+	}
+	if err := ack2(ctx); err != nil {
+		t.Fatalf("recovery ack: %v", err)
+	}
+	if got := rows(); got != 0 {
+		t.Fatalf("results after recovery ack = %d, want 0", got)
+	}
+
 	if _, err := recoverer.RecoveryClientFor("nope", "proc-a"); err == nil {
 		t.Fatal("RecoveryClientFor for an unknown model must fail")
 	}

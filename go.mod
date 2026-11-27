@@ -16,11 +16,11 @@ require (
 	github.com/go-logr/logr v1.4.4
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/google/uuid v1.6.0
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/llm-d/llm-d-async/api v1.0.0
 	github.com/llm-d/llm-d-async/producer v1.0.0
 	github.com/llm-d/llm-d-async/producer-sql v0.0.0-20261103185107-3341c5455f9b
-	github.com/pashagolub/pgxmock/v5 v5.2.0
+	github.com/pashagolub/pgxmock/v6 v6.0.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/quasilyte/go-ruleguard/dsl v0.3.23
@@ -122,9 +122,9 @@ require (
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/oauth2 v0.38.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/genproto v0.0.0-20261012220534-4341edf3f941 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20261110000943-09e21b237f2c // indirect
@@ -139,3 +139,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.4.2 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/llm-d/llm-d-async/producer-sql => github.com/wseaton/llm-d-async/producer-sql v0.0.0-20261125140737-6fc9c321d580
