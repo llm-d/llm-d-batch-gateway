@@ -198,6 +198,10 @@ result accounting:
   `cancelling` and SLO-expired orphans are requeued too and finalized by
   whichever processor picks them up.
 - **Tunables** (chart values under `processor.config.resumable`):
-  `leaseDuration` (default `5m`), `finalizeConcurrency` (default `16`),
-  `finalizeTimeout` (default `30m`). All must be positive; validation fails at
-  startup otherwise.
+  `leaseDuration` (default `5m`), `checkpointConcurrency` (default `64`),
+  `finalizeConcurrency` (default `16`), `finalizeTimeout` (default `30m`).
+  All must be positive; validation fails at startup otherwise.
+  `checkpointConcurrency` applies per batch, so a processor can run
+  `numWorkers` times that many checkpoints. Its default is a starting point:
+  tune it to what the object store accepts (the PUTs have no other limit) and
+  to the resumable PostgreSQL pool, which caps the entry commits.

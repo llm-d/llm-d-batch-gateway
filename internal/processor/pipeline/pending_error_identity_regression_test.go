@@ -93,7 +93,7 @@ func TestPendingErrorIdentityDurableMixedJobs(t *testing.T) {
 				return true, nil
 			}
 			tracker := NewProgressTracker(6, nil, "job-"+job, 0, logr.Discard())
-			checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+			checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 			ch := make(chan ResultItem, 13)
 			order := []int{4, 1, 5, 0, 3, 2}
 			for _, i := range order {
@@ -163,7 +163,7 @@ func TestPendingErrorIdentityCheckpointFailure(t *testing.T) {
 		}
 		return false, failure
 	}}
-	c := NewResultCheckpointer(sink, pending, NewProgressTracker(1, nil, "job", 0, logr.Discard()), logr.Discard())
+	c := NewResultCheckpointer(sink, pending, NewProgressTracker(1, nil, "job", 0, logr.Discard()), 1, logr.Discard())
 	acked := false
 	msg := asyncResult(&inference.GenerateResponse{RequestID: "r", ErrorCode: "DEADLINE_EXCEEDED", ErrorMessage: "retained"}, logr.Discard())
 	msg.Ack = func(context.Context) error { acked = true; return nil }

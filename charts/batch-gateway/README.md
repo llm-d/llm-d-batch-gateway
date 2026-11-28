@@ -120,6 +120,7 @@ The endpoint remains batch-scoped: every request URL in the input JSONL must exa
 | Key | Default | Description |
 | --- | ------- | ----------- |
 | `processor.config.resumable.leaseDuration` | `"5m"` | Ownership lease an activated batch holds in PostgreSQL; the owning processor renews it at half this interval. |
+| `processor.config.resumable.checkpointConcurrency` | `64` | Bounds the parallel result checkpoints (one object-store PUT plus entry commits each) within one batch; a processor can hold `numWorkers` times this many. Tune it to the object store and the database: lower it when the object store throttles, and note that the resumable PostgreSQL pool caps the entry commits. |
 | `processor.config.resumable.finalizeConcurrency` | `16` | Bounds the parallel result-object fetches during resumable finalization. |
 | `processor.config.resumable.finalizeTimeout` | `"30m"` | Budget for one resumable finalization attempt. |
 

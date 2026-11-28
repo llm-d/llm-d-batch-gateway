@@ -21,9 +21,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sync/errgroup"
 
 	db "github.com/llm-d/llm-d-batch-gateway/internal/database/api"
 	"github.com/llm-d/llm-d-batch-gateway/internal/processor/metrics"
@@ -45,20 +47,30 @@ type ResultSink interface {
 // loop (metrics, sticky first error, persistence-failure abort) with one
 // addition: an ownership conflict aborts the job without a terminal write —
 // the job now belongs to another processor.
+//
+// Checkpoints run on up to concurrency goroutines: one checkpoint is an
+// object-store PUT plus entry-store round trips, so a serial loop caps a job
+// at roughly one result per PUT latency. The sink must be safe for concurrent
+// use. Deliveries of the same request are still checkpointed one at a time.
 type ResultCheckpointer struct {
 	sink                 ResultSink
 	pending              *PendingRequests
 	tracker              *ProgressTracker
 	logger               logr.Logger
+	concurrency          int
 	onPersistenceFailure func()
 }
 
-func NewResultCheckpointer(sink ResultSink, pending *PendingRequests, tracker *ProgressTracker, logger logr.Logger) *ResultCheckpointer {
+func NewResultCheckpointer(sink ResultSink, pending *PendingRequests, tracker *ProgressTracker, concurrency int, logger logr.Logger) *ResultCheckpointer {
+	if concurrency < 1 {
+		concurrency = 1
+	}
 	return &ResultCheckpointer{
-		sink:    sink,
-		pending: pending,
-		tracker: tracker,
-		logger:  logger,
+		sink:        sink,
+		pending:     pending,
+		tracker:     tracker,
+		concurrency: concurrency,
+		logger:      logger,
 	}
 }
 
@@ -76,9 +88,25 @@ func (c *ResultCheckpointer) setPersistenceFailureHook(fn func()) {
 // delivery was checkpointed) is acked; a failed one is left unacked so its
 // lease redelivers it instead of replaying the inference.
 func (c *ResultCheckpointer) Drain(ctx context.Context, resultCh <-chan ResultItem) error {
-	var firstErr error
-	var conflictErr error
+	var (
+		mu          sync.Mutex
+		firstErr    error
+		conflictErr error
+		// inflight holds the requests being checkpointed; a second delivery
+		// of one waits for the first, so duplicates are judged against its
+		// outcome exactly as in a serial drain.
+		inflight = make(map[string]chan struct{})
+	)
+	var workers errgroup.Group
+	workers.SetLimit(c.concurrency)
+
 	for msg := range resultCh {
+		mu.Lock()
+		earlier := inflight[msg.RequestID]
+		mu.Unlock()
+		if earlier != nil {
+			<-earlier
+		}
 		if !c.pending.Enrich(&msg) {
 			// A broadcast result that belongs to another job sharing the
 			// client: its owner acknowledges after its own checkpoint, so
@@ -90,41 +118,63 @@ func (c *ResultCheckpointer) Drain(ctx context.Context, resultCh <-chan ResultIt
 			metrics.DecModelInflightRequests(msg.ModelID)
 			metrics.RecordModelRequestExecutionDuration(time.Since(msg.SubmittedAt), msg.ModelID)
 		}
-		if firstErr != nil || conflictErr != nil {
-			// Not accounted for: leave the delivery unacked so lease expiry
-			// redelivers it (to this run's retry or a resumed incarnation).
-			continue
-		}
-		if err := c.checkpoint(ctx, &msg); err != nil {
-			if errors.Is(err, db.ErrConflict) {
-				conflictErr = err
-				c.logger.Error(err, "Ownership lost during checkpoint; aborting without a terminal write",
-					"requestID", msg.RequestID)
-				// Abort dispatch like a persistence failure: entries left
-				// pending would otherwise block the dispatcher forever.
+		done := make(chan struct{})
+		mu.Lock()
+		inflight[msg.RequestID] = done
+		mu.Unlock()
+		// Go blocks while concurrency checkpoints are running.
+		workers.Go(func() error {
+			defer func() {
+				mu.Lock()
+				delete(inflight, msg.RequestID)
+				mu.Unlock()
+				close(done)
+			}()
+			mu.Lock()
+			failed := firstErr != nil || conflictErr != nil
+			mu.Unlock()
+			if failed {
+				// Not accounted for: leave the delivery unacked so lease
+				// expiry redelivers it (to this run's retry or a resumed
+				// incarnation).
+				return nil
+			}
+			if err := c.checkpoint(ctx, &msg); err != nil {
+				mu.Lock()
+				if errors.Is(err, db.ErrConflict) {
+					if conflictErr == nil {
+						conflictErr = err
+					}
+					c.logger.Error(err, "Ownership lost during checkpoint; aborting without a terminal write",
+						"requestID", msg.RequestID)
+				} else {
+					if firstErr == nil {
+						firstErr = err
+					}
+					c.logger.Error(err, "Persistence failure, skipping further writes")
+				}
+				mu.Unlock()
+				// Abort dispatch: entries left pending would otherwise
+				// block the dispatcher forever.
 				if c.onPersistenceFailure != nil {
 					c.onPersistenceFailure()
 				}
-				continue
+				return nil
 			}
-			firstErr = err
-			c.logger.Error(err, "Persistence failure, skipping further writes")
-			if c.onPersistenceFailure != nil {
-				c.onPersistenceFailure()
+			// Durably accounted for (committed, or a duplicate whose earlier
+			// delivery was): acknowledging releases the delivery; a failed ack
+			// only risks a duplicate redelivery, which the first-wins entry
+			// commit drops.
+			if msg.Ack != nil {
+				if err := msg.Ack(ctx); err != nil {
+					c.logger.Info("Result delivery acknowledgement failed; its lease will redeliver it and the duplicate is dropped on commit",
+						"requestID", msg.RequestID, "err", err)
+				}
 			}
-			continue
-		}
-		// Durably accounted for (committed, or a duplicate whose earlier
-		// delivery was): acknowledging releases the delivery; a failed ack
-		// only risks a duplicate redelivery, which the first-wins entry
-		// commit drops.
-		if msg.Ack != nil {
-			if err := msg.Ack(ctx); err != nil {
-				c.logger.Info("Result delivery acknowledgement failed; its lease will redeliver it and the duplicate is dropped on commit",
-					"requestID", msg.RequestID, "err", err)
-			}
-		}
+			return nil
+		})
 	}
+	_ = workers.Wait() // workers report through firstErr/conflictErr
 	if conflictErr != nil {
 		return conflictErr
 	}

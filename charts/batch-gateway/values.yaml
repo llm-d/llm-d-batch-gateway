@@ -453,6 +453,19 @@ processor:
       # Ownership lease an activated batch holds in Postgres; the owner
       # renews it at half this interval.
       leaseDuration: "5m"
+      # Bounds the parallel result checkpoints (one object-store PUT plus
+      # entry commits each) within one batch. A processor runs up to
+      # numWorkers batches, so it can hold numWorkers × checkpointConcurrency
+      # checkpoints at once (320 with the defaults).
+      # The default is a starting point, not a measured optimum: in one test
+      # against GCS a batch stopped being limited by checkpoints at 64. Tune
+      # it to the object store and the database:
+      #   - The PUTs have no other limit. Lower the value when the object
+      #     store throttles or rejects requests.
+      #   - The entry commits take connections from the resumable PostgreSQL
+      #     pool and wait when it is exhausted, so the pool size caps them;
+      #     a value far above the pool size adds waiting, not throughput.
+      checkpointConcurrency: 64
       # Bounds the parallel result-object fetches during finalization.
       finalizeConcurrency: 16
       # Budget for one resumable finalization attempt.

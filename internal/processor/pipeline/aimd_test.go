@@ -42,7 +42,7 @@ func runPipeline(t *testing.T, items []RequestItem, dispatcher RequestDispatcher
 	total := int64(len(items))
 	tracker := NewProgressTracker(total, nil, "test-job", 0, logr.Discard())
 	pending := NewPendingRequests(total)
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	executor := NewJobExecutor(JobExecutorConfig{
 		Source:     &sliceSource{items: items},
@@ -321,7 +321,7 @@ func TestAIMDDrain_SLOExpiry_UsesBatchExpired(t *testing.T) {
 	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
 	pending := NewPendingRequests(int64(len(items)))
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 	dispatcher, err := NewAIMDDispatcher(direct,
@@ -385,7 +385,7 @@ func TestCancelDrainsUndispatched(t *testing.T) {
 	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
 	pending := NewPendingRequests(int64(len(items)))
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 	dispatcher, err := NewAIMDDispatcher(direct,
@@ -473,7 +473,7 @@ func TestCancelWithFastRequestsThrottled(t *testing.T) {
 	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(totalRequests), nil, "test-job", 0, logr.Discard())
 	pending := NewPendingRequests(int64(totalRequests))
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 	dispatcher, err := NewAIMDDispatcher(direct,
@@ -559,7 +559,7 @@ func TestCancelInProgressThrottled(t *testing.T) {
 	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(totalRequests), nil, "test-job", 0, logr.Discard())
 	pending := NewPendingRequests(int64(totalRequests))
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 	dispatcher, err := NewAIMDDispatcher(direct,
@@ -669,7 +669,7 @@ func TestCancelInProgress(t *testing.T) {
 	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(totalRequests), nil, "test-job", 0, logr.Discard())
 	pending := NewPendingRequests(int64(totalRequests))
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 	dispatcher, err := NewAIMDDispatcher(direct,
@@ -747,7 +747,7 @@ func TestExpiration(t *testing.T) {
 	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(numRequests), nil, "test-job", 0, logr.Discard())
 	pending := NewPendingRequests(int64(numRequests))
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 	dispatcher, err := NewAIMDDispatcher(direct,
@@ -799,7 +799,7 @@ func TestRetryExhaustion(t *testing.T) {
 	sink := &fakeSink{}
 	tracker := NewProgressTracker(int64(len(items)), nil, "test-job", 0, logr.Discard())
 	pending := NewPendingRequests(int64(len(items)))
-	checkpointer := NewResultCheckpointer(sink, pending, tracker, logr.Discard())
+	checkpointer := NewResultCheckpointer(sink, pending, tracker, 1, logr.Discard())
 
 	direct := NewDirectDispatcher(resolver, logr.Discard())
 
