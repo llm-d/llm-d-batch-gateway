@@ -251,6 +251,16 @@ func TestBatchHandler(t *testing.T) {
 					reqBody: `{"input_file_id":"file-invalid-cw","endpoint":"/v1/chat/completions","completion_window":"abc"}`,
 				},
 				{
+					name:    "NegativeCompletionWindow",
+					reqBody: `{"input_file_id":"file-abc123","endpoint":"/v1/chat/completions","completion_window":"-24h"}`,
+					wantMsg: "completion_window must be a positive duration (e.g., 24h)",
+				},
+				{
+					name:    "ZeroCompletionWindow",
+					reqBody: `{"input_file_id":"file-abc123","endpoint":"/v1/chat/completions","completion_window":"0s"}`,
+					wantMsg: "completion_window must be a positive duration (e.g., 24h)",
+				},
+				{
 					name:    "MissingEndpoint",
 					reqBody: `{"input_file_id":"file-abc123","completion_window":"24h"}`,
 				},

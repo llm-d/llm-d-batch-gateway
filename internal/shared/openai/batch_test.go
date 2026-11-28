@@ -113,6 +113,42 @@ func TestValidateWithEndpointAllowlist(t *testing.T) {
 	}
 }
 
+func TestValidate_CompletionWindow(t *testing.T) {
+	cases := []struct {
+		name    string
+		window  string
+		wantErr string // empty means the window must be accepted
+	}{
+		{name: "24h", window: "24h"},
+		{name: "1h", window: "1h"},
+		{name: "90m", window: "90m"},
+		{name: "not a duration", window: "abc", wantErr: "must be a valid duration"},
+		{name: "negative", window: "-24h", wantErr: "must be a positive duration"},
+		{name: "negative 1ns", window: "-1ns", wantErr: "must be a positive duration"},
+		{name: "zero with unit", window: "0s", wantErr: "must be a positive duration"},
+		{name: "bare zero", window: "0", wantErr: "must be a positive duration"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := validRequest()
+			req.CompletionWindow = tc.window
+			err := req.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("Validate() rejected completion_window %q: %v", tc.window, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate() accepted completion_window %q, want error", tc.window)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Validate() error = %q, want it to contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidate_MetadataTooManyKeys(t *testing.T) {
 	req := validRequest()
 	req.Metadata = make(map[string]string, 17)
