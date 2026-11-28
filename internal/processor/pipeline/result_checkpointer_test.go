@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -591,4 +592,84 @@ func TestResultCheckpointer_Concurrency(t *testing.T) {
 			t.Fatalf("sink called %d times, want 1", calls)
 		}
 	})
+
+	// A checkpoint fails while another is running: the running one completes
+	// and is acknowledged, and one that has not started is skipped and left
+	// unacknowledged for redelivery.
+	failures := []struct {
+		name string
+		err  error
+	}{
+		{name: "persistence failure with another checkpoint in flight", err: errors.New("s3 down")},
+		{name: "ownership conflict with another checkpoint in flight", err: fmt.Errorf("checkpoint entry: %w", db.ErrConflict)},
+	}
+	for _, tc := range failures {
+		t.Run(tc.name, func(t *testing.T) {
+			pending := NewPendingRequests(0)
+			acks := new(ackTracker)
+			inFlight := make(chan struct{})
+			failed := make(chan struct{})
+			var mu sync.Mutex
+			var calls []string
+			sink := &fakeSink{}
+			sink.fn = func(msg *ResultItem) (bool, error) {
+				mu.Lock()
+				calls = append(calls, msg.RequestID)
+				mu.Unlock()
+				switch msg.RequestID {
+				case "req-running":
+					close(inFlight)
+					// Complete only after the other checkpoint has failed.
+					<-failed
+					return true, nil
+				case "req-failing":
+					<-inFlight
+					return false, tc.err
+				default:
+					return true, nil
+				}
+			}
+			c := NewResultCheckpointer(sink, pending, NewProgressTracker(3, nil, "test-job", 0, logr.Discard()), 2, logr.Discard())
+			var hookCalls int
+			// The hook runs once the failure is recorded.
+			c.onPersistenceFailure = func() {
+				hookCalls++
+				close(failed)
+			}
+
+			// With a bound of 2, req-late starts only when the failing
+			// checkpoint has released its slot.
+			ids := []string{"req-running", "req-failing", "req-late"}
+			ch := make(chan ResultItem, len(ids))
+			for _, id := range ids {
+				pending.Store(RequestItem{RequestID: id, CustomID: "c-" + id})
+				r := successResult(id)
+				r.Ack = acks.ackFor(id)
+				ch <- r
+			}
+			close(ch)
+
+			if err := c.Drain(context.Background(), ch); !errors.Is(err, tc.err) {
+				t.Fatalf("Drain error = %v, want %v", err, tc.err)
+			}
+			if hookCalls != 1 {
+				t.Fatalf("dispatch abort hook called %d times, want 1", hookCalls)
+			}
+			if got := calls; len(got) != 2 {
+				t.Fatalf("sink called for %v, want only the two checkpoints that started before the failure", got)
+			}
+			recorded := sink.recorded()
+			if len(recorded) != 1 || recorded[0].msg.RequestID != "req-running" {
+				t.Fatalf("committed checkpoints = %d, want only req-running", len(recorded))
+			}
+			if got := acks.acked(); len(got) != 1 || got[0] != "req-running" {
+				t.Fatalf("acked = %v, want [req-running]", got)
+			}
+			left := pending.IDs()
+			slices.Sort(left)
+			if !slices.Equal(left, []string{"req-failing", "req-late"}) {
+				t.Fatalf("pending after drain = %v, want [req-failing req-late]", left)
+			}
+		})
+	}
 }
