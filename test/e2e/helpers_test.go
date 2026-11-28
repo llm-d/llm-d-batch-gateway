@@ -381,6 +381,25 @@ func waitForIngestionFailure(t *testing.T, batchID string, timeout time.Duration
 	return nil
 }
 
+// assertInputLineError checks that a batch that failed ingestion reports the
+// input line and the field at fault in its errors list.
+func assertInputLineError(t *testing.T, batch *openai.Batch, wantLine int64, wantParam string) {
+	t.Helper()
+	if len(batch.Errors.Data) != 1 {
+		t.Fatalf("batch %s: errors.data has %d entries, want 1 (errors: %s)", batch.ID, len(batch.Errors.Data), batch.Errors.RawJSON())
+	}
+	got := batch.Errors.Data[0]
+	if got.Line != wantLine {
+		t.Errorf("batch %s: errors.data[0].line = %d, want %d", batch.ID, got.Line, wantLine)
+	}
+	if got.Param != wantParam {
+		t.Errorf("batch %s: errors.data[0].param = %q, want %q", batch.ID, got.Param, wantParam)
+	}
+	if got.Code == "" || got.Message == "" {
+		t.Errorf("batch %s: errors.data[0] has an empty code or message: %s", batch.ID, got.RawJSON())
+	}
+}
+
 // waitForOrphanTerminal polls a batch until it reaches the specified terminal
 // status. Unlike waitForBatchStatus, it skips validateTerminalBatch and
 // validateBatchResults because the reconciler's state transition preserves

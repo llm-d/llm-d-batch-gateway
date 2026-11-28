@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,7 @@ import (
 	"github.com/llm-d/llm-d-batch-gateway/internal/util/clientset"
 	ucom "github.com/llm-d/llm-d-batch-gateway/internal/util/com"
 	"github.com/llm-d/llm-d-batch-gateway/pkg/clients/inference"
+	"k8s.io/utils/ptr"
 )
 
 // durableJobEnv bundles the processor and mock stores of a durable (async
@@ -1957,6 +1959,59 @@ func TestHandleJobError_Resumable_MidRunFailureFinalizesThroughTheFence(t *testi
 	}
 	if errLines[0].Error == nil || errLines[0].Error.Code != string(batch_types.ErrCodeBatchFailed) {
 		t.Fatalf("error line = %+v, want code %s", errLines[0], batch_types.ErrCodeBatchFailed)
+	}
+}
+
+// TestHandleJobError_Resumable_InputLineErrorReportsErrors verifies that a
+// resumed pickup whose input no longer passes validation (for example its
+// endpoint was removed from the configuration during a rollout) reports the
+// line in the errors list, like a fresh batch does.
+func TestHandleJobError_Resumable_InputLineErrorReportsErrors(t *testing.T) {
+	const jobID = "job-resumable-input-line-error"
+
+	env := setupDurableJob(t, jobID, []string{"test-model", "test-model"})
+
+	env.jobItem.Status = mustJSON(t, openai.BatchStatusInfo{Status: openai.BatchStatusInProgress})
+	env.jobItem.Epoch = 2
+	if err := env.dbClient.DBStore(testLoggerCtx(t), env.jobItem); err != nil {
+		t.Fatalf("DBStore job item: %v", err)
+	}
+	env.stageResumedClaim(t, 2,
+		checkpointedLineEntry(t, env, jobID, "req-1", 0),
+		pendingLineEntry(jobID, "req-2", 1),
+	)
+
+	// No result sink: preprocessing fails before recoverResumable builds it.
+	env.p.handleJobError(testLoggerCtx(t), &jobExecutionParams{
+		updater: NewStatusUpdater(env.dbClient),
+		jobItem: env.jobItem,
+		jobInfo: env.jobInfo,
+		task:    &db.BatchJobPriority{ID: jobID, SLO: time.Now().Add(1 * time.Hour), Epoch: 2, Resumable: true},
+	}, fmt.Errorf("validate request at line %d: %w", 2, &inputLineError{
+		line:  2,
+		param: "url",
+		err:   errors.New("invalid endpoint: /v1/custom"),
+	}))
+
+	status := durableJobStatus(t, env)
+	if status.Status != openai.BatchStatusFailed {
+		t.Fatalf("status = %s, want failed", status.Status)
+	}
+	wantCounts := openai.BatchRequestCounts{Total: 2, Completed: 1, Failed: 1}
+	if status.RequestCounts != wantCounts {
+		t.Fatalf("counts = %+v, want %+v", status.RequestCounts, wantCounts)
+	}
+	want := &openai.BatchErrors{
+		Object: "list",
+		Data: []openai.BatchError{{
+			Code:    "invalid_request",
+			Message: "invalid endpoint: /v1/custom",
+			Param:   ptr.To("url"),
+			Line:    ptr.To(int64(2)),
+		}},
+	}
+	if !reflect.DeepEqual(status.Errors, want) {
+		t.Fatalf("errors = %s, want %s", mustJSON(t, status.Errors), mustJSON(t, want))
 	}
 }
 

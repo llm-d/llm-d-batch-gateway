@@ -1090,7 +1090,7 @@ func TestHandleFailed_Finalization_RecordsCountsOnly(t *testing.T) {
 	before := gatherHistogramSampleCount(t, "batch_job_e2e_latency_seconds", map[string]string{"status": "failed"})
 
 	ctx := testLoggerCtx(t)
-	if err := env.p.handleFailed(ctx, env.updater, dbJob, counts, ji); err != nil {
+	if err := env.p.handleFailed(ctx, env.updater, dbJob, counts, ji, nil); err != nil {
 		t.Fatalf("handleFailed: %v", err)
 	}
 
@@ -1136,7 +1136,7 @@ func TestHandleFailed_CancelledCtx_StillWritesDB(t *testing.T) {
 	cancelledCtx, cancel := context.WithCancel(testLoggerCtx(t))
 	cancel()
 
-	if err := env.p.handleFailed(cancelledCtx, env.updater, dbJob, counts, nil); err != nil {
+	if err := env.p.handleFailed(cancelledCtx, env.updater, dbJob, counts, nil, nil); err != nil {
 		t.Fatalf("handleFailed with cancelled ctx: %v", err)
 	}
 
